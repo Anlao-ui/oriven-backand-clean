@@ -3070,6 +3070,29 @@ html{ background:#0B0B0B; }
   font-size:13px;color:rgba(240,237,230,0.45);margin:0;
 }
 
+/* Type selector row */
+.gcm-type-row{
+  display:flex;gap:8px;margin-bottom:14px;
+}
+.gcm-type-chip{
+  display:inline-flex;align-items:center;gap:6px;
+  padding:8px 14px;border-radius:20px;
+  border:1px solid rgba(255,255,255,0.12);
+  background:rgba(255,255,255,0.05);
+  color:rgba(240,237,230,0.55);
+  font-size:13px;font-weight:500;font-family:inherit;
+  cursor:pointer;transition:background .15s,border-color .15s,color .15s;
+}
+.gcm-type-chip:hover{
+  border-color:rgba(82,183,136,0.4);
+  color:rgba(240,237,230,0.85);
+}
+.gcm-type-chip-on{
+  background:rgba(82,183,136,0.14);
+  border-color:rgba(82,183,136,0.5);
+  color:#52B788;
+}
+
 .gcm-input{
   width:100%;background:rgba(255,255,255,0.06);
   border:1px solid rgba(255,255,255,0.10);

@@ -1,6 +1,6 @@
 // ════════════════════════════════════════════════════════════
-// GUEST FLOW — in-app try-before-signup experience
-// Journey: App loads → 2-step onboarding → Create 1 image → Gate → Signup
+// GUEST FLOW — try-before-signup experience
+// Journey: Intro → What to create → Generate 1 result → Gate → Signup
 // State:   localStorage "guestGenerationUsed" = "true"
 // ════════════════════════════════════════════════════════════
 
@@ -8,18 +8,18 @@ var _isGuestMode       = false;
 var _guestLastImageUrl = null;
 var _guestGenerating   = false;
 var _originalNavigate  = null;
+var _guestCreateType   = "image"; // "image" | "ads" | "campaign"
 
-// ── Entry point (called from auth.js DOMContentLoaded + signout) ──
+// ── Entry point (called from auth.js on no-session + on signout) ──
 
 function showGuestLanding(){
   _isGuestMode       = true;
   _guestGenerating   = false;
   _guestLastImageUrl = null;
 
-  // Show the real app UI — guests land directly inside
   showApp();
 
-  // Hook navigate() to intercept locked tabs
+  // Hook navigate() to block locked tabs
   if(typeof navigate === "function" && !_originalNavigate){
     _originalNavigate = navigate;
     navigate = function(page){
@@ -32,85 +32,61 @@ function showGuestLanding(){
     };
   }
 
-  // Add capture-phase click interceptor on locked sidebar items
   _guestInstallTabGuard();
 
-  // Land on dashboard
+  // Patch openAIFlow to block website builder for guests
+  if(typeof openAIFlow === "function" && !_originalOpenAIFlow){
+    _originalOpenAIFlow = openAIFlow;
+    openAIFlow = function(type){
+      if(_isGuestMode && type === "web"){
+        _showGuestWebLock();
+        return;
+      }
+      _originalOpenAIFlow(type);
+    };
+  }
+
+  // Land on dashboard in background
   if(typeof _originalNavigate === "function") _originalNavigate("dashboard");
 
-  // Already generated on a prior visit → go straight to gate
+  // Already generated on a prior visit → skip straight to gate
   if(localStorage.getItem("guestGenerationUsed") === "true"){
     setTimeout(function(){ _showGuestGate(); }, 400);
     return;
   }
 
-  // Show intro screen first
+  // Show clean intro screen
   setTimeout(function(){ _guestShowIntro(); }, 400);
 }
 
 // Kept for backwards-compat
 function hideGuestLanding(){}
 
+var _originalOpenAIFlow = null;
+
 // ── Intro screen ──────────────────────────────────────────────
 
 function _guestShowIntro(){
   var overlay = document.getElementById("guestOnboard");
   if(!overlay) return;
-  overlay.classList.remove("gob-dim");
   overlay.style.display   = "block";
   overlay.style.opacity   = "0";
   overlay.style.transition = "";
   requestAnimationFrame(function(){
-    overlay.style.transition = "opacity 0.35s ease";
+    overlay.style.transition = "opacity 0.4s ease";
     overlay.style.opacity    = "1";
-  });
-  // Show intro, hide everything else
-  var intro = document.getElementById("gobIntro");
-  if(intro) { intro.style.display = "flex"; intro.style.opacity = "1"; }
-  ["gobOverview","gobStep1","gobStep2","gobSpotlight"].forEach(function(id){
-    var el = document.getElementById(id);
-    if(el) el.style.display = "none";
   });
 }
 
 function _guestOnboardStart(){
-  var intro = document.getElementById("gobIntro");
-  if(intro){
-    intro.style.transition = "opacity 0.25s ease";
-    intro.style.opacity    = "0";
-    setTimeout(function(){
-      intro.style.display = "none";
-      _guestShowOverview();
-    }, 250);
-  } else {
-    _guestShowOverview();
+  var overlay = document.getElementById("guestOnboard");
+  if(overlay){
+    overlay.style.transition = "opacity 0.25s ease";
+    overlay.style.opacity    = "0";
+    setTimeout(function(){ overlay.style.display = "none"; }, 250);
   }
-}
-
-function _guestShowOverview(){
-  var ov = document.getElementById("gobOverview");
-  if(!ov) { _guestOnboard(1); return; }
-  ov.style.display   = "flex";
-  ov.style.opacity   = "0";
-  ov.style.transition = "";
-  requestAnimationFrame(function(){
-    ov.style.transition = "opacity 0.3s ease";
-    ov.style.opacity    = "1";
-  });
-}
-
-function _guestOverviewContinue(){
-  var ov = document.getElementById("gobOverview");
-  if(ov){
-    ov.style.transition = "opacity 0.22s ease";
-    ov.style.opacity    = "0";
-    setTimeout(function(){
-      ov.style.display = "none";
-      _guestOnboard(1);
-    }, 220);
-  } else {
-    _guestOnboard(1);
-  }
+  // Go straight to the create modal — no tour
+  setTimeout(function(){ _guestShowCreateModal(); }, 200);
 }
 
 // ── Tab guard — intercept locked sidebar items ────────────────
@@ -140,111 +116,10 @@ function _guestRemoveTabGuard(){
   });
 }
 
-// ── Guest Onboarding (2 steps before first generation) ────────
-
-function _guestOnboard(step){
-  var overlay = document.getElementById("guestOnboard");
-  if(!overlay) return;
-
-  // Spotlight creates its own darkness — no full-screen dim needed
-  overlay.classList.remove("gob-dim");
-  overlay.style.display   = "block";
-  overlay.style.opacity   = "0";
-  overlay.style.transition = "";
-  requestAnimationFrame(function(){
-    overlay.style.transition = "opacity 0.3s ease";
-    overlay.style.opacity    = "1";
-  });
-
-  // Intro and overview only show during initial entry
-  var intro = document.getElementById("gobIntro");
-  if(intro) intro.style.display = "none";
-  var ov = document.getElementById("gobOverview");
-  if(ov) ov.style.display = "none";
-
-  var s1 = document.getElementById("gobStep1");
-  var s2 = document.getElementById("gobStep2");
-  if(s1) s1.style.display = step === 1 ? "" : "none";
-  if(s2) s2.style.display = step === 2 ? "" : "none";
-
-  if(step === 1)      _guestSpotlightDashboard();
-  else if(step === 2) _guestSpotlightCreate();
-}
-
-// Shared card positioning helper — anchors card to the right of the sidebar
-function _gobPositionCard(card, targetRect){
-  var sidebar = document.getElementById("sidebar");
-  var vw = window.innerWidth;
-  var sr  = sidebar ? sidebar.getBoundingClientRect() : { right: 0, width: 0 };
-  var anchorLeft = (sr.width > 0 ? sr.right : targetRect.right) + 24;
-  var anchorTop  = Math.max(targetRect.top - 12, 24);
-
-  if(vw > 600 && anchorLeft + 330 <= vw - 12){
-    // Desktop: right of sidebar, vertically aligned with the nav item
-    card.style.left      = anchorLeft + "px";
-    card.style.top       = anchorTop + "px";
-    card.style.bottom    = "auto";
-    card.style.transform = "none";
-  } else {
-    // Mobile: centred above bottom safe area
-    card.style.left      = "50%";
-    card.style.top       = "auto";
-    card.style.bottom    = "80px";
-    card.style.transform = "translateX(-50%)";
-  }
-}
-
-function _guestSpotlightDashboard(){
-  var dashNi    = document.querySelector(".ni[data-page='dashboard']");
-  var spotlight = document.getElementById("gobSpotlight");
-  var card      = document.getElementById("gobStep1");
-  if(!spotlight || !dashNi) return;
-
-  var r = dashNi.getBoundingClientRect();
-  if(r.width > 0 && r.height > 0){
-    spotlight.style.top    = (r.top    - 6) + "px";
-    spotlight.style.left   = (r.left   - 6) + "px";
-    spotlight.style.width  = (r.width  + 12) + "px";
-    spotlight.style.height = (r.height + 12) + "px";
-    spotlight.style.display = "block";
-  }
-  if(card) _gobPositionCard(card, r);
-}
-
-function _guestSpotlightCreate(){
-  var createNi  = document.querySelector(".ni[data-page='create']");
-  var spotlight = document.getElementById("gobSpotlight");
-  var card      = document.getElementById("gobStep2");
-  if(!spotlight || !createNi) return;
-
-  var r = createNi.getBoundingClientRect();
-  if(r.width > 0 && r.height > 0){
-    spotlight.style.top    = (r.top    - 6) + "px";
-    spotlight.style.left   = (r.left   - 6) + "px";
-    spotlight.style.width  = (r.width  + 12) + "px";
-    spotlight.style.height = (r.height + 12) + "px";
-    spotlight.style.display = "block";
-  }
-  if(card) _gobPositionCard(card, r);
-}
-
-function _guestOnboardNext(){
-  _guestOnboard(2);
-}
-
-function _guestOnboardCreate(){
-  var overlay = document.getElementById("guestOnboard");
-  if(overlay){
-    overlay.style.opacity = "0";
-    setTimeout(function(){ overlay.style.display = "none"; }, 280);
-  }
-  if(typeof _originalNavigate === "function") _originalNavigate("create");
-  setTimeout(function(){ _guestShowCreateModal(); }, 250);
-}
-
-// ── Guest Create Modal ────────────────────────────────────────
+// ── Create Modal ──────────────────────────────────────────────
 
 function _guestShowCreateModal(){
+  _guestSetType("image"); // reset to default type
   var modal = document.getElementById("guestCreateModal");
   if(!modal) return;
   modal.style.display   = "flex";
@@ -255,7 +130,13 @@ function _guestShowCreateModal(){
     modal.style.opacity    = "1";
   });
   var inp = document.getElementById("gcInput");
-  if(inp) setTimeout(function(){ inp.focus(); }, 350);
+  if(inp){
+    inp.value = "";
+    setTimeout(function(){ inp.focus(); }, 350);
+  }
+  // Reset result area
+  var resultArea = document.getElementById("gcResultArea");
+  if(resultArea) resultArea.style.display = "none";
 }
 
 function _guestCreateBack(){
@@ -264,8 +145,37 @@ function _guestCreateBack(){
     modal.style.opacity = "0";
     setTimeout(function(){ modal.style.display = "none"; }, 280);
   }
-  if(typeof _originalNavigate === "function") _originalNavigate("dashboard");
+  // Return to intro screen
+  setTimeout(function(){ _guestShowIntro(); }, 200);
 }
+
+// ── Type selection ────────────────────────────────────────────
+
+function _guestSetType(type){
+  _guestCreateType = type;
+
+  document.querySelectorAll(".gcm-type-chip").forEach(function(c){
+    c.classList.toggle("gcm-type-chip-on", c.dataset.type === type);
+  });
+
+  var inp = document.getElementById("gcInput");
+  var placeholders = {
+    image:    "e.g. A clean product shot for a skincare brand…",
+    ads:      "e.g. Facebook ads for a gym membership app…",
+    campaign: "e.g. Summer launch for an eco clothing brand…"
+  };
+  if(inp) inp.placeholder = placeholders[type] || "";
+
+  var label = document.getElementById("gcGenLabel");
+  var labels = {
+    image:    "Generate image",
+    ads:      "Generate ads",
+    campaign: "Generate campaign"
+  };
+  if(label) label.textContent = labels[type] || "Generate";
+}
+
+// ── Generation ────────────────────────────────────────────────
 
 async function _guestGenerate(){
   if(_guestGenerating) return;
@@ -298,68 +208,24 @@ async function _guestGenerate(){
   if(labelEl)    labelEl.textContent = "Generating…";
   if(inputEl)    inputEl.disabled    = true;
   if(resultArea) resultArea.style.display = "";
+
   var secEl     = document.getElementById("gcSecondaryResult");
   var secTextEl = document.getElementById("gcSecondaryText");
   if(secEl) secEl.style.display = "none";
+
   if(resultImg){
     resultImg.innerHTML =
       '<div class="gl-generating">'
       + '<div class="gl-gen-dots"><span></span><span></span><span></span></div>'
-      + '<span>Creating your visual…</span>'
+      + '<span>Creating your result…</span>'
       + '</div>';
   }
 
   try {
-    var res  = await fetch(API_BASE_URL + "/api/generate-image", {
-      method:  "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        prompt:      prompt + ". Professional, high-quality, clean visual. No watermarks.",
-        size:        "1024x1024",
-        type:        "image",
-        imageFormat: "1:1"
-      })
-    });
-    var data = await res.json();
-
-    if(data && data.imageUrl){
-      _guestLastImageUrl = data.imageUrl;
-      if(resultImg){
-        resultImg.innerHTML =
-          '<img src="' + data.imageUrl + '" alt="Your creation" style="width:100%;display:block;border-radius:12px">';
-      }
-
-      // Generate a caption alongside the image
-      if(labelEl) labelEl.textContent = "Adding caption…";
-      if(secEl && secTextEl){
-        secEl.style.display = "";
-        secTextEl.innerHTML =
-          '<span class="gl-gen-dots" style="display:inline-flex;gap:4px">'
-          + '<span></span><span></span><span></span>'
-          + '</span>';
-      }
-      try {
-        var textRes  = await fetch(API_BASE_URL + "/api/generate-text", {
-          method:  "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            prompt: "Write one short punchy social media caption (max 2 sentences) for this creative concept: " + prompt,
-            type:   "captions"
-          })
-        });
-        var textData = await textRes.json();
-        if(textData && textData.result && secTextEl){
-          secTextEl.textContent = textData.result;
-        } else {
-          if(secEl) secEl.style.display = "none";
-        }
-      } catch(textErr){
-        if(secEl) secEl.style.display = "none";
-      }
-
-      setTimeout(function(){ _showGuestGate(data.imageUrl); }, 1200);
+    if(_guestCreateType === "image"){
+      await _guestGenerateImage(prompt, resultImg, secEl, secTextEl, labelEl);
     } else {
-      _guestResetAfterError();
+      await _guestGenerateText(prompt, resultImg, labelEl);
     }
   } catch(err){
     console.error("[Guest] Generation error:", err);
@@ -367,21 +233,121 @@ async function _guestGenerate(){
   }
 }
 
+async function _guestGenerateImage(prompt, resultImg, secEl, secTextEl, labelEl){
+  var res  = await fetch(API_BASE_URL + "/api/generate-image", {
+    method:  "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      prompt:      prompt + ". Professional, high-quality, clean visual. No watermarks.",
+      size:        "1024x1024",
+      type:        "image",
+      imageFormat: "1:1"
+    })
+  });
+  var data = await res.json();
+
+  if(!data || !data.imageUrl){ _guestResetAfterError(); return; }
+
+  _guestLastImageUrl = data.imageUrl;
+  if(resultImg){
+    resultImg.innerHTML =
+      '<img src="' + data.imageUrl + '" alt="Your creation" style="width:100%;display:block;border-radius:12px">';
+  }
+
+  // Caption alongside the image
+  if(labelEl) labelEl.textContent = "Adding caption…";
+  if(secEl && secTextEl){
+    secEl.style.display = "";
+    secTextEl.innerHTML =
+      '<span class="gl-gen-dots" style="display:inline-flex;gap:4px">'
+      + '<span></span><span></span><span></span></span>';
+  }
+  try {
+    var textRes  = await fetch(API_BASE_URL + "/api/generate-text", {
+      method:  "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        prompt: "Write one short punchy social media caption (max 2 sentences) for: " + prompt,
+        type:   "captions"
+      })
+    });
+    var textData = await textRes.json();
+    if(textData && textData.result && secTextEl){
+      secTextEl.textContent = textData.result;
+    } else {
+      if(secEl) secEl.style.display = "none";
+    }
+  } catch(e){ if(secEl) secEl.style.display = "none"; }
+
+  setTimeout(function(){ _showGuestGate(data.imageUrl); }, 1200);
+}
+
+async function _guestGenerateText(prompt, resultImg, labelEl){
+  var textPrompts = {
+    ads:      "Generate 3 short, punchy ad copy variations for: " + prompt
+              + ". Format: numbered list. Each ad has one bold headline and one body sentence.",
+    campaign: "Write a campaign brief for: " + prompt
+              + ". Include: concept (1 sentence), target audience, key message, and 2 ad angles."
+  };
+  var textPrompt = textPrompts[_guestCreateType] || textPrompts.ads;
+
+  var res  = await fetch(API_BASE_URL + "/api/generate-text", {
+    method:  "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ prompt: textPrompt, type: _guestCreateType })
+  });
+  var data = await res.json();
+
+  if(!data || !data.result){ _guestResetAfterError(); return; }
+
+  if(resultImg){
+    resultImg.innerHTML =
+      '<div style="padding:20px 18px;font-size:13.5px;line-height:1.8;color:rgba(240,237,230,0.82);white-space:pre-wrap;font-family:inherit">'
+      + _guestEsc(data.result)
+      + '</div>';
+  }
+  setTimeout(function(){ _showGuestGate(); }, 1400);
+}
+
+function _guestEsc(s){
+  return String(s)
+    .replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;");
+}
+
 function _guestResetAfterError(){
   localStorage.removeItem("guestGenerationUsed");
   _guestGenerating = false;
-  var btn        = document.getElementById("gcGenBtn");
-  var labelEl    = document.getElementById("gcGenLabel");
-  var inputEl    = document.getElementById("gcInput");
-  var resultArea = document.getElementById("gcResultArea");
-  if(btn)        btn.disabled        = false;
-  if(labelEl)    labelEl.textContent = "Create your first result";
-  if(inputEl)    inputEl.disabled    = false;
-  if(resultArea) resultArea.style.display = "none";
+  var btn      = document.getElementById("gcGenBtn");
+  var labelEl  = document.getElementById("gcGenLabel");
+  var inputEl  = document.getElementById("gcInput");
+  var resArea  = document.getElementById("gcResultArea");
+  var labels   = { image: "Generate image", ads: "Generate ads", campaign: "Generate campaign" };
+  if(btn)     btn.disabled        = false;
+  if(labelEl) labelEl.textContent = labels[_guestCreateType] || "Generate";
+  if(inputEl) inputEl.disabled    = false;
+  if(resArea) resArea.style.display = "none";
   if(typeof toast === "function") toast("Could not generate — please try again.");
 }
 
-// ── Locked Tab Screen ─────────────────────────────────────────
+// ── Website builder lock ──────────────────────────────────────
+
+function _showGuestWebLock(){
+  var titleEl = document.getElementById("glsTitle");
+  var descEl  = document.getElementById("glsDesc");
+  if(titleEl) titleEl.textContent = "Website Builder";
+  if(descEl)  descEl.textContent  = "Create an account to build and publish AI-generated landing pages.";
+  var screen = document.getElementById("guestLockScreen");
+  if(!screen) return;
+  screen.style.display   = "flex";
+  screen.style.opacity   = "0";
+  screen.style.transition = "";
+  requestAnimationFrame(function(){
+    screen.style.transition = "opacity 0.25s ease";
+    screen.style.opacity    = "1";
+  });
+}
+
+// ── Locked tab screen ─────────────────────────────────────────
 
 function _showGuestLockScreen(page){
   var titles = {
@@ -392,11 +358,11 @@ function _showGuestLockScreen(page){
     team:        "Team"
   };
   var descs = {
-    studio:      "Save and manage everything you create. Your brand assets, campaigns, and creative history — all in one place.",
-    inspiration: "Get ready-to-use concepts and creative ideas tailored to your brand style.",
-    settings:    "Customize your brand identity, workspace, and preferences.",
+    studio:      "Save and manage your brand assets, campaigns, and creative history.",
+    inspiration: "Get ready-to-use concepts and creative ideas tailored to your brand.",
+    settings:    "Customize your brand identity and workspace preferences.",
     usage:       "Track your generation usage and plan limits.",
-    team:        "Invite your team and collaborate on brand creation together."
+    team:        "Invite your team and collaborate on brand creation."
   };
 
   var titleEl = document.getElementById("glsTitle");
@@ -425,7 +391,7 @@ function _hideGuestLockScreen(){
   }, 250);
 }
 
-// ── Gate Modal (post-generation, no dismiss) ───────────────────
+// ── Gate Modal (post-generation — no dismiss) ─────────────────
 
 function _showGuestGate(imageUrl){
   var gate = document.getElementById("guestGate");
@@ -461,7 +427,6 @@ function _ggShow(view){
     var el = document.getElementById(id);
     if(el){ el.textContent = ""; el.style.display = "none"; }
   });
-  // Clear all input error states on view switch
   _ggClearErr(["ggFirst","ggLast","ggEmail","ggPass","ggLoginEmail","ggLoginPass"]);
 }
 
@@ -595,6 +560,12 @@ function _guestOnSignedIn(user){
     _originalNavigate = null;
   }
 
+  // Restore original openAIFlow
+  if(_originalOpenAIFlow){
+    openAIFlow = _originalOpenAIFlow;
+    _originalOpenAIFlow = null;
+  }
+
   // Remove tab guards
   _guestRemoveTabGuard();
 
@@ -607,6 +578,9 @@ function _guestOnSignedIn(user){
     }
   });
 
-  // Hand off to normal auth flow — triggers onboarding check
+  // Clear guest generation flag — user now has an account
+  localStorage.removeItem("guestGenerationUsed");
+
+  // Hand off to normal auth flow
   onUserSignedIn(user);
 }

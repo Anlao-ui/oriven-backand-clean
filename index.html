@@ -1836,85 +1836,25 @@
 
 
 <!-- ════════════════════════════════════════════════════════════
-     GUEST ONBOARDING OVERLAY — intro + 2-step spotlight tour
+     GUEST ONBOARDING OVERLAY — clean intro screen
      ════════════════════════════════════════════════════════════ -->
 <div id="guestOnboard" style="display:none">
 
-  <!-- Intro screen -->
-  <div id="gobIntro" class="gob-intro" style="display:none">
+  <div id="gobIntro" class="gob-intro">
     <div class="gob-blob gob-blob-1"></div>
     <div class="gob-blob gob-blob-2"></div>
     <div class="gob-intro-inner">
       <p class="gob-intro-eyebrow">AI Brand Studio</p>
-      <h1 class="gob-intro-title">Your brand.<br>Built in minutes.</h1>
-      <p class="gob-intro-body">Oriven turns one idea into ads, visuals, landing pages, and full campaigns — all aligned to your brand.</p>
-      <p class="gob-intro-sub">No account needed to try.</p>
+      <h1 class="gob-intro-title">Build your brand and<br>content in minutes.</h1>
+      <p class="gob-intro-body">From one idea to ads, visuals and campaigns.</p>
       <button class="btn btn-p gob-intro-start" onclick="_guestOnboardStart()">Get started</button>
     </div>
-  </div>
-
-  <!-- Overview panel -->
-  <div id="gobOverview" class="gob-overview" style="display:none">
-    <div class="gov-card">
-      <p class="gov-eyebrow">What you can build</p>
-      <h2 class="gov-title">One brief.<br>A full campaign.</h2>
-      <div class="gov-list">
-        <div class="gov-item">
-          <div class="gov-icon">
-            <svg viewBox="0 0 20 20" width="18" height="18" fill="none" stroke="rgba(82,183,136,0.85)" stroke-width="1.6" stroke-linecap="round"><rect x="2" y="2" width="16" height="16" rx="3.5"/><circle cx="7" cy="7" r="1.5"/><path d="M2 14l4.5-4.5 3.5 3.5 2.5-2.5 4 4"/></svg>
-          </div>
-          <div>
-            <p class="gov-name">Images &amp; Ads</p>
-            <p class="gov-desc">Generate on-brand visuals and ad creatives instantly.</p>
-          </div>
-        </div>
-        <div class="gov-item">
-          <div class="gov-icon">
-            <svg viewBox="0 0 20 20" width="18" height="18" fill="none" stroke="rgba(82,183,136,0.85)" stroke-width="1.6" stroke-linecap="round"><path d="M3 6h14M3 10h9M3 14h11"/></svg>
-          </div>
-          <div>
-            <p class="gov-name">Copy &amp; Campaigns</p>
-            <p class="gov-desc">Headlines, captions, and full campaign briefs — in your tone.</p>
-          </div>
-        </div>
-        <div class="gov-item">
-          <div class="gov-icon">
-            <svg viewBox="0 0 20 20" width="18" height="18" fill="none" stroke="rgba(82,183,136,0.85)" stroke-width="1.6" stroke-linecap="round"><rect x="2" y="3" width="16" height="14" rx="2.5"/><path d="M2 7h16"/></svg>
-          </div>
-          <div>
-            <p class="gov-name">Landing Pages</p>
-            <p class="gov-desc">Full HTML landing pages generated from your brand.</p>
-          </div>
-        </div>
-      </div>
-      <button class="gob-btn gob-btn-primary" onclick="_guestOverviewContinue()">See how it works</button>
-    </div>
-  </div>
-
-  <!-- Spotlight cutout (positioned by JS) -->
-  <div id="gobSpotlight" class="gob-spotlight"></div>
-
-  <!-- Step 1 card: Dashboard -->
-  <div id="gobStep1" class="gob-card" style="display:none">
-    <p class="gob-step">Step 1 of 2</p>
-    <h3 class="gob-title">This is your Dashboard</h3>
-    <p class="gob-text">Your hub for campaigns, creations, and brand assets. Everything you build lives here.</p>
-    <button class="gob-btn gob-btn-primary" onclick="_guestOnboardNext()" style="margin-bottom:10px">Next</button>
-    <button class="gob-btn gob-btn-ghost" onclick="_guestOnboardCreate()">Skip tour</button>
-  </div>
-
-  <!-- Step 2 card: Create -->
-  <div id="gobStep2" class="gob-card" style="display:none">
-    <p class="gob-step">Step 2 of 2</p>
-    <h3 class="gob-title">Create your first result</h3>
-    <p class="gob-text">Click Create to generate your first image or campaign. No account required.</p>
-    <button class="gob-btn gob-btn-primary" onclick="_guestOnboardCreate()">Try it now</button>
   </div>
 
 </div>
 
 <!-- ════════════════════════════════════════════════════════════
-     GUEST CREATE MODAL — 1-shot generation, no account needed
+     GUEST CREATE MODAL — type selector + 1-shot generation
      ════════════════════════════════════════════════════════════ -->
 <div id="guestCreateModal" style="display:none">
   <div class="gcm-panel">
@@ -1925,24 +1865,36 @@
     </button>
 
     <div class="gcm-top">
-      <div class="gcm-icon">
-        <svg viewBox="0 0 22 22" width="22" height="22" fill="none" stroke="#52B788" stroke-width="1.6" stroke-linecap="round"><rect x="2" y="2" width="18" height="18" rx="3"/><path d="M11 7v8M7 11h8"/></svg>
-      </div>
-      <div class="gcm-title">Start with one idea.</div>
-      <div class="gcm-sub">No account needed — try it free.</div>
+      <div class="gcm-title">What do you want to create?</div>
+      <div class="gcm-sub">Choose a type, describe your idea, and generate.</div>
+    </div>
+
+    <div class="gcm-type-row">
+      <button class="gcm-type-chip gcm-type-chip-on" data-type="image"    onclick="_guestSetType('image')">
+        <svg viewBox="0 0 16 16" width="13" height="13" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><rect x="1" y="1" width="14" height="14" rx="2.5"/><circle cx="5.5" cy="5.5" r="1.3"/><path d="M1 11l3.5-3.5 3 3 2-2 3.5 3.5"/></svg>
+        Image
+      </button>
+      <button class="gcm-type-chip" data-type="ads"      onclick="_guestSetType('ads')">
+        <svg viewBox="0 0 16 16" width="13" height="13" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><path d="M2 5h12M2 8h8M2 11h10"/></svg>
+        Ads
+      </button>
+      <button class="gcm-type-chip" data-type="campaign" onclick="_guestSetType('campaign')">
+        <svg viewBox="0 0 16 16" width="13" height="13" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><path d="M3 12L8 3l5 9"/><path d="M5.5 8.5h5"/></svg>
+        Campaign
+      </button>
     </div>
 
     <input
       type="text"
       id="gcInput"
       class="gcm-input"
-      placeholder="Describe what you want to create…"
+      placeholder="e.g. A clean product shot for a skincare brand…"
       maxlength="300"
       onkeydown="if(event.key==='Enter')_guestGenerate()"
     >
 
     <button id="gcGenBtn" class="gcm-gen-btn" onclick="_guestGenerate()">
-      <span id="gcGenLabel">Create your first result</span>
+      <span id="gcGenLabel">Generate image</span>
       <svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 8h10M9 4l4 4-4 4"/></svg>
     </button>
 
@@ -1954,7 +1906,7 @@
       </div>
     </div>
 
-    <div class="gcm-footer">1 free generation &middot; No account needed</div>
+    <div class="gcm-footer">1 free result &middot; No account needed</div>
 
   </div>
 </div>
