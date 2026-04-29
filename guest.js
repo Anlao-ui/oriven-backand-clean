@@ -241,6 +241,8 @@ async function _guestGenerate(){
   try {
     if(_guestCreateType === "image"){
       await _guestGenerateImage(prompt, resultImg, secEl, secTextEl, labelEl);
+    } else if(_guestCreateType === "campaign"){
+      await _guestGenerateCampaign(prompt, resultImg, labelEl);
     } else {
       await _guestGenerateText(prompt, resultImg, labelEl);
     }
@@ -297,6 +299,54 @@ async function _guestGenerateImage(prompt, resultImg, secEl, secTextEl, labelEl)
   } catch(e){ if(secEl) secEl.style.display = "none"; }
 
   setTimeout(function(){ _showGcGate(data.imageUrl); }, 2500);
+}
+
+async function _guestGenerateCampaign(prompt, resultImg, labelEl){
+  var count = _guestAdCount || 1;
+
+  if(labelEl) labelEl.textContent = "Building campaign…";
+  if(resultImg){
+    resultImg.innerHTML =
+      '<div class="gl-generating">'
+      + '<div class="gl-gen-dots"><span></span><span></span><span></span></div>'
+      + '<span>Generating ' + count + ' ad' + (count > 1 ? 's' : '') + ' with images…</span>'
+      + '</div>';
+  }
+
+  var campPrompt =
+    "Generate exactly " + count + " campaign ad variation" + (count > 1 ? "s" : "")
+    + " for: " + prompt
+    + ". Each: punchy headline (max 10 words), conversion-focused body (2 sentences max), short CTA (max 4 words), "
+    + "and a vivid 120-character text-free DALL-E 3 image prompt for the ad visual.";
+
+  var res  = await fetch(API_BASE_URL + "/api/generate-campaign", {
+    method:  "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ prompt: campPrompt, size: "1024x1024" })
+  });
+  var data = await res.json();
+
+  if(!data || !data.variations || !data.variations.length){ _guestResetAfterError(); return; }
+
+  if(resultImg){
+    var html = '<div class="gcm-camp-list">';
+    data.variations.forEach(function(v, i){
+      html += '<div class="gcm-camp-card">';
+      if(v.imageUrl){
+        html += '<img class="gcm-camp-img" src="' + _guestEsc(v.imageUrl) + '" alt="Ad ' + (i + 1) + '">';
+      }
+      html += '<div class="gcm-camp-body">';
+      html += '<div class="gcm-camp-num">Ad ' + (i + 1) + '</div>';
+      if(v.headline) html += '<div class="gcm-camp-headline">' + _guestEsc(v.headline) + '</div>';
+      if(v.body)     html += '<div class="gcm-camp-text">'     + _guestEsc(v.body)     + '</div>';
+      if(v.cta)      html += '<div class="gcm-camp-cta-row"><span class="gcm-camp-cta">' + _guestEsc(v.cta) + '</span></div>';
+      html += '</div></div>';
+    });
+    html += '</div>';
+    resultImg.innerHTML = html;
+  }
+
+  setTimeout(function(){ _showGcGate(); }, 2500);
 }
 
 async function _guestGenerateText(prompt, resultImg, labelEl){

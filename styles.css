@@ -3166,6 +3166,17 @@ html{ background:#0B0B0B; }
 }
 .gcm-result-img img{ width:100%;display:block;border-radius:12px; }
 
+/* Guest campaign variation cards */
+.gcm-camp-list{display:flex;flex-direction:column;gap:12px;}
+.gcm-camp-card{border-radius:12px;overflow:hidden;background:rgba(255,255,255,0.05);border:1px solid rgba(255,255,255,0.08);}
+.gcm-camp-img{width:100%;display:block;}
+.gcm-camp-body{padding:14px 16px;display:flex;flex-direction:column;gap:6px;}
+.gcm-camp-num{font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.08em;color:var(--gm,#52B788);}
+.gcm-camp-headline{font-size:15px;font-weight:700;color:#f0ede6;line-height:1.3;}
+.gcm-camp-text{font-size:13px;color:rgba(240,237,230,0.72);line-height:1.6;}
+.gcm-camp-cta-row{margin-top:4px;}
+.gcm-camp-cta{display:inline-block;padding:6px 16px;border-radius:20px;font-size:12px;font-weight:600;background:var(--gm,#52B788);color:#0B0B0B;}
+
 .gcm-footer{
   text-align:center;font-size:11.5px;color:rgba(240,237,230,0.22);
 }
