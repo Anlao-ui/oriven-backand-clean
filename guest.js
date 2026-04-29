@@ -8,7 +8,8 @@ var _isGuestMode       = false;
 var _guestLastImageUrl = null;
 var _guestGenerating   = false;
 var _originalNavigate  = null;
-var _guestCreateType   = "image"; // "image" | "ads" | "campaign"
+var _guestCreateType   = "image"; // "image" | "campaign" | "copy"
+var _guestAdCount      = 1;       // 1 | 3 | 5 (campaign only)
 
 // ── Entry point (called from auth.js on no-session + on signout) ──
 
@@ -119,6 +120,7 @@ function _guestRemoveTabGuard(){
 // ── Create Modal ──────────────────────────────────────────────
 
 function _guestShowCreateModal(){
+  _guestAdCount = 1;
   _guestSetType("image"); // reset to default type
   var modal = document.getElementById("guestCreateModal");
   if(!modal) return;
@@ -158,21 +160,32 @@ function _guestSetType(type){
     c.classList.toggle("gcm-type-chip-on", c.dataset.type === type);
   });
 
+  // Show count selector only for Campaign
+  var countRow = document.getElementById("gcCampaignCount");
+  if(countRow) countRow.style.display = type === "campaign" ? "" : "none";
+
   var inp = document.getElementById("gcInput");
   var placeholders = {
     image:    "e.g. A clean product shot for a skincare brand…",
-    ads:      "e.g. Facebook ads for a gym membership app…",
-    campaign: "e.g. Summer launch for an eco clothing brand…"
+    campaign: "e.g. Summer launch for an eco clothing brand…",
+    copy:     "e.g. Product description for a premium coffee brand…"
   };
   if(inp) inp.placeholder = placeholders[type] || "";
 
   var label = document.getElementById("gcGenLabel");
   var labels = {
     image:    "Generate image",
-    ads:      "Generate ads",
-    campaign: "Generate campaign"
+    campaign: "Generate campaign",
+    copy:     "Generate copy"
   };
   if(label) label.textContent = labels[type] || "Generate";
+}
+
+function _guestSetAdCount(n){
+  _guestAdCount = n;
+  document.querySelectorAll(".gcm-count-btn").forEach(function(b){
+    b.classList.toggle("gcm-count-btn-on", parseInt(b.dataset.count, 10) === n);
+  });
 }
 
 // ── Generation ────────────────────────────────────────────────
@@ -283,13 +296,14 @@ async function _guestGenerateImage(prompt, resultImg, secEl, secTextEl, labelEl)
 }
 
 async function _guestGenerateText(prompt, resultImg, labelEl){
+  var count = _guestAdCount || 1;
   var textPrompts = {
-    ads:      "Generate 3 short, punchy ad copy variations for: " + prompt
-              + ". Format: numbered list. Each ad has one bold headline and one body sentence.",
-    campaign: "Write a campaign brief for: " + prompt
-              + ". Include: concept (1 sentence), target audience, key message, and 2 ad angles."
+    campaign: "Generate " + count + " ad" + (count > 1 ? "s" : "") + " for: " + prompt
+              + ". Each ad: one punchy headline + one body sentence. Number them. Keep each ad short and conversion-focused.",
+    copy:     "Write engaging copy for: " + prompt
+              + ". Include a headline, a short subheadline, and 2–3 benefit-focused bullet points."
   };
-  var textPrompt = textPrompts[_guestCreateType] || textPrompts.ads;
+  var textPrompt = textPrompts[_guestCreateType] || textPrompts.copy;
 
   var res  = await fetch(API_BASE_URL + "/api/generate-text", {
     method:  "POST",
@@ -321,7 +335,7 @@ function _guestResetAfterError(){
   var labelEl  = document.getElementById("gcGenLabel");
   var inputEl  = document.getElementById("gcInput");
   var resArea  = document.getElementById("gcResultArea");
-  var labels   = { image: "Generate image", ads: "Generate ads", campaign: "Generate campaign" };
+  var labels   = { image: "Generate image", campaign: "Generate campaign", copy: "Generate copy" };
   if(btn)     btn.disabled        = false;
   if(labelEl) labelEl.textContent = labels[_guestCreateType] || "Generate";
   if(inputEl) inputEl.disabled    = false;
