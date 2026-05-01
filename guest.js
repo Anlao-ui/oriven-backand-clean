@@ -35,7 +35,7 @@ function showGuestLanding(){
 
   _guestInstallTabGuard();
 
-  // Patch openAIFlow to block website builder for guests
+  // Patch openAIFlow — block web and enforce 1-generation limit
   if(typeof openAIFlow === "function" && !_originalOpenAIFlow){
     _originalOpenAIFlow = openAIFlow;
     openAIFlow = function(type){
@@ -43,21 +43,26 @@ function showGuestLanding(){
         _showGuestWebLock();
         return;
       }
+      if(_isGuestMode){
+        if(localStorage.getItem("guestGenerationUsed") === "true"){
+          _showGuestGate();
+          return;
+        }
+        localStorage.setItem("guestGenerationUsed", "true");
+      }
       _originalOpenAIFlow(type);
     };
   }
 
-  // Land on dashboard in background
-  if(typeof _originalNavigate === "function") _originalNavigate("dashboard");
-
-  // Already generated on a prior visit → skip straight to gate
+  // Already generated on a prior visit → skip to gate
   if(localStorage.getItem("guestGenerationUsed") === "true"){
+    if(typeof _originalNavigate === "function") _originalNavigate("create");
     setTimeout(function(){ _showGuestGate(); }, 400);
     return;
   }
 
-  // Show inline hero
-  setTimeout(function(){ _guestShowHero(); }, 200);
+  // Show full black entry screen
+  setTimeout(function(){ _guestShowEntry(); }, 200);
 }
 
 // Kept for backwards-compat
@@ -65,45 +70,41 @@ function hideGuestLanding(){}
 
 var _originalOpenAIFlow = null;
 
-// ── Hero section ──────────────────────────────────────────────
+// ── Entry screen ──────────────────────────────────────────────
 
-function _guestShowHero(){
-  var hero = document.getElementById("guestHero");
-  if(!hero) return;
-  hero.style.display    = "";
-  hero.style.opacity    = "0";
-  hero.style.transition = "";
+function _guestShowEntry(){
+  var overlay = document.getElementById("guestOnboard");
+  if(!overlay) return;
+  overlay.style.display    = "flex";
+  overlay.style.opacity    = "0";
+  overlay.style.transition = "";
   requestAnimationFrame(function(){
-    hero.style.transition = "opacity 0.4s ease";
-    hero.style.opacity    = "1";
+    overlay.style.transition = "opacity 0.4s ease";
+    overlay.style.opacity    = "1";
   });
 }
 
-function _guestHideHero(){
-  var hero = document.getElementById("guestHero");
-  if(!hero) return;
-  hero.style.opacity = "0";
-  setTimeout(function(){ hero.style.display = "none"; }, 300);
+function _guestOnboardTryFree(){
+  var overlay = document.getElementById("guestOnboard");
+  if(overlay){
+    overlay.style.transition = "opacity 0.25s ease";
+    overlay.style.opacity    = "0";
+    setTimeout(function(){ overlay.style.display = "none"; }, 250);
+  }
+  if(typeof _originalNavigate === "function") _originalNavigate("create");
 }
 
-function _ghTryFree(){
-  _guestShowCreateModal();
-}
-
-function _ghFillExample(key){
-  var examples = {
-    fitness:  "Summer fitness campaign for an online personal training brand",
-    clothing: "Launch campaign for a sustainable streetwear clothing brand",
-    saas:     "Product ads for a time-tracking SaaS for freelancers"
-  };
-  _guestShowCreateModal();
+function _guestOnboardLogin(){
+  var overlay = document.getElementById("guestOnboard");
+  if(overlay){
+    overlay.style.transition = "opacity 0.25s ease";
+    overlay.style.opacity    = "0";
+    setTimeout(function(){ overlay.style.display = "none"; }, 250);
+  }
   setTimeout(function(){
-    var inp = document.getElementById("gcInput");
-    if(inp && examples[key]){
-      inp.value = examples[key];
-      inp.blur();
-    }
-  }, 380);
+    _showGuestGate();
+    setTimeout(function(){ _ggShow("login"); }, 30);
+  }, 200);
 }
 
 // ── Tab guard — intercept locked sidebar items ────────────────
