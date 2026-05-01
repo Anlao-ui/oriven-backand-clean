@@ -56,8 +56,8 @@ function showGuestLanding(){
     return;
   }
 
-  // Show clean intro screen
-  setTimeout(function(){ _guestShowIntro(); }, 400);
+  // Show inline hero
+  setTimeout(function(){ _guestShowHero(); }, 200);
 }
 
 // Kept for backwards-compat
@@ -65,104 +65,45 @@ function hideGuestLanding(){}
 
 var _originalOpenAIFlow = null;
 
-// ── Intro screen ──────────────────────────────────────────────
+// ── Hero section ──────────────────────────────────────────────
 
-function _guestShowIntro(){
-  var overlay = document.getElementById("guestOnboard");
-  if(!overlay) return;
-  overlay.style.display   = "block";
-  overlay.style.opacity   = "0";
-  overlay.style.transition = "";
+function _guestShowHero(){
+  var hero = document.getElementById("guestHero");
+  if(!hero) return;
+  hero.style.display    = "";
+  hero.style.opacity    = "0";
+  hero.style.transition = "";
   requestAnimationFrame(function(){
-    overlay.style.transition = "opacity 0.4s ease";
-    overlay.style.opacity    = "1";
+    hero.style.transition = "opacity 0.4s ease";
+    hero.style.opacity    = "1";
   });
 }
 
-function _guestOnboardStart(){
-  var intro = document.getElementById("gobIntro");
-  var pv    = document.getElementById("gobPreview");
-  if(intro){
-    intro.style.transition = "opacity 0.25s ease";
-    intro.style.opacity    = "0";
-    setTimeout(function(){ intro.style.display = "none"; }, 250);
-  }
-  if(pv){
-    pv.style.display    = "block";
-    pv.style.opacity    = "0";
-    pv.style.transition = "";
-    pv.scrollTop        = 0;
-    setTimeout(function(){
-      requestAnimationFrame(function(){
-        pv.style.transition = "opacity 0.35s ease";
-        pv.style.opacity    = "1";
-      });
-    }, 180);
-  }
+function _guestHideHero(){
+  var hero = document.getElementById("guestHero");
+  if(!hero) return;
+  hero.style.opacity = "0";
+  setTimeout(function(){ hero.style.display = "none"; }, 300);
 }
 
-function _guestPreviewBack(){
-  var pv    = document.getElementById("gobPreview");
-  var intro = document.getElementById("gobIntro");
-  if(pv){
-    pv.style.transition = "opacity 0.2s ease";
-    pv.style.opacity    = "0";
-    setTimeout(function(){ pv.style.display = "none"; }, 200);
-  }
-  if(intro){
-    intro.style.display   = "flex";
-    intro.style.opacity   = "0";
-    intro.style.transition = "";
-    setTimeout(function(){
-      requestAnimationFrame(function(){
-        intro.style.transition = "opacity 0.3s ease";
-        intro.style.opacity    = "1";
-      });
-    }, 160);
-  }
+function _ghTryFree(){
+  _guestShowCreateModal();
 }
 
-function _guestPreviewContinue(){
-  var overlay = document.getElementById("guestOnboard");
-  if(overlay){
-    overlay.style.transition = "opacity 0.25s ease";
-    overlay.style.opacity    = "0";
-    setTimeout(function(){ overlay.style.display = "none"; }, 250);
-  }
-  setTimeout(function(){ _guestShowCreateModal(); }, 200);
-}
-
-// ── Inline preview try section ────────────────────────────────
-
-var _pvSelectedType = "image";
-
-function _pvSetType(type){
-  _pvSelectedType = type;
-  document.querySelectorAll(".gob-pv-type-btn").forEach(function(b){
-    b.classList.toggle("gob-pv-type-on", b.dataset.pvtype === type);
-  });
-  var inp = document.getElementById("pvInput");
-  var ph  = {
-    image:    "e.g. A clean product shot for a skincare brand…",
-    campaign: "e.g. Summer launch for an eco clothing brand…",
-    copy:     "e.g. Product description for a premium coffee brand…"
+function _ghFillExample(key){
+  var examples = {
+    fitness:  "Summer fitness campaign for an online personal training brand",
+    clothing: "Launch campaign for a sustainable streetwear clothing brand",
+    saas:     "Product ads for a time-tracking SaaS for freelancers"
   };
-  if(inp) inp.placeholder = ph[type] || "Describe your idea…";
-}
-
-function _pvContinue(){
-  var pvInp  = document.getElementById("pvInput");
-  var prefill = pvInp ? pvInp.value.trim() : "";
-  _guestPreviewContinue();
-  // After the modal opens, apply pre-selected type and pre-filled input
+  _guestShowCreateModal();
   setTimeout(function(){
-    _guestSetType(_pvSelectedType);
-    var gcInp = document.getElementById("gcInput");
-    if(gcInp && prefill){
-      gcInp.value = prefill;
-      gcInp.blur();
+    var inp = document.getElementById("gcInput");
+    if(inp && examples[key]){
+      inp.value = examples[key];
+      inp.blur();
     }
-  }, 420);
+  }, 380);
 }
 
 // ── Tab guard — intercept locked sidebar items ────────────────
@@ -225,25 +166,6 @@ function _guestCreateBack(){
   if(modal){
     modal.style.opacity = "0";
     setTimeout(function(){ modal.style.display = "none"; }, 280);
-  }
-  // Return to preview screen (inside guestOnboard overlay)
-  var overlay = document.getElementById("guestOnboard");
-  var pv      = document.getElementById("gobPreview");
-  var intro   = document.getElementById("gobIntro");
-  if(intro) intro.style.display = "none";
-  if(overlay){
-    overlay.style.display   = "block";
-    overlay.style.opacity   = "0";
-    overlay.style.transition = "";
-    requestAnimationFrame(function(){
-      overlay.style.transition = "opacity 0.3s ease";
-      overlay.style.opacity    = "1";
-    });
-  }
-  if(pv){
-    pv.style.display = "block";
-    pv.style.opacity = "1";
-    pv.scrollTop     = 0;
   }
 }
 
@@ -751,7 +673,7 @@ function _guestOnSignedIn(user){
   _guestRemoveTabGuard();
 
   // Close all guest overlays
-  ["guestGate","guestCreateModal","guestOnboard","guestLockScreen"].forEach(function(id){
+  ["guestGate","guestCreateModal","guestOnboard","guestHero","guestLockScreen"].forEach(function(id){
     var el = document.getElementById(id);
     if(el){
       el.style.opacity = "0";

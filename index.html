@@ -753,6 +753,46 @@
 
       <div class="dash-outer">
 
+        <!-- Guest try-first hero — shown for non-authenticated users -->
+        <div id="guestHero" class="gh" style="display:none">
+          <span class="gh-badge">No account needed to start</span>
+          <h1 class="gh-title">Build your brand<br>with AI — in minutes</h1>
+          <p class="gh-sub">From one idea to content, ads and your website.</p>
+
+          <div class="gh-examples">
+            <div class="gh-ex">
+              <div class="gh-ex-hd">
+                <span class="gh-ex-dot" style="background:#52B788"></span>
+                Ad copy
+              </div>
+              <div class="gh-ex-hl">"Summer just got healthier."</div>
+              <div class="gh-ex-body">Cold-pressed juice — no sugar, no shortcuts. <em class="gh-ex-cta">Shop now →</em></div>
+            </div>
+            <div class="gh-ex">
+              <div class="gh-ex-hd">
+                <span class="gh-ex-dot" style="background:#F0B04A"></span>
+                Campaign &middot; 3 ads + images
+              </div>
+              <div class="gh-ex-hl">Ad 1: "The choice is clear." &middot; Ad 2: "Feel the difference." &middot; Ad 3: "Only 48 hours."</div>
+            </div>
+          </div>
+
+          <div class="gh-chips-row">
+            <span class="gh-chips-label">Try an example:</span>
+            <div class="gh-chips">
+              <button class="gh-chip" onclick="_ghFillExample('fitness')">Fitness brand</button>
+              <button class="gh-chip" onclick="_ghFillExample('clothing')">Clothing brand</button>
+              <button class="gh-chip" onclick="_ghFillExample('saas')">SaaS product</button>
+            </div>
+          </div>
+
+          <button class="gh-cta" onclick="_ghTryFree()">
+            Try it free
+            <svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 8h10M9 4l4 4-4 4"/></svg>
+          </button>
+          <p class="gh-note">1 free generation &middot; No signup required</p>
+        </div>
+
         <!-- HERO -->
         <div class="dash-hero">
           <h1 class="dash-headline" id="dashHeadline">Your brand is <span class="dash-hl-grad" id="dashHeadlineWord">ready.</span></h1>
@@ -1835,9 +1875,7 @@
 </div>
 
 
-<!-- ════════════════════════════════════════════════════════════
-     GUEST ONBOARDING OVERLAY — clean intro screen
-     ════════════════════════════════════════════════════════════ -->
+<!-- guestOnboard removed — hero is now inline in #page-dashboard -->
 <div id="guestOnboard" style="display:none">
 
   <div id="gobIntro" class="gob-intro">
@@ -1965,6 +2003,11 @@
       Back
     </button>
 
+    <div class="gcm-usage-bar">
+      <svg viewBox="0 0 14 14" width="12" height="12" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"><circle cx="7" cy="7" r="6"/><path d="M7 4v4l2.5 1.5"/></svg>
+      <span id="gcmUsageText">1 free generation left</span>
+    </div>
+
     <div class="gcm-top">
       <div class="gcm-title">What do you want to create?</div>
       <div class="gcm-sub">Choose a type, describe your idea, and generate.</div>
@@ -2078,8 +2121,8 @@
           <path d="M4 11l5 5 9-9"/>
         </svg>
       </div>
-      <h2 class="gg-title">Your result is ready.</h2>
-      <p class="gg-sub">Create a free account to download it, generate more, and unlock your full brand toolkit.</p>
+      <h2 class="gg-title">Want more results?</h2>
+      <p class="gg-sub">Create a free account to continue generating content, ads and your brand.</p>
       <div class="gg-cta-col">
         <button class="gg-signup-btn" onclick="_guestSignupClick()">Create free account</button>
         <button class="gg-login-link" onclick="_guestLoginClick()">Already have an account? Sign in</button>
