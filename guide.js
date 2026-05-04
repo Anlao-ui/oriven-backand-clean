@@ -17,6 +17,30 @@ var GT = {
 
 var GT_TOTAL = 6;
 
+// ── Mobile helpers ─────────────────────────────────────────────
+
+function _gtIsMobile(){
+  return window.innerWidth <= 768;
+}
+
+function _gtOpenSidebar(){
+  var sb = document.getElementById("sidebar");
+  var ov = document.getElementById("sbOverlay");
+  if(sb && !sb.classList.contains("sb-open")){
+    sb.classList.add("sb-open");
+    if(ov){ ov.style.display = "block"; }
+  }
+}
+
+function _gtCloseSidebar(){
+  var sb = document.getElementById("sidebar");
+  var ov = document.getElementById("sbOverlay");
+  if(sb && sb.classList.contains("sb-open")){
+    sb.classList.remove("sb-open");
+    if(ov){ ov.style.display = "none"; }
+  }
+}
+
 // ── Step definitions ───────────────────────────────────────────
 // navTo:     navigate() call before rendering (null = stay on current page)
 // targetSel: CSS selector for spotlight element (null = no spotlight)
@@ -156,10 +180,23 @@ function gtShow(step){
   GT.active = true;
   _gtSave(step);
 
+  var mobile      = _gtIsMobile();
+  var isNavTarget = def.targetSel && def.targetSel.indexOf("[data-page=") !== -1;
+
   // Navigate first if needed, then render after a brief settle delay
   if(def.navTo){
     navigate(def.navTo);
-    setTimeout(function(){ _gtRender(def, step); }, 240);
+    if(mobile && isNavTarget){
+      setTimeout(function(){
+        _gtOpenSidebar();
+        setTimeout(function(){ _gtRender(def, step); }, 280);
+      }, 240);
+    } else {
+      setTimeout(function(){ _gtRender(def, step); }, 240);
+    }
+  } else if(mobile && isNavTarget){
+    _gtOpenSidebar();
+    setTimeout(function(){ _gtRender(def, step); }, 260);
   } else {
     _gtRender(def, step);
   }
@@ -238,19 +275,20 @@ function _gtRender(def, step){
     }
   }
 
-  // Centered vs positioned mode
-  if(def.centered){
+  // Centered vs positioned mode (always centered on mobile)
+  var useCenter = def.centered || _gtIsMobile();
+  if(useCenter){
     tip.classList.add("gt-centered");
   } else {
     tip.classList.remove("gt-centered");
   }
 
-  // Update skip button label for final step
+  // Update skip button label for final step only
   var skipBtn = document.getElementById("gtSkipBtn");
   if(skipBtn) skipBtn.style.display = def.centered ? "none" : "";
 
   // Position, then animate in
-  _gtPositionTip(tip, targetRect, def.centered);
+  _gtPositionTip(tip, targetRect, useCenter);
   tip.classList.remove("gt-on");
   tip.style.display = "block";
   requestAnimationFrame(function(){
@@ -364,6 +402,8 @@ function gtDismiss(){
     if(spot && !spot.classList.contains("gt-on")) spot.style.display = "none";
     if(bd   && !bd.classList.contains("gt-on"))   bd.style.display   = "none";
   }, 380);
+  // Close the sidebar drawer on mobile after each step
+  if(_gtIsMobile()) _gtCloseSidebar();
 }
 
 // CTA button click

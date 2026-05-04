@@ -10,6 +10,8 @@ var _guestGenerating   = false;
 var _originalNavigate  = null;
 var _guestCreateType   = "image"; // "image" | "campaign" | "copy"
 var _guestAdCount      = 1;       // 1 | 3 | 5 (campaign only)
+var _savedGT_STEPS     = null;    // saved before guest tour overrides them
+var _savedGT_TOTAL     = null;
 
 // ── Entry point (called from auth.js on no-session + on signout) ──
 
@@ -93,7 +95,10 @@ function _guestOnboardTryFree(){
     overlay.style.opacity    = "0";
     setTimeout(function(){ overlay.style.display = "none"; }, 250);
   }
-  if(typeof _originalNavigate === "function") _originalNavigate("create");
+  if(typeof _originalNavigate === "function") _originalNavigate("dashboard");
+  setTimeout(function(){
+    if(typeof startGuestTour === "function") startGuestTour();
+  }, 450);
 }
 
 function _guestOnboardLogin(){
@@ -464,11 +469,11 @@ function _showGuestLockScreen(page){
     team:        "Team"
   };
   var descs = {
-    studio:      "Save and manage your brand assets, campaigns, and creative history.",
-    inspiration: "Get ready-to-use concepts and creative ideas tailored to your brand.",
-    settings:    "Customize your brand identity and workspace preferences.",
-    usage:       "Track your generation usage and plan limits.",
-    team:        "Invite your team and collaborate on brand creation."
+    studio:      "Create an account to start building your brand.",
+    inspiration: "Create an account to start building your brand.",
+    settings:    "Create an account to start building your brand.",
+    usage:       "Create an account to start building your brand.",
+    team:        "Create an account to start building your brand."
   };
 
   var titleEl = document.getElementById("glsTitle");
@@ -688,6 +693,130 @@ function _guestOnSignedIn(user){
   // Clear guest generation flag — user now has an account
   localStorage.removeItem("guestGenerationUsed");
 
+  // Restore guide tour to original steps if guest tour had overridden them
+  if(_savedGT_STEPS){
+    try { GT_STEPS = _savedGT_STEPS; } catch(_){}
+    _savedGT_STEPS = null;
+  }
+  if(_savedGT_TOTAL !== null){
+    try {
+      GT_TOTAL = _savedGT_TOTAL;
+      var dotsEl = document.getElementById("gtProgressDots");
+      if(dotsEl){
+        dotsEl.innerHTML = "";
+        for(var ri = 0; ri < _savedGT_TOTAL; ri++){
+          var rd = document.createElement("div");
+          rd.className = "gt-pdot";
+          dotsEl.appendChild(rd);
+        }
+      }
+    } catch(_){}
+    _savedGT_TOTAL = null;
+  }
+
   // Hand off to normal auth flow
   onUserSignedIn(user);
+}
+
+// ── Guest onboarding tour ─────────────────────────────────────
+// Overrides GT_STEPS/GT_TOTAL with a 5-step guest-safe tour that
+// spotlights locked pages without navigating to them.
+
+function startGuestTour(){
+  if(typeof GT === "undefined" || typeof gtShow !== "function") return;
+
+  // Save originals so _guestOnSignedIn can restore them
+  if(typeof GT_STEPS !== "undefined") _savedGT_STEPS = GT_STEPS;
+  if(typeof GT_TOTAL !== "undefined") _savedGT_TOTAL = GT_TOTAL;
+
+  var _guestFinalAction = function(){
+    gtComplete();
+    setTimeout(function(){
+      _showGuestGate();
+      setTimeout(function(){ _ggShow("signup"); }, 30);
+    }, 200);
+  };
+
+  GT_TOTAL = 5;
+  GT_STEPS = [
+    null, // index 0 unused — steps are 1-indexed
+
+    // Step 1 — Dashboard
+    {
+      navTo:     null,
+      targetSel: '[data-page="dashboard"]',
+      centered:  false,
+      orbMsg:    "Welcome — let me show you around",
+      title:     "Your Brand Dashboard",
+      body:      "Your command center. Launch creations, run campaigns, and manage your brand — all from here.",
+      bullets:   null,
+      cta:       "Next",
+      onAction:  function(){ gtAdvance(); }
+    },
+
+    // Step 2 — Create (safe to navigate)
+    {
+      navTo:     "create",
+      targetSel: '[data-page="create"]',
+      centered:  false,
+      orbMsg:    "This is where the magic happens",
+      title:     "Create content",
+      body:      "Images, copy, campaigns, and websites — all generated using your brand identity.",
+      bullets:   null,
+      cta:       "Next",
+      onAction:  function(){ gtAdvance(); }
+    },
+
+    // Step 3 — Studio (spotlight only, no navigation to locked page)
+    {
+      navTo:     null,
+      targetSel: '[data-page="studio"]',
+      centered:  false,
+      orbMsg:    "Your brand identity lives here",
+      title:     "Brand Studio",
+      body:      "Define your colors, fonts, and tone of voice. Everything ORIVEN creates flows from your brand identity.",
+      bullets:   null,
+      cta:       "Next",
+      onAction:  function(){ gtAdvance(); }
+    },
+
+    // Step 4 — Inspiration (spotlight only, no navigation to locked page)
+    {
+      navTo:     null,
+      targetSel: '[data-page="inspiration"]',
+      centered:  false,
+      orbMsg:    "Get inspired when you need it",
+      title:     "Ideas & Inspiration",
+      body:      "Creative frameworks, ad angles, and campaign concepts ready to use or generate from.",
+      bullets:   null,
+      cta:       "Next",
+      onAction:  function(){ gtAdvance(); }
+    },
+
+    // Step 5 — Final CTA (centered modal, no spotlight)
+    {
+      navTo:     null,
+      targetSel: null,
+      centered:  true,
+      orbMsg:    "You're ready to build something great",
+      title:     "Ready to build your brand?",
+      body:      "Create a free account to start generating — images, campaigns, and a full website in your brand's identity.",
+      bullets:   null,
+      cta:       "Create free account",
+      onAction:  _guestFinalAction
+    }
+  ];
+
+  // Rebuild progress dots for 5 steps
+  var dotsEl = document.getElementById("gtProgressDots");
+  if(dotsEl){
+    dotsEl.innerHTML = "";
+    for(var i = 0; i < 5; i++){
+      var d = document.createElement("div");
+      d.className = "gt-pdot";
+      dotsEl.appendChild(d);
+    }
+  }
+
+  setTimeout(function(){ gtShow(1); }, 600);
 }

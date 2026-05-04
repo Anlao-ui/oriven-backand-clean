@@ -3478,6 +3478,41 @@ body.dark-mode .gh-note{ color:rgba(240,237,230,0.28); }
   .gob-card{ padding:22px 20px; }
 }
 
+/* ── Light mode overrides — lock screen panel ── */
+body:not(.dark-mode) #guestLockScreen{ background:rgba(0,0,0,0.42); }
+body:not(.dark-mode) .gls-panel{
+  background:#ffffff;
+  border-color:rgba(0,0,0,0.09);
+  box-shadow:0 24px 80px rgba(0,0,0,0.18);
+}
+body:not(.dark-mode) .gls-back{ color:rgba(0,0,0,0.38); }
+body:not(.dark-mode) .gls-back:hover{ color:rgba(0,0,0,0.65); }
+body:not(.dark-mode) .gls-lock-icon{ background:rgba(0,0,0,0.04); border-color:rgba(0,0,0,0.09); color:rgba(0,0,0,0.38); }
+body:not(.dark-mode) .gls-title{ color:#18181A; }
+body:not(.dark-mode) .gls-desc{ color:rgba(0,0,0,0.5); }
+body:not(.dark-mode) .gls-login{ background:rgba(0,0,0,0.04); border-color:rgba(0,0,0,0.1); color:rgba(0,0,0,0.6); }
+body:not(.dark-mode) .gls-login:hover{ background:rgba(0,0,0,0.08); color:#18181A; }
+
+/* ── Light mode overrides — create modal panel ── */
+body:not(.dark-mode) #guestCreateModal{ background:rgba(0,0,0,0.42); }
+body:not(.dark-mode) .gcm-panel{
+  background:#ffffff;
+  border-color:rgba(0,0,0,0.09);
+  box-shadow:0 24px 80px rgba(0,0,0,0.18);
+}
+body:not(.dark-mode) .gcm-back{ color:rgba(0,0,0,0.38); }
+body:not(.dark-mode) .gcm-back:hover{ color:rgba(0,0,0,0.65); }
+body:not(.dark-mode) .gcm-title{ color:#18181A; }
+body:not(.dark-mode) .gcm-sub{ color:rgba(0,0,0,0.48); }
+body:not(.dark-mode) .gcm-input{
+  background:rgba(0,0,0,0.04);
+  border-color:rgba(0,0,0,0.12);
+  color:#18181A;
+}
+body:not(.dark-mode) .gcm-input::placeholder{ color:rgba(0,0,0,0.3); }
+body:not(.dark-mode) .gcm-input:focus{ border-color:rgba(26,66,41,0.4); background:rgba(0,0,0,0.06); }
+body:not(.dark-mode) .gcm-footer{ color:rgba(0,0,0,0.38); }
+
 /* ════════════════════════════════════════════════════════════
    GUEST GATE MODAL — post-generation signup wall
    ════════════════════════════════════════════════════════════ */
@@ -3610,6 +3645,32 @@ body.dark-mode .gh-note{ color:rgba(240,237,230,0.28); }
   #ggSignup,#ggLogin{ padding:22px 20px 24px; }
   .gg-field-row{ grid-template-columns:1fr; }
 }
+
+/* ── Light mode overrides — gate panel ── */
+body:not(.dark-mode) #guestGate{ background:rgba(0,0,0,0.42); }
+body:not(.dark-mode) .gg-panel{
+  background:#ffffff;
+  border-color:rgba(0,0,0,0.09);
+  box-shadow:0 24px 80px rgba(0,0,0,0.18);
+}
+body:not(.dark-mode) #ggMain .gg-title{ color:#18181A; }
+body:not(.dark-mode) #ggMain .gg-sub{ color:rgba(0,0,0,0.5); }
+body:not(.dark-mode) .gg-login-link{
+  background:rgba(0,0,0,0.04);
+  border-color:rgba(0,0,0,0.1);
+  color:rgba(0,0,0,0.6);
+}
+body:not(.dark-mode) .gg-login-link:hover{ background:rgba(0,0,0,0.08); color:#18181A; }
+body:not(.dark-mode) .gg-form-title{ color:#18181A; }
+body:not(.dark-mode) .gg-back-btn{ color:rgba(0,0,0,0.38); }
+body:not(.dark-mode) .gg-back-btn:hover{ color:rgba(0,0,0,0.7); }
+body:not(.dark-mode) .gg-input{
+  background:rgba(0,0,0,0.04);
+  border-color:rgba(0,0,0,0.12);
+  color:#18181A;
+}
+body:not(.dark-mode) .gg-input::placeholder{ color:rgba(0,0,0,0.3); }
+body:not(.dark-mode) .gg-input:focus{ border-color:rgba(26,66,41,0.4); background:rgba(0,0,0,0.06); }
 
 /* ════════════════════════════════════════════════════════════
    GUEST OVERVIEW PANEL — quick feature highlights

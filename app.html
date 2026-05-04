@@ -550,6 +550,40 @@
   transition: color 0.2s;
 }
 #gtSkipBtn:hover { color: #777; }
+
+/* ── Dark mode — tour tooltip ── */
+body.dark-mode #gtTip {
+  background: #111111;
+  border-color: rgba(183,255,42,0.13);
+  box-shadow: 0 4px 32px rgba(0,0,0,0.55), 0 1px 4px rgba(0,0,0,0.3);
+}
+body.dark-mode .gt-tip-title { color: #F0EDE6; }
+body.dark-mode .gt-tip-body  { color: rgba(240,237,230,0.52); }
+body.dark-mode .gt-tip-icon  { background: rgba(255,255,255,0.05); border-color: rgba(255,255,255,0.09); }
+body.dark-mode .gt-tip-close { background: rgba(255,255,255,0.07); color: rgba(240,237,230,0.42); }
+body.dark-mode .gt-tip-close:hover { background: rgba(255,255,255,0.12); color: rgba(240,237,230,0.85); }
+body.dark-mode .gt-tip-bullets li { background: rgba(183,255,42,0.06); border-left-color: rgba(183,255,42,0.28); color: rgba(240,237,230,0.62); }
+body.dark-mode .gt-tip-bullets li strong { color: #B7FF2A; }
+body.dark-mode .gt-tip-bullets li span   { color: rgba(240,237,230,0.42); }
+body.dark-mode .gt-pdot          { background: rgba(255,255,255,0.12); }
+body.dark-mode .gt-pdot.gt-pdot-on     { background: rgba(183,255,42,0.4); }
+body.dark-mode .gt-pdot.gt-pdot-active { background: #B7FF2A; }
+body.dark-mode #gtSkipBtn       { color: rgba(240,237,230,0.28); }
+body.dark-mode #gtSkipBtn:hover { color: rgba(240,237,230,0.55); }
+
+/* ── Mobile — ob-h1 responsive ── */
+@media (max-width: 640px) {
+  .ob-h1 { font-size: clamp(28px, 8vw, 44px); }
+  .ob-sub { font-size: 14px; margin-bottom: 36px; }
+}
+
+/* ── Mobile — tour tooltip always centered ── */
+@media (max-width: 768px) {
+  #gtTip.gt-centered {
+    width: calc(100vw - 40px) !important;
+    max-width: 320px !important;
+  }
+}
 </style>
 
 <!-- Supabase JS v2 CDN -->
@@ -821,14 +855,14 @@
         <div class="create-heading">
           <span class="create-eyebrow" data-i18n="create">Create</span>
           <h1 class="create-h1"><span data-i18n="createH1Line1">What would you like to</span><br><em data-i18n="createH1Line2">create today?</em></h1>
-          <p class="create-sub" data-i18n="createSub">Choose a creation type to get started. Your Brand Core shapes every output.</p>
+          <p class="create-sub" data-i18n="createSub">Create content, campaigns and websites based on your brand identity.</p>
         </div>
         <div class="create-grid">
 
           <div class="cblk cblk-image" onclick="openAIFlow('image')">
             <div class="cblk-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="4"/><circle cx="8.5" cy="8.5" r="1.5"/><path d="M3 16l5-5 4 4 3-3 5 5"/></svg></div>
             <div class="cblk-body">
-              <div class="cblk-title" data-i18n="imageTitle">Image</div>
+              <div class="cblk-title" data-i18n="imageTitle">Images</div>
               <div class="cblk-desc" data-i18n="imageDesc">Create visuals, posters, and social media designs.</div>
             </div>
             <div class="cblk-arr"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M3 8h10M9 4l4 4-4 4"/></svg></div>
@@ -846,7 +880,7 @@
           <div class="cblk cblk-campaign" onclick="openAIFlow('campaign')">
             <div class="cblk-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M3 17L7 7l4 6 3-4 5 8"/><circle cx="7" cy="7" r="1" fill="currentColor" stroke="none"/></svg></div>
             <div class="cblk-body">
-              <div class="cblk-title" data-i18n="campaignTitle">Campaign</div>
+              <div class="cblk-title" data-i18n="campaignTitle">Campaigns</div>
               <div class="cblk-desc" data-i18n="campaignDesc">Build full campaigns with visuals and copy.</div>
             </div>
             <div class="cblk-arr"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M3 8h10M9 4l4 4-4 4"/></svg></div>
@@ -855,7 +889,7 @@
           <div class="cblk cblk-video cblk-disabled">
             <div class="cblk-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="5" width="14" height="14" rx="3"/><path d="M17 9l4-2v10l-4-2"/></svg></div>
             <div class="cblk-body">
-              <div class="cblk-title" data-i18n="videoTitle">Video</div>
+              <div class="cblk-title" data-i18n="videoTitle">Videos</div>
               <div class="cblk-desc" data-i18n="videoDesc">Create video ideas, scripts, and concepts.</div>
             </div>
           </div>
@@ -863,7 +897,7 @@
           <div class="cblk cblk-web" onclick="openAIFlow('web')">
             <div class="cblk-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="3" width="20" height="14" rx="3"/><path d="M2 7h20"/><path d="M6 5h.01M9 5h.01M12 5h.01"/><path d="M8 21h8M12 17v4"/></svg></div>
             <div class="cblk-body">
-              <div class="cblk-title" data-i18n="webTitle">Web</div>
+              <div class="cblk-title" data-i18n="webTitle">Websites</div>
               <div class="cblk-desc" data-i18n="webDesc">Build brand-aligned landing pages and web assets.</div>
             </div>
             <div class="cblk-arr"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M3 8h10M9 4l4 4-4 4"/></svg></div>
@@ -1311,7 +1345,7 @@
     <!-- BRAND CORE -->
     <div class="page" id="page-brandcore">
       <div class="ph" style="display:flex;align-items:flex-start;justify-content:space-between">
-        <div><div class="ph-ttl">Brand Core</div><div class="ph-sub">Your living brand identity — the source of truth for all generated content.</div></div>
+        <div><div class="ph-ttl">Brand Core</div><div class="ph-sub">Your BrandCore defines your colors, fonts and tone of voice. Everything you create is based on this identity.</div></div>
         <div style="display:flex;gap:8px"><button class="btn btn-g btn-sm" onclick="openModal('modal-genbrand')">AI Generate</button><button class="btn btn-p btn-sm" onclick="openModal('modal-bcsetup')">Manual Setup</button></div>
       </div>
       <div id="bcEmpty">
@@ -2005,6 +2039,39 @@
 </div>
 
 <!-- ════════════════════════════════════════════════════════════
+     GUEST ONBOARD — full-screen entry overlay
+     ════════════════════════════════════════════════════════════ -->
+<div id="guestOnboard" style="display:none;position:fixed;inset:0;z-index:9800;background:#080808;flex-direction:column;align-items:center;justify-content:center;overflow:hidden">
+
+  <div class="ob-blob ob-blob-1"></div>
+  <div class="ob-blob ob-blob-2"></div>
+  <div class="ob-blob ob-blob-3"></div>
+
+  <div style="position:relative;z-index:2;display:flex;flex-direction:column;align-items:center;text-align:center;padding:48px 24px;max-width:580px">
+
+    <div style="display:inline-flex;align-items:center;gap:10px;margin-bottom:56px">
+      <div style="width:36px;height:36px;background:rgba(255,255,255,0.06);border:1px solid rgba(255,255,255,0.1);border-radius:9px;display:flex;align-items:center;justify-content:center;padding:5px">
+        <img src="assets/orivenlogo.png" alt="ORIVEN" style="width:100%;height:100%;object-fit:contain;display:block">
+      </div>
+      <span style="font-size:18px;font-weight:700;color:#F0EDE6;letter-spacing:-.02em">ORIVEN</span>
+    </div>
+
+    <div class="ob-eyebrow">AI Brand System</div>
+    <h1 class="ob-h1">Turn your brand idea<br>into real content</h1>
+    <p class="ob-sub">Generate images, copy, campaigns, and a full website — all in your brand's voice. No account needed to explore.</p>
+
+    <div style="display:flex;flex-direction:column;align-items:center;gap:16px">
+      <button class="ob-btn" onclick="_guestOnboardTryFree()">
+        Try for free
+        <svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 8h10M9 4l4 4-4 4"/></svg>
+      </button>
+      <button onclick="_guestOnboardLogin()" style="background:none;border:none;color:rgba(240,237,230,0.35);font-size:13px;font-family:'Geist',sans-serif;cursor:pointer;padding:6px 10px;transition:color 0.2s" onmouseover="this.style.color='rgba(240,237,230,0.65)'" onmouseout="this.style.color='rgba(240,237,230,0.35)'">Already have an account? <span style="color:rgba(240,237,230,0.6);font-weight:500">Sign in</span></button>
+    </div>
+
+  </div>
+</div>
+
+<!-- ════════════════════════════════════════════════════════════
      GUEST LOCK SCREEN — shown when locked tab is clicked
      ════════════════════════════════════════════════════════════ -->
 <div id="guestLockScreen" style="display:none">
@@ -2020,10 +2087,8 @@
     </div>
     <div class="gls-title" id="glsTitle">Studio</div>
     <div class="gls-desc" id="glsDesc">Save and manage everything you create.</div>
-    <p class="gls-unlock">Everything unlocks after signup.</p>
-
-    <button class="gls-cta" onclick="_showGuestGate()">Create account to unlock</button>
-    <button class="gls-login" onclick="_showGuestGate();setTimeout(function(){_ggShow('login')},50)">Already have an account? Sign in</button>
+    <button class="gls-cta" onclick="_showGuestGate()">Create an account to start building</button>
+    <button class="gls-login" onclick="_showGuestGate();setTimeout(function(){_ggShow('login')},50)">Log in</button>
 
   </div>
 </div>
