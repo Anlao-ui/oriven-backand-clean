@@ -1870,10 +1870,7 @@ async function runBuilder(){
 
   // Loading state
   if(resultWrap) resultWrap.style.display = "";
-  if(resultBody) resultBody.innerHTML = '<div class="builder-loading">'
-    + '<div class="builder-loading-dots"><span></span><span></span><span></span></div>'
-    + '<span>Building your ' + type + '\u2026</span>'
-    + '</div>';
+  if(resultBody) resultBody.innerHTML = _buildCodeLoader(type);
   if(saveBtn){ saveBtn.disabled = true; saveBtn.textContent = "Save to Studio"; }
 
   var prompt = _buildBuilderPrompt(type);
@@ -1982,6 +1979,7 @@ async function runBuilder(){
 // ── _showBuilderResult — render result into result area ───────
 
 function _showBuilderResult(type, data){
+  _stopCodeLoader();
   var body = document.getElementById("builderResultBody");
   if(!body) return;
 
@@ -2109,6 +2107,115 @@ function _showBuilderResult(type, data){
 }
 
 // ════════════════════════════════════════════════════════════════
+// CODE LOADER — real-time sequential build animation
+// ════════════════════════════════════════════════════════════════
+
+var _clTimer  = null;
+var _clActive = false;
+
+var _CL_STEPS = {
+  web:      ["Parsing brand identity…","Generating layout structure…","Writing HTML structure…","Applying brand styles…","Optimizing for mobile…","Finalizing assets…"],
+  image:    ["Analyzing brand identity…","Composing visual layout…","Applying color palette…","Rendering final image…","Finalizing output…"],
+  text:     ["Reading brand voice…","Structuring content outline…","Writing copy…","Refining tone and style…","Polishing output…"],
+  ads:      ["Loading brand assets…","Writing ad copy…","Building visual layout…","Optimizing for platform…","Finalizing creative…"],
+  campaign: ["Building campaign strategy…","Generating variations…","Applying brand guidelines…","Reviewing copy…","Packaging results…"]
+};
+
+var _CL_MICRO = [
+  "Compiling sections…",
+  "Injecting components…",
+  "Linking styles…",
+  "Processing fonts…",
+  "Normalizing spacing…",
+  "Resolving variables…",
+  "Optimizing assets…",
+  "Checking responsiveness…"
+];
+
+function _stopCodeLoader(){
+  _clActive = false;
+  if(_clTimer){ clearTimeout(_clTimer); _clTimer = null; }
+}
+
+function _buildCodeLoader(type){
+  _stopCodeLoader();
+  _clActive = true;
+
+  var steps = _CL_STEPS[type] || _CL_STEPS.web;
+
+  // Start the chained step animation (first step fires after a short pause)
+  _clTimer = setTimeout(function(){ _clRunStep(steps, 0); }, 280);
+
+  return '<div class="code-loader">'
+    + '<div class="cl-header">'
+    + '<div class="cl-dot cl-red"></div>'
+    + '<div class="cl-dot cl-yellow"></div>'
+    + '<div class="cl-dot cl-green"></div>'
+    + '<span class="cl-title">oriven.build</span>'
+    + '</div>'
+    + '<div class="cl-body" id="clBody"></div>'
+    + '</div>';
+}
+
+function _clRunStep(steps, idx){
+  if(!_clActive) return;
+  var body = document.getElementById("clBody");
+  if(!body) return;
+
+  // Mark previous active step as done
+  var prev = body.querySelector(".cl-line-active");
+  if(prev){
+    prev.classList.remove("cl-line-active");
+    prev.classList.add("cl-line-done");
+    var dots = prev.querySelector(".cl-dots");
+    if(dots) dots.remove();
+  }
+  // Remove micro-update lines before adding new main step (keep log tidy)
+  body.querySelectorAll(".cl-micro").forEach(function(m){ m.remove(); });
+
+  var isLast = (idx === steps.length - 1);
+  var div = document.createElement("div");
+  div.className = "cl-line cl-line-active cl-enter";
+  div.innerHTML = '<span class="cl-prompt">›</span>'
+    + '<span class="cl-text">' + steps[idx] + '</span>'
+    + (isLast ? '<span class="cl-cursor"></span>' : '<span class="cl-dots"></span>');
+  body.appendChild(div);
+
+  // Remove .cl-enter on next paint to trigger transition
+  requestAnimationFrame(function(){
+    requestAnimationFrame(function(){ div.classList.remove("cl-enter"); });
+  });
+
+  if(!isLast){
+    // 4–7s between main steps; add micro-update midway through
+    var totalMs  = 4000 + Math.floor(Math.random() * 3000);
+    var microMs  = Math.floor(totalMs * 0.52);
+
+    _clTimer = setTimeout(function(){
+      if(!_clActive) return;
+      var b = document.getElementById("clBody");
+      if(b) _clAddMicro(b);
+
+      _clTimer = setTimeout(function(){
+        _clRunStep(steps, idx + 1);
+      }, totalMs - microMs);
+    }, microMs);
+  }
+}
+
+function _clAddMicro(body){
+  var text = _CL_MICRO[Math.floor(Math.random() * _CL_MICRO.length)];
+  var div = document.createElement("div");
+  div.className = "cl-micro cl-enter";
+  div.innerHTML = '<span class="cl-micro-prompt">·</span>'
+    + '<span class="cl-micro-text">' + text + '</span>';
+  body.appendChild(div);
+  requestAnimationFrame(function(){
+    requestAnimationFrame(function(){ div.classList.remove("cl-enter"); });
+  });
+}
+
+// ════════════════════════════════════════════════════════════════
 // WEB GENERATOR — Brand-aware landing page generation
 // ════════════════════════════════════════════════════════════════
 
@@ -2179,25 +2286,31 @@ function _showWebBrandConfirm(){
 
     + '</div>' // wbc-cols
 
-    // Section picker
-    + '<div class="wbc-section-full">'
-    + '<div class="wbc-section-label">Page Sections</div>'
-    + '<div class="wbc-section-sub">Hero is always included. Click to toggle sections.</div>'
-    + '<div class="wbs-grid">'
-    + _wbsSectionItem("hero",     "Hero",             true,  true)
-    + _wbsSectionItem("features", "Features",         true,  false)
-    + _wbsSectionItem("cta",      "Call to Action",   true,  false)
-    + _wbsSectionItem("benefits", "Benefits",         false, false)
-    + _wbsSectionItem("pricing",  "Pricing",          false, false)
-    + _wbsSectionItem("testimonials","Testimonials",  false, false)
-    + _wbsSectionItem("faq",      "FAQ",              false, false)
-    + _wbsSectionItem("about",    "About",            false, false)
-    + _wbsSectionItem("contact",  "Contact",          false, false)
-    + _wbsSectionItem("banner",   "Banner",           false, false)
-    + _wbsSectionItem("showcase", "Product Showcase", false, false)
-    + _wbsSectionItem("stats",    "Stats & Numbers",  false, false)
-    + '</div>'
-    + '</div>'
+    // Section picker — pre-check based on website type
+    + (function(){
+        var _ds = (S._builder && S._builder._webTypeDefaultSections) || ["hero","features","cta"];
+        var _has = function(id){ return _ds.indexOf(id) !== -1; };
+        var _typeName = {"one-page":"One Page","portfolio":"Portfolio","saas":"SaaS / Startup","ecommerce":"E-commerce","agency":"Agency","landing":"Landing Page"}[S._builder && S._builder.webType] || "";
+        return '<div class="wbc-section-full">'
+          + '<div class="wbc-section-label">Page Sections'
+          + (_typeName ? ' <span style="font-weight:400;opacity:.5;font-size:11px">· ' + _typeName + '</span>' : '')
+          + '</div>'
+          + '<div class="wbc-section-sub">Hero is always included. Click to toggle sections.</div>'
+          + '<div class="wbs-grid">'
+          + _wbsSectionItem("hero",         "Hero",             true,              true)
+          + _wbsSectionItem("features",     "Features",         _has("features"),  false)
+          + _wbsSectionItem("cta",          "Call to Action",   _has("cta"),       false)
+          + _wbsSectionItem("benefits",     "Benefits",         _has("benefits"),  false)
+          + _wbsSectionItem("pricing",      "Pricing",          _has("pricing"),   false)
+          + _wbsSectionItem("testimonials", "Testimonials",     _has("testimonials"),false)
+          + _wbsSectionItem("faq",          "FAQ",              _has("faq"),       false)
+          + _wbsSectionItem("about",        "About",            _has("about"),     false)
+          + _wbsSectionItem("contact",      "Contact",          _has("contact"),   false)
+          + _wbsSectionItem("banner",       "Banner",           _has("banner"),    false)
+          + _wbsSectionItem("showcase",     "Product Showcase", _has("showcase"),  false)
+          + _wbsSectionItem("stats",        "Stats & Numbers",  _has("stats"),     false)
+          + '</div></div>';
+      })()
 
     + '<div class="wbc-actions">'
     + '<button class="btn btn-p" onclick="generateWeb()">Generate Website</button>'
@@ -2265,11 +2378,7 @@ function generateWeb(){
   var msgEl      = document.getElementById("flowGuideMessage");
 
   if(resultWrap) resultWrap.style.display = "";
-  if(resultBody) resultBody.innerHTML =
-    '<div class="builder-loading">'
-    + '<div class="builder-loading-dots"><span></span><span></span><span></span></div>'
-    + '<span>Building your landing page…</span>'
-    + '</div>';
+  if(resultBody) resultBody.innerHTML = _buildCodeLoader("web");
   if(saveBtn) saveBtn.disabled = true;
   if(msgEl)  msgEl.textContent = "Generating your landing page…";
   if(stepEl) stepEl.innerHTML  = "";
@@ -2286,9 +2395,14 @@ function generateWeb(){
   var _payload = {
     brand_name:       br.name          || "Your Brand",
     product:          _b.webPromotion  || "",
+    audience:         _b.webAudience   || "",
+    tone:             br.tone          || "",
     goal:             "sales",
     style:            _b.webStyle      || "minimal",
+    style_hint:       _detectBrandStyle(_b.webPromotion || br.name || ""),
+    layout_variant:   _webPickLayout(),
     animations:       _b.webAnimations || "subtle",
+    website_type:     _b.webType       || "",
     sections:         _checkedSections.join(","),
     primary_color:    br.primary,
     secondary_color:  br.secondary,
@@ -2402,12 +2516,255 @@ function _webRegenBtn(stepEl){
     + '</div>';
 }
 
-// ── Link-blocker injection — prevents navigation inside preview ─
+// ── Brand style inference from product description ────────────
+
+function _detectBrandStyle(desc){
+  if(!desc) return "";
+  desc = desc.toLowerCase();
+  if(desc.match(/fitness|gym|sport|workout|athletic|muscle/)) return "bold,dark,high-contrast,athletic,energetic";
+  if(desc.match(/saas|software|app|platform|tech|ai|api|tool/)) return "clean,minimal,structured,technical,professional";
+  if(desc.match(/fashion|clothing|apparel|wear|boutique|style/)) return "editorial,image-focused,fashion-forward,refined";
+  if(desc.match(/food|restaurant|cafe|coffee|bakery|chef|cuisine/)) return "warm,organic,appetizing,friendly";
+  if(desc.match(/luxury|premium|exclusive|high-end|elite/)) return "luxurious,dark,minimal,elegant,understated";
+  if(desc.match(/finance|invest|bank|wealth|trading|crypto/)) return "professional,trustworthy,structured,serious";
+  if(desc.match(/creative|agency|design|studio|art/)) return "creative,distinctive,modern,bold-typography";
+  if(desc.match(/health|wellness|spa|beauty|skincare/)) return "soft,clean,natural,calming";
+  return "";
+}
+
+function _webPickLayout(){
+  var v = ["centered-hero","split-hero","bold-fullscreen","asymmetric","editorial","minimal-structured"];
+  return v[Math.floor(Math.random() * v.length)];
+}
+
+// ── Enhancement CSS injected into every generated site ────────
+
+function _getWebEnhancementCSS(){
+  return [
+    "html{scroll-behavior:smooth}",
+    "a,button,[role=button]{cursor:pointer}",
+    /* Entrance animation classes — driven by JS IntersectionObserver */
+    ".orv-hidden{opacity:0;transform:translateY(16px);transition:opacity 0.45s ease,transform 0.45s ease}",
+    ".orv-visible{opacity:1!important;transform:translateY(0)!important}",
+    /* Mobile nav open state */
+    "@media(max-width:768px){",
+    "  .nav-menu.orv-open,.mobile-nav.orv-open,.nav-links.orv-open,",
+    "  nav>ul.orv-open,.menu-items.orv-open,.navbar-collapse.orv-open{",
+    "    display:flex!important;flex-direction:column;",
+    "    position:fixed;top:60px;left:0;right:0;",
+    "    padding:20px 24px;z-index:9999;",
+    "    box-shadow:0 8px 32px rgba(0,0,0,.25);",
+    "    animation:orvMenuIn 0.2s ease both",
+    "  }",
+    "  @keyframes orvMenuIn{from{opacity:0;transform:translateY(-8px)}to{opacity:1;transform:translateY(0)}}",
+    "  [class*='hamburger'].orv-open span:nth-child(1),",
+    "  .menu-toggle.orv-open span:nth-child(1){transform:rotate(45deg)translate(5px,5px)}",
+    "  [class*='hamburger'].orv-open span:nth-child(2),",
+    "  .menu-toggle.orv-open span:nth-child(2){opacity:0}",
+    "  [class*='hamburger'].orv-open span:nth-child(3),",
+    "  .menu-toggle.orv-open span:nth-child(3){transform:rotate(-45deg)translate(5px,-5px)}",
+    "}"
+  ].join("\n");
+}
+
+// ── Enhancement JS injected into every generated site ─────────
+
+function _getWebEnhancementJS(){
+  return "(function(){"
+    + '"use strict";'
+    + "document.addEventListener('DOMContentLoaded',function(){"
+
+    /* ── 1. Smooth anchor scroll ── */
+    + "document.querySelectorAll('a[href^=\"#\"]').forEach(function(a){"
+    + "  a.addEventListener('click',function(e){"
+    + "    var s=a.getAttribute('href');"
+    + "    if(s.length<2)return;"
+    + "    var t=document.querySelector(s);"
+    + "    if(t){e.preventDefault();t.scrollIntoView({behavior:'smooth',block:'start'});}"
+    + "  });"
+    + "});"
+
+    /* ── 2. Hamburger menu ── */
+    + "var _tg=document.querySelector("
+    + "  '.hamburger,.menu-toggle,.nav-toggle,.nav-hamburger,.menu-btn'"
+    + "  ',[class*=\"hamburger\"],[aria-label*=\"menu\" i],[aria-label*=\"Menu\"]'"
+    + ");"
+    + "var _mn=document.querySelector("
+    + "  '.mobile-nav,.nav-menu,.nav-links,.menu-items,.navbar-collapse,nav ul[class]'"
+    + ");"
+    + "if(_tg&&_mn&&!_tg.dataset.orv){"
+    + "  _tg.dataset.orv='1';"
+    + "  _tg.style.cursor='pointer';"
+    + "  _tg.addEventListener('click',function(){"
+    + "    _tg.classList.toggle('orv-open');"
+    + "    _mn.classList.toggle('orv-open');"
+    + "    _tg.setAttribute('aria-expanded',_mn.classList.contains('orv-open')?'true':'false');"
+    + "  });"
+    + "  _mn.querySelectorAll('a').forEach(function(a){"
+    + "    a.addEventListener('click',function(){"
+    + "      _tg.classList.remove('orv-open');"
+    + "      _mn.classList.remove('orv-open');"
+    + "    });"
+    + "  });"
+    + "}"
+
+    /* ── 3. CTA button scroll routing ── */
+    + "var _sm={"
+    + "  'get started':'section:nth-of-type(2),.features,#features',"
+    + "  'start free':'section:nth-of-type(2),.features',"
+    + "  'learn more':'section:nth-of-type(2),.features,#features',"
+    + "  'contact':'footer,#contact,.contact',"
+    + "  'contact us':'footer,#contact,.contact',"
+    + "  'sign up':'#cta,.cta,section:last-of-type',"
+    + "  'get started free':'section:nth-of-type(2)',"
+    + "  'buy now':'#pricing,.pricing',"
+    + "  'see pricing':'#pricing,.pricing',"
+    + "  'view pricing':'#pricing,.pricing',"
+    + "  'schedule':'#contact,.contact,footer'"
+    + "};"
+    + "document.querySelectorAll('button,[class*=\"cta\"],[class*=\"btn\"],[class*=\"button\"]').forEach(function(btn){"
+    + "  if(btn.dataset.orv||(btn.getAttribute('href')||'').charAt(0)==='#')return;"
+    + "  btn.dataset.orv='1';"
+    + "  var txt=btn.textContent.trim().toLowerCase();"
+    + "  for(var k in _sm){"
+    + "    if(txt.includes(k)){"
+    + "      (function(sel){"
+    + "        var t=document.querySelector(sel);"
+    + "        if(t)btn.addEventListener('click',function(e){e.preventDefault();t.scrollIntoView({behavior:'smooth'});});"
+    + "      })(_sm[k]);"
+    + "      break;"
+    + "    }"
+    + "  }"
+    + "});"
+
+    /* ── 4. Scroll entrance animations ── */
+    + "if(!window.IntersectionObserver)return;"
+    + "setTimeout(function(){"
+    + "  var obs=new IntersectionObserver(function(entries){"
+    + "    entries.forEach(function(e){"
+    + "      if(e.isIntersecting){"
+    + "        e.target.classList.remove('orv-hidden');"
+    + "        e.target.classList.add('orv-visible');"
+    + "        obs.unobserve(e.target);"
+    + "      }"
+    + "    });"
+    + "  },{threshold:0.08,rootMargin:'0px 0px -20px 0px'});"
+    + "  document.querySelectorAll('section>*,h2,h3,.card,[class*=\"card\"],[class*=\"feature\"],[class*=\"item\"]').forEach(function(el){"
+    + "    if(el.closest('header,nav'))return;"
+    + "    var r=el.getBoundingClientRect();"
+    + "    if(r.top<window.innerHeight-20){"
+    + "      el.classList.add('orv-visible');"
+    + "    }else{"
+    + "      el.classList.add('orv-hidden');"
+    + "      obs.observe(el);"
+    + "    }"
+    + "  });"
+    + "},150);"
+
+    + "});"
+    + "})();";
+}
+
+// ── Post-processor — structural fixes + enhancement injection ──
+
+function _postProcessWebHTML(html){
+  try {
+    var parser = new DOMParser();
+    var doc    = parser.parseFromString(html, "text/html");
+    var brandName = ((S.brandCore || {}).name || "");
+
+    /* 1. Fix <a> missing/empty href */
+    doc.querySelectorAll("a:not([href]), a[href=''], a[href='#!']").forEach(function(a){
+      a.setAttribute("href", "#");
+    });
+
+    /* 2. Wrap bare nav/footer <li> text in <a> */
+    doc.querySelectorAll("nav li, header nav li, footer li, footer ul li").forEach(function(li){
+      if(li.tagName !== "A" && !li.querySelector("a") && li.textContent.trim()){
+        var a = doc.createElement("a");
+        a.setAttribute("href", "#");
+        a.innerHTML = li.innerHTML;
+        li.innerHTML = "";
+        li.appendChild(a);
+      }
+    });
+
+    /* 3. Assign section IDs for anchor navigation */
+    var sectionKeys = ["hero","features","about","contact","pricing","benefits","faq","testimonials","cta","services","stats","showcase"];
+    doc.querySelectorAll("section, footer").forEach(function(el){
+      if(el.id) return;
+      var cls  = (el.className || "").toLowerCase();
+      var h    = el.querySelector("h1,h2,h3");
+      var head = h ? h.textContent.trim().toLowerCase() : "";
+      var id   = "";
+      sectionKeys.forEach(function(k){
+        if(!id && (cls.includes(k) || head.includes(k))) id = k;
+      });
+      if(!id && el.tagName === "FOOTER") id = "contact";
+      if(id && !doc.getElementById(id)) el.id = id;
+    });
+
+    /* 4. Wire nav link text to section IDs */
+    doc.querySelectorAll("nav a, header a").forEach(function(a){
+      var href = a.getAttribute("href") || "";
+      if(href && href !== "#") return;
+      var txt  = a.textContent.trim().toLowerCase();
+      var match = doc.getElementById(txt);
+      if(!match) {
+        sectionKeys.forEach(function(k){ if(!match && txt.includes(k)) match = doc.getElementById(k); });
+      }
+      if(match) a.setAttribute("href", "#" + match.id);
+    });
+
+    /* 5. Remove completely empty sections */
+    doc.querySelectorAll("section, .section, [class*='block']").forEach(function(el){
+      if(!el.textContent.trim() && !el.querySelector("img,svg,canvas,video")){
+        if(el.parentNode) el.parentNode.removeChild(el);
+      }
+    });
+
+    /* 6. Fill empty headings/paragraphs with fallback text */
+    var fallbacks = { H1: brandName || "Welcome", H2: "Why Choose Us", H3: "Feature Name", P: "Discover what makes us different." };
+    doc.querySelectorAll("h1,h2,h3,p").forEach(function(el){
+      if(!el.textContent.trim()) el.textContent = fallbacks[el.tagName] || "";
+    });
+
+    /* 7. Inject enhancement CSS */
+    if(!doc.getElementById("orv-css")){
+      var style = doc.createElement("style");
+      style.id  = "orv-css";
+      style.textContent = _getWebEnhancementCSS();
+      if(doc.head) doc.head.appendChild(style);
+    }
+
+    /* 8. Inject enhancement JS */
+    if(!doc.getElementById("orv-js")){
+      var script = doc.createElement("script");
+      script.id  = "orv-js";
+      script.textContent = _getWebEnhancementJS();
+      if(doc.body) doc.body.appendChild(script);
+    }
+
+    return "<!DOCTYPE html>\n" + doc.documentElement.outerHTML;
+  } catch(e){
+    console.warn("[Web] postProcess error:", e);
+    return html;
+  }
+}
+
+// ── Link-blocker for preview — allows same-page anchor scrolling ─
 
 function _webInjectLinkBlocker(html){
   var script = '<script>document.addEventListener("click",function(e){'
     + 'var a=e.target.closest("a");'
-    + 'if(a){e.preventDefault();e.stopPropagation();}'
+    + 'if(a){'
+    + '  e.preventDefault();e.stopPropagation();'
+    + '  var h=a.getAttribute("href");'
+    + '  if(h&&h.charAt(0)==="#"&&h.length>1){'
+    + '    var t=document.querySelector(h);'
+    + '    if(t)t.scrollIntoView({behavior:"smooth",block:"start"});'
+    + '  }'
+    + '}'
     + '},true);<\/script>';
   var idx = html.indexOf("</body>");
   if(idx !== -1) return html.slice(0, idx) + script + html.slice(idx);
@@ -2417,6 +2774,8 @@ function _webInjectLinkBlocker(html){
 // ── Shared renderer: iframe + actions + publish guide ─────────
 
 function _renderWebResult(html, resultBody, msgEl, stepEl, saveBtn){
+  _stopCodeLoader();
+  html = _postProcessWebHTML(html);
   S._lastWebHTML = html;
 
   var whtml = '<div class="builder-web-result">'
@@ -2473,25 +2832,84 @@ function _downloadWebPage(){
   setTimeout(function(){ URL.revokeObjectURL(url); document.body.removeChild(a); }, 1000);
 }
 
-// ── Download: ZIP file ────────────────────────────────────────
+// ── Download: ZIP file (proper offline project structure) ────
 
 function _downloadWebZip(){
   var html = S._lastWebHTML || "";
   if(!html){ console.warn("[Web] No HTML to zip"); return; }
 
   if(typeof JSZip === "undefined"){
-    console.warn("[Web] JSZip not loaded, falling back to HTML download");
     _downloadWebPage();
     return;
   }
 
-  var zip = new JSZip();
-  zip.file("index.html", html);
+  // ── 1. Extract inline <style> blocks ──
+  var rawCss = "";
+  var indexHtml = html.replace(/<style[^>]*>([\s\S]*?)<\/style>/gi, function(_, content){
+    rawCss += content.trim() + "\n\n";
+    return "";
+  });
+
+  // ── 2. Extract inline <script> blocks (no src="") ──
+  var rawJs = "";
+  indexHtml = indexHtml.replace(/<script(?![^>]*\bsrc\b)[^>]*>([\s\S]*?)<\/script>/gi, function(_, content){
+    if(content.trim()) rawJs += content.trim() + "\n\n";
+    return "";
+  });
+
+  // ── 3. CSS: prepend offline-safe baseline, always output a file ──
+  var finalCss = "/* Generated by ORIVEN AI */\n"
+    + "*, *::before, *::after { box-sizing: border-box; }\n"
+    + "body { margin: 0; padding: 0; font-family: system-ui, sans-serif; }\n\n"
+    + rawCss;
+
+  // ── 4. JS: wrap in DOMContentLoaded + try/catch so no error blocks render ──
+  var finalJs = "";
+  if(rawJs.trim()){
+    var alreadyWrapped = rawJs.indexOf("DOMContentLoaded") !== -1;
+    finalJs = alreadyWrapped
+      ? "try {\n" + rawJs.trim() + "\n} catch(e) { console.error('[Site]', e); }"
+      : "document.addEventListener('DOMContentLoaded', function() {\n"
+          + "  try {\n    " + rawJs.trim().replace(/\n/g, "\n    ")
+          + "\n  } catch(e) { console.error('[Site]', e); }\n});";
+  }
+
+  // ── 5. Inject external file references ──
+  var cssLink   = '<link rel="stylesheet" href="./styles/style.css">';
+  var scriptTag = '<script src="./scripts/script.js" defer><\/script>';
+
+  // Insert CSS link before </head>
+  if(indexHtml.indexOf("</head>") !== -1){
+    indexHtml = indexHtml.replace("</head>", cssLink + "\n</head>");
+  } else {
+    indexHtml = cssLink + "\n" + indexHtml;
+  }
+
+  // Insert script before </body> (or append)
+  if(finalJs){
+    if(indexHtml.indexOf("</body>") !== -1){
+      indexHtml = indexHtml.replace("</body>", scriptTag + "\n</body>");
+    } else {
+      indexHtml = indexHtml + "\n" + scriptTag;
+    }
+  }
+
+  // ── 6. Determine project folder name ──
+  var brandName = (((S.brandCore || {}).name || "website")
+    .toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "")) || "website";
+
+  // ── 7. Build ZIP with proper folder structure ──
+  var zip  = new JSZip();
+  var root = zip.folder(brandName);
+  root.file("index.html", indexHtml);
+  root.folder("styles").file("style.css", finalCss);
+  if(finalJs) root.folder("scripts").file("script.js", finalJs);
+
   zip.generateAsync({ type: "blob" })
     .then(function(blob){
       var url = URL.createObjectURL(blob);
       var a   = document.createElement("a");
-      a.href = url; a.download = "landing-page.zip";
+      a.href = url; a.download = brandName + ".zip";
       document.body.appendChild(a);
       a.click();
       setTimeout(function(){ URL.revokeObjectURL(url); document.body.removeChild(a); }, 1000);

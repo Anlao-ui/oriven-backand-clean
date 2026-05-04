@@ -190,9 +190,22 @@ var CF_FLOWS = {
 
   web: [
     {
+      key:  "webType",
+      q:    "What kind of website do you need?",
+      desc: "Choose the type that best matches your goal — this shapes the structure and content.",
+      options: [
+        { val: "one-page",  label: "One Page",         desc: "Single scroll — intro, features, contact" },
+        { val: "portfolio", label: "Portfolio",         desc: "Showcase your work or personal brand" },
+        { val: "saas",      label: "SaaS / Startup",   desc: "Feature-rich product site with pricing" },
+        { val: "ecommerce", label: "E-commerce",        desc: "Products, store layout, and CTAs" },
+        { val: "agency",    label: "Agency / Service",  desc: "Services, case studies, and contact" },
+        { val: "landing",   label: "Landing Page",      desc: "Single goal — one offer, one CTA" }
+      ]
+    },
+    {
       key:         "webPromotion",
       q:           "What are you promoting?",
-      desc:        "Describe the product, service, or offer this landing page is for.",
+      desc:        "Describe the product, service, or offer this website is for.",
       type:        "textarea",
       placeholder: "e.g. A SaaS tool for freelance designers that automates invoicing…",
       optional:    false
@@ -437,14 +450,26 @@ function _cfRenderOptions(step){
     return;
   }
 
-  // Pill options — staggered fade-in
+  var isCard = step.options && step.options[0] && step.options[0].desc;
+  opts.className = "cf-options" + (isCard ? " cf-opts-cards" : "");
+
   var html = "";
-  (step.options || []).forEach(function(opt, i){
-    html += '<button class="cf-opt" style="animation-delay:' + (i * 45) + 'ms" '
-          + 'onclick="cfSelectOpt(' + i + ')">'
-          + _cfEsc(opt.label)
-          + '</button>';
-  });
+  if(isCard){
+    (step.options || []).forEach(function(opt, i){
+      html += '<button class="cf-opt-card" onclick="cfSelectOpt(' + i + ')">'
+            + '<span class="cf-opt-card-label">' + _cfEsc(opt.label) + '</span>'
+            + '<span class="cf-opt-card-desc">'  + _cfEsc(opt.desc)  + '</span>'
+            + '</button>';
+    });
+  } else {
+    // Pill options — staggered fade-in
+    (step.options || []).forEach(function(opt, i){
+      html += '<button class="cf-opt" style="animation-delay:' + (i * 45) + 'ms" '
+            + 'onclick="cfSelectOpt(' + i + ')">'
+            + _cfEsc(opt.label)
+            + '</button>';
+    });
+  }
   opts.innerHTML = html;
   opts.style.opacity   = "0";
   opts.style.transform = "translateY(10px)";
@@ -465,8 +490,8 @@ function cfSelectOpt(idx){
   var opt = step.options[idx];
   if(!opt) return;
 
-  // Visual feedback
-  var btns = document.querySelectorAll("#cfOptions .cf-opt");
+  // Visual feedback (supports both pill and card layouts)
+  var btns = document.querySelectorAll("#cfOptions .cf-opt, #cfOptions .cf-opt-card");
   btns.forEach(function(b, i){ b.classList.toggle("cf-opt-selected", i === idx); });
   btns.forEach(function(b, i){ if(i !== idx) b.disabled = true; });
 
@@ -650,6 +675,17 @@ function _cfDispatch(){
   } else if(_cfType === "web"){
     if(!S._builder.webStyle)      S._builder.webStyle      = "modern";
     if(!S._builder.webAnimations) S._builder.webAnimations = "subtle";
+    // Map website type → default sections
+    var _webTypeSections = {
+      "one-page":  ["hero","features","about","contact"],
+      "portfolio": ["hero","showcase","about","contact"],
+      "saas":      ["hero","features","testimonials","pricing","cta"],
+      "ecommerce": ["hero","showcase","features","cta"],
+      "agency":    ["hero","features","showcase","testimonials","contact"],
+      "landing":   ["hero","benefits","cta"]
+    };
+    var _wt = S._builder.webType || "saas";
+    S._builder._webTypeDefaultSections = _webTypeSections[_wt] || ["hero","features","cta"];
   }
 
   // Set up builder page (matches openBuilder() setup)
