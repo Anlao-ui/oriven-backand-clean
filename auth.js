@@ -5,6 +5,16 @@
 var _currentUser     = null;
 var _onboardingShown = false;
 
+// ── Route helpers ─────────────────────────────────────────────
+
+function _setAppRoute(route){
+  try { history.replaceState(null, "", route); } catch(_){}
+  // Fire a page_view so Google Ads URL-based conversions trigger on /app
+  if(typeof gtag === "function"){
+    gtag("event", "page_view", { page_path: route, page_title: document.title });
+  }
+}
+
 // ── UI helpers ────────────────────────────────────────────────
 
 function showApp(){
@@ -224,6 +234,7 @@ async function onUserSignedIn(user){
   console.log("[Auth] User signed in:", user.id);
   updateSidebarUser(user);
   showApp();
+  _setAppRoute("/app");
   navigate("dashboard");
   // All background work fires in parallel — none delays the UI
   loadBrandCoreFromDB(user);
@@ -661,20 +672,23 @@ async function selectPlan(plan){
 document.addEventListener("DOMContentLoaded", async function(){
   trackEvent("visited_site");
 
+  // Capture path before any redirects fire
+  var _loadPath = window.location.pathname;
+
   // Handle email verification token from verify link in email
   await _handleVerifyToken();
 
   // Handle Stripe return URLs
   var params = new URLSearchParams(window.location.search);
   if(params.get("success") === "true"){
-    history.replaceState(null, "", window.location.pathname);
-    // Refresh subscription status after a moment (webhook may be in-flight)
+    history.replaceState(null, "", "/app");
+    _loadPath = "/app";
     setTimeout(async function(){
       await checkSubscriptionStatus();
       toast("Your subscription is now active — welcome!");
     }, 1500);
   } else if(params.get("canceled") === "true"){
-    history.replaceState(null, "", window.location.pathname);
+    history.replaceState(null, "", "/app");
     toast("Checkout canceled — you can upgrade anytime.");
   }
 
@@ -682,16 +696,20 @@ document.addEventListener("DOMContentLoaded", async function(){
   var app = document.querySelector(".app");
   if(app) app.style.display = "none";
 
-  console.log("[Auth] Checking existing session...");
+  console.log("[Auth] Checking existing session... (path:", _loadPath, ")");
   var sessionResult = await SB.auth.getSession();
   var session = sessionResult.data && sessionResult.data.session;
 
   if(session && session.user){
     console.log("[Auth] Session restored for:", session.user.id);
-    onUserSignedIn(session.user);
+    onUserSignedIn(session.user); // sets route to /app
   } else {
     console.log("[Auth] No session — showing guest landing");
-    showGuestLanding();
+    // If someone bookmarked /app without a session, redirect to /onboarding
+    if(_loadPath === "/app"){
+      history.replaceState(null, "", "/onboarding");
+    }
+    showGuestLanding(); // sets route to /onboarding
   }
 
   // React to future auth changes (e.g. session expiry)

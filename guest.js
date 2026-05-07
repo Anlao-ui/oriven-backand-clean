@@ -28,6 +28,7 @@ function showGuestLanding(){
 
   showApp();
   document.body.classList.add("guest-mode");
+  if(typeof _setAppRoute === "function") _setAppRoute("/onboarding");
   if(typeof updateSidebarGuest === "function") updateSidebarGuest();
 
   // Block payment / upgrade modals — guests never see pricing

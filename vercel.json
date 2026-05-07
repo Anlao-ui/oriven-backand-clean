@@ -1,11 +1,6 @@
 {
-  "redirects": [
-    { "source": "/app",      "destination": "/", "permanent": false },
-    { "source": "/app/(.*)", "destination": "/", "permanent": false }
-  ],
   "rewrites": [
-    { "source": "/welcome", "destination": "/welcome.html" },
-    { "source": "/demo",    "destination": "/demo/index.html" },
-    { "source": "/demo/",   "destination": "/demo/index.html" }
+    { "source": "/onboarding", "destination": "/index.html" },
+    { "source": "/app",        "destination": "/index.html" }
   ]
 }
