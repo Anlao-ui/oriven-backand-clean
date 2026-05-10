@@ -36,11 +36,10 @@ var PLANS = [
     name: "Free",
     price: 0,
     features: [
-      "1 Brand Core",
-      "3 AI generations per month",
-      "3 Brand Checks per month",
-      "Content Ideas access",
-      "PNG export"
+      "1 BrandCore",
+      "1 AI generation per month",
+      "1 BrandCheck per month",
+      "PNG export only"
     ]
   },
   {
@@ -48,12 +47,12 @@ var PLANS = [
     name: "Starter",
     price: 9,
     features: [
-      "1 Brand Core",
+      "1 BrandCore",
+      "1 BrandCore regeneration per month",
       "50 AI generations per month",
-      "10 Brand Checks per month",
+      "10 BrandChecks per month",
       "Brand Assistant",
-      "All Ideas categories",
-      "PNG + JPG export"
+      "1 website generation"
     ]
   },
   {
@@ -62,10 +61,12 @@ var PLANS = [
     price: 19,
     popular: true,
     features: [
-      "1 Brand Core",
+      "1 BrandCore",
+      "3 BrandCore regenerations per month",
       "200 AI generations per month",
-      "Unlimited Brand Checks",
-      "Campaign builder",
+      "Unlimited BrandChecks",
+      "Campaign Builder",
+      "5 website generations",
       "All export formats",
       "Priority support"
     ]
@@ -75,11 +76,12 @@ var PLANS = [
     name: "Business",
     price: 39,
     features: [
-      "1 Brand Core",
+      "1 BrandCore",
+      "10 BrandCore regenerations per month",
       "400 AI generations per month",
-      "Unlimited Brand Checks",
-      "Campaign builder",
-      "Team collaboration (5 seats)",
+      "Unlimited BrandChecks",
+      "Unlimited website generations",
+      "Team collaboration",
       "Dedicated account support"
     ]
   }
@@ -1261,12 +1263,26 @@ async function switchPlan(planId){
     }
 
     // Apply server response to local state
-    saveSettings({
-      pendingPlan: data.pending_plan || planId,
-      pendingPlanDate: data.pending_plan_date || cfg.planRenewalDate
-    });
-    renderPlanPanel();
-    toast("Scheduled: " + name + " starts " + _formatPlanDate(data.pending_plan_date || cfg.planRenewalDate));
+    if(data.subscription_status){
+      // Plan was applied immediately (no active Stripe sub or fallback path)
+      if(typeof S !== "undefined" && S) S.currentPlan = data.subscription_status;
+      saveSettings({
+        currentPlan:     data.subscription_status,
+        pendingPlan:     null,
+        pendingPlanDate: null
+      });
+      if(typeof invalidatePlanCache === "function") invalidatePlanCache();
+      renderPlanPanel();
+      if(typeof _renderPaywallCards === "function") _renderPaywallCards();
+      toast(name + " plan is now active");
+    } else {
+      saveSettings({
+        pendingPlan:     data.pending_plan     || planId,
+        pendingPlanDate: data.pending_plan_date || cfg.planRenewalDate
+      });
+      renderPlanPanel();
+      toast("Scheduled: " + name + " starts " + _formatPlanDate(data.pending_plan_date || cfg.planRenewalDate));
+    }
 
   } catch(err){
     console.error("[Plan] switchPlan error:", err.message);

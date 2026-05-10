@@ -209,20 +209,20 @@ async function syncSubscriptionFromDB(){
     if(!result.ok){ console.warn("[Subscription] GET /api/get-subscription failed:", result.status); return; }
     var data = result.data;
     console.log("[Subscription] Synced from server:", JSON.stringify(data));
-    var changed = false;
-    if(data.subscription_status && S.currentPlan !== data.subscription_status){
+    var patch = {};
+    if(data.subscription_status){
       S.currentPlan = data.subscription_status;
-      changed = true;
+      patch.currentPlan = data.subscription_status;
     }
-    var serverPending = data.pending_plan || null;
+    var serverPending     = data.pending_plan      || null;
     var serverPendingDate = data.pending_plan_date || null;
-    if(S.pendingPlan !== serverPending || S.pendingPlanDate !== serverPendingDate){
-      S.pendingPlan = serverPending;
-      S.pendingPlanDate = serverPendingDate;
-      changed = true;
-    }
-    if(changed) saveSettings();
+    S.pendingPlan     = serverPending;
+    S.pendingPlanDate = serverPendingDate;
+    patch.pendingPlan     = serverPending;
+    patch.pendingPlanDate = serverPendingDate;
+    saveSettings(patch);
     if(typeof _updateSidebarPlan === "function") _updateSidebarPlan(S.currentPlan);
+    if(typeof invalidatePlanCache === "function") invalidatePlanCache();
   } catch(err){
     console.warn("[Subscription] Sync error (non-fatal):", err.message);
   }
@@ -263,10 +263,11 @@ async function _loadUserProfile(user){
     }
 
     // Subscription sync from DB
-    if(data && data.subscription_status && S.currentPlan !== data.subscription_status){
+    if(data && data.subscription_status){
       S.currentPlan = data.subscription_status;
-      saveSettings();
+      saveSettings({ currentPlan: data.subscription_status });
       if(typeof _updateSidebarPlan === "function") _updateSidebarPlan(S.currentPlan);
+      if(typeof invalidatePlanCache === "function") invalidatePlanCache();
     }
 
     // Onboarding — only show once per session
@@ -638,7 +639,7 @@ async function maybeShowPaywall(){
     return;
   }
   console.log("[Paywall] Free user — opening paywall modal");
-  if(typeof openModal === "function") openModal("modal-paywall");
+  if(typeof openPaywall === "function") openPaywall();
 }
 
 function closePaywall(){

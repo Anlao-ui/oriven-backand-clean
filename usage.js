@@ -6,7 +6,7 @@
 // type "daily"   → resets every calendar day (Free plan)
 // type "monthly" → resets every calendar month (paid plans)
 var PLAN_LIMITS = {
-  free:     { type: "monthly", limit: 3,   label: "Free"     },
+  free:     { type: "monthly", limit: 1,   label: "Free"     },
   starter:  { type: "monthly", limit: 50,  label: "Starter"  },
   premium:  { type: "monthly", limit: 200, label: "Premium"  },
   business: { type: "monthly", limit: 400, label: "Business" }
@@ -123,7 +123,7 @@ async function checkUsageLimit(){
 
   var msg;
   if(plan === "free"){
-    msg = "Free plan limit reached. You can generate 1 item per day. Upgrade to continue.";
+    msg = "Free plan limit reached — 1 generation per month is included. Upgrade to continue.";
   } else if(plan === "business"){
     msg = "You've reached the " + cfg.label + " monthly limit (" + limit + " generations). Contact us to discuss higher limits.";
   } else {
@@ -202,7 +202,7 @@ function _showLimitMessage(msg){
         '<div class="usage-limit-title">Generation limit reached</div>' +
         '<div class="usage-limit-sub">' + msg + '</div>' +
       '</div>' +
-      '<button class="btn btn-p btn-sm usage-limit-cta" onclick="openModal(\'modal-paywall\')">Upgrade</button>' +
+      '<button class="btn btn-p btn-sm usage-limit-cta" onclick="openPaywall()">Upgrade</button>' +
     '</div>';
   feed.appendChild(el);
   feed.scrollTop = feed.scrollHeight;

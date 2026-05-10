@@ -3071,16 +3071,13 @@ html{ background:#0B0B0B; }
   max-width:520px;width:100%;
 }
 .gob-logo{
-  display:flex;align-items:center;gap:9px;
-  margin-bottom:52px;opacity:0.7;
+  display:flex;align-items:center;justify-content:center;
+  margin-bottom:48px;
 }
-.gob-logo-mark{
-  width:32px;height:32px;background:#fff;border-radius:8px;
-  display:flex;align-items:center;justify-content:center;padding:4px;
-}
-.gob-logo-mark img{ width:100%;height:100%;object-fit:contain;display:block; }
-.gob-logo-name{
-  font-size:15px;font-weight:700;color:#F0EDE6;letter-spacing:0.05em;
+.gob-logo-img{
+  width:72px;height:72px;object-fit:contain;display:block;
+  filter:drop-shadow(0 0 24px rgba(183,255,42,0.14));
+  opacity:0.92;
 }
 .gob-headline{
   font-family:'Instrument Serif',Georgia,serif;
@@ -4226,3 +4223,25 @@ body:not(.dark-mode) .gg-input:focus{ border-color:rgba(26,66,41,0.4); backgroun
   transition: color 0.2s;
 }
 #gtSkipBtn:hover { color: #777; }
+
+/* ── Paywall modal plan cards ───────────────────────────────── */
+.pw-feat{
+  display:flex;align-items:flex-start;gap:8px;
+  font-size:12px;color:var(--charcoal,#18181A);line-height:1.6;
+  padding:2px 0;
+}
+.pw-feat::before{
+  content:"";display:block;flex-shrink:0;
+  width:6px;height:6px;border-radius:50%;
+  background:var(--gm,#9FE81F);margin-top:5px;
+}
+.pw-plan-btn{
+  width:100%;justify-content:center;font-size:13px;
+}
+.pw-plan-btn:disabled{
+  opacity:0.55;cursor:default;
+  background:var(--bg2,#EEE9E1) !important;
+  color:var(--muted,#888) !important;
+  border-color:var(--border,rgba(0,0,0,.1)) !important;
+  box-shadow:none !important;
+}

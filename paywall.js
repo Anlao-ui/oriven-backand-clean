@@ -1,4 +1,46 @@
 // ════════════════════════════════════════════════════════════════
+// PAYWALL MODAL — plan detection + card rendering
+// ════════════════════════════════════════════════════════════════
+
+function openPaywall(){
+  _renderPaywallCards();
+  if(typeof openModal === "function") openModal("modal-paywall");
+}
+
+function _renderPaywallCards(){
+  // Always read the freshest plan — S.currentPlan is set by syncSubscriptionFromDB
+  // Fall back to localStorage settings, then default to "free"
+  var plan = "free";
+  try {
+    if(typeof S !== "undefined" && S && S.currentPlan) plan = S.currentPlan;
+    else if(typeof loadSettings === "function"){
+      var cfg = loadSettings();
+      if(cfg && cfg.currentPlan) plan = cfg.currentPlan;
+    }
+  } catch(_){}
+
+  var cfg = {
+    starter:  { text: "Get Starter · €9/mo",      cls: "btn btn-g pw-plan-btn" },
+    premium:  { text: "Upgrade to Premium",        cls: "btn btn-p pw-plan-btn" },
+    business: { text: "Upgrade to Business",       cls: "btn btn-g pw-plan-btn" }
+  };
+  ["starter","premium","business"].forEach(function(p){
+    var btn = document.getElementById("paywall-btn-" + p);
+    if(!btn) return;
+    var isCurrent = (plan === p);
+    if(isCurrent){
+      btn.textContent = "Current Plan";
+      btn.disabled    = true;
+      btn.className   = "btn pw-plan-btn";
+    } else {
+      btn.textContent = cfg[p].text;
+      btn.disabled    = false;
+      btn.className   = cfg[p].cls;
+    }
+  });
+}
+
+// ════════════════════════════════════════════════════════════════
 // SOFT PAYWALL — upgrade prompt shown after last free generation
 // ════════════════════════════════════════════════════════════════
 

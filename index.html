@@ -666,7 +666,7 @@
               <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px">
                 <div style="font-size:14px;font-weight:600;color:var(--charcoal)">Brand Core</div>
                 <div style="display:flex;gap:8px">
-                  <button class="btn btn-g btn-sm" onclick="openModal('modal-genbrand')">Regenerate</button>
+                  <button class="btn btn-g btn-sm" onclick="openBCRegen()">Regenerate</button>
                   <button class="btn btn-p btn-sm" onclick="openAddColorModal()">+ Color</button>
                 </div>
               </div>
@@ -1257,7 +1257,7 @@
         <div class="sp-progress-track"><div class="sp-progress-fill" id="spProgressFill"></div></div>
         <div class="sp-progress-list" id="spProgressList"></div>
       </div>
-      <button class="sp-cta-primary" onclick="closeSoftPaywallNoBar();openModal('modal-paywall')">Continue building</button>
+      <button class="sp-cta-primary" onclick="closeSoftPaywallNoBar();openPaywall()">Continue building</button>
       <button class="sp-cta-secondary" onclick="closeSoftPaywall()">Maybe later</button>
     </div>
   </div>
@@ -1267,77 +1267,87 @@
 <div id="upgradeBar" style="display:none">
   <div class="upgrade-bar-inner">
     <span>You've reached your limit —</span>
-    <button class="upgrade-bar-link" onclick="openModal('modal-paywall')">unlock more</button>
+    <button class="upgrade-bar-link" onclick="openPaywall()">unlock more</button>
   </div>
   <button class="upgrade-bar-dismiss" onclick="hideUpgradeBar()">×</button>
 </div>
 
 <!-- PAYWALL MODAL -->
 <div class="mbk" id="modal-paywall">
-  <div class="modal" style="width:680px;padding:0;overflow:visible">
-    <!-- X close -->
+  <div class="modal" style="width:720px;padding:0;overflow:visible">
     <button onclick="closePaywall()" title="Close" style="position:absolute;top:14px;right:14px;width:30px;height:30px;border-radius:50%;background:var(--bg2,#F6F3EE);border:1px solid rgba(0,0,0,.08);cursor:pointer;display:flex;align-items:center;justify-content:center;z-index:2;padding:0">
       <svg viewBox="0 0 12 12" width="10" height="10" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M1 1l10 10M11 1L1 11"/></svg>
     </button>
     <!-- Header -->
-    <div style="padding:28px 28px 22px;text-align:center;border-bottom:1px solid rgba(0,0,0,.06)">
-      <div style="font-size:10px;font-weight:700;letter-spacing:.14em;color:var(--gm,#1A4229);text-transform:uppercase;margin-bottom:10px">ORIVEN PRO</div>
-      <h2 style="font-size:26px;font-weight:700;color:var(--charcoal,#18181A);margin:0 0 8px;font-family:'Instrument Serif',serif">Unlock ORIVEN</h2>
-      <p style="font-size:14px;color:var(--muted,#888);margin:0">Scale your brand, content and conversions</p>
+    <div style="padding:28px 28px 20px;text-align:center;border-bottom:1px solid var(--border,rgba(0,0,0,.06))">
+      <div style="display:inline-flex;align-items:center;gap:6px;background:var(--glt,rgba(183,255,42,0.07));border:1px solid rgba(183,255,42,0.18);border-radius:20px;padding:4px 12px;margin-bottom:14px">
+        <svg viewBox="0 0 10 10" width="8" height="8" fill="none" stroke="#9FE81F" stroke-width="1.8"><path d="M5 1l1.2 2.6L9 4.2 7 6.1l.5 2.8L5 7.6 2.5 8.9 3 6.1 1 4.2l2.8-.6Z"/></svg>
+        <span style="font-size:10px;font-weight:700;letter-spacing:.1em;color:#9FE81F;text-transform:uppercase">ORIVEN Plans</span>
+      </div>
+      <h2 style="font-size:24px;font-weight:700;color:var(--charcoal,#18181A);margin:0 0 6px;font-family:'Instrument Serif',serif">Unlock your full brand potential</h2>
+      <p style="font-size:13.5px;color:var(--muted,#888);margin:0">Professional AI branding — built to grow with you</p>
     </div>
-    <!-- Plans -->
-    <div style="padding:22px 22px 18px;display:grid;grid-template-columns:1fr 1fr 1fr;gap:12px">
+    <!-- Plans grid -->
+    <div style="padding:20px 20px 16px;display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px">
+
       <!-- Starter -->
-      <div style="border:1px solid rgba(0,0,0,.1);border-radius:12px;padding:20px 18px;display:flex;flex-direction:column">
-        <div style="font-size:10px;font-weight:700;letter-spacing:.1em;color:var(--muted,#888);margin-bottom:14px">STARTER</div>
-        <div style="margin-bottom:14px">
-          <span style="font-size:30px;font-weight:700;color:var(--charcoal,#18181A);line-height:1">€1</span>
-          <div style="font-size:12px;color:var(--muted,#888);margin-top:2px">first month</div>
-          <div style="font-size:11px;color:var(--muted,#888)">then €9/month</div>
+      <div style="border:1px solid var(--border,rgba(0,0,0,.1));border-radius:14px;padding:20px 16px;display:flex;flex-direction:column">
+        <div style="font-size:9.5px;font-weight:700;letter-spacing:.12em;color:var(--muted,#888);text-transform:uppercase;margin-bottom:12px">Starter</div>
+        <div style="margin-bottom:16px">
+          <span style="font-size:28px;font-weight:700;color:var(--charcoal,#18181A);line-height:1">€9</span>
+          <span style="font-size:12px;color:var(--muted,#888);margin-left:4px">/ month</span>
         </div>
-        <div style="flex:1;font-size:12px;color:var(--charcoal,#18181A);line-height:1.9;margin-bottom:18px">
-          <div style="display:flex;gap:7px;align-items:flex-start"><svg viewBox="0 0 10 10" width="10" height="10" style="margin-top:4px;flex-shrink:0" fill="none" stroke="var(--gm,#1A4229)" stroke-width="1.7"><path d="M1.5 5L4 7.5L8.5 2"/></svg>AI Brand Generation</div>
-          <div style="display:flex;gap:7px;align-items:flex-start"><svg viewBox="0 0 10 10" width="10" height="10" style="margin-top:4px;flex-shrink:0" fill="none" stroke="var(--gm,#1A4229)" stroke-width="1.7"><path d="M1.5 5L4 7.5L8.5 2"/></svg>Brand Check</div>
-          <div style="display:flex;gap:7px;align-items:flex-start"><svg viewBox="0 0 10 10" width="10" height="10" style="margin-top:4px;flex-shrink:0" fill="none" stroke="var(--gm,#1A4229)" stroke-width="1.7"><path d="M1.5 5L4 7.5L8.5 2"/></svg>50 AI outputs/month</div>
-          <div style="display:flex;gap:7px;align-items:flex-start"><svg viewBox="0 0 10 10" width="10" height="10" style="margin-top:4px;flex-shrink:0" fill="none" stroke="var(--gm,#1A4229)" stroke-width="1.7"><path d="M1.5 5L4 7.5L8.5 2"/></svg>1 Brand Core</div>
+        <div style="flex:1;margin-bottom:16px">
+          <div class="pw-feat">50 AI generations / month</div>
+          <div class="pw-feat">1 BrandCore regeneration</div>
+          <div class="pw-feat">10 BrandChecks / month</div>
+          <div class="pw-feat">Brand Assistant</div>
+          <div class="pw-feat">1 website generation</div>
         </div>
-        <button class="btn btn-g" style="width:100%;justify-content:center;font-size:13px" onclick="selectPlan('starter')">Start for €1</button>
+        <button id="paywall-btn-starter" class="btn btn-g pw-plan-btn" onclick="selectPlan('starter')">Get Starter</button>
       </div>
-      <!-- Premium (highlighted) -->
-      <div style="border:2px solid var(--gm,#1A4229);border-radius:12px;padding:20px 18px;display:flex;flex-direction:column;position:relative;background:rgba(26,66,41,.025)">
-        <div style="position:absolute;top:-11px;left:50%;transform:translateX(-50%);background:var(--gm,#1A4229);color:#fff;font-size:9px;font-weight:700;letter-spacing:.1em;padding:3px 12px;border-radius:20px;white-space:nowrap">MOST POPULAR</div>
-        <div style="font-size:10px;font-weight:700;letter-spacing:.1em;color:var(--gm,#1A4229);margin-bottom:14px">PREMIUM</div>
-        <div style="margin-bottom:14px">
-          <span style="font-size:30px;font-weight:700;color:var(--charcoal,#18181A);line-height:1">€19</span>
-          <div style="font-size:12px;color:var(--muted,#888);margin-top:2px">/month</div>
+
+      <!-- Premium — highlighted -->
+      <div style="border:2px solid var(--gm,#9FE81F);border-radius:14px;padding:20px 16px;display:flex;flex-direction:column;position:relative;background:rgba(159,232,31,0.03)">
+        <div style="position:absolute;top:-11px;left:50%;transform:translateX(-50%);background:#9FE81F;color:#0B0B0B;font-size:9px;font-weight:800;letter-spacing:.1em;padding:3px 12px;border-radius:20px;white-space:nowrap;text-transform:uppercase">Most Popular</div>
+        <div style="font-size:9.5px;font-weight:700;letter-spacing:.12em;color:var(--gm,#9FE81F);text-transform:uppercase;margin-bottom:12px">Premium</div>
+        <div style="margin-bottom:16px">
+          <span style="font-size:28px;font-weight:700;color:var(--charcoal,#18181A);line-height:1">€19</span>
+          <span style="font-size:12px;color:var(--muted,#888);margin-left:4px">/ month</span>
         </div>
-        <div style="flex:1;font-size:12px;color:var(--charcoal,#18181A);line-height:1.9;margin-bottom:18px">
-          <div style="display:flex;gap:7px;align-items:flex-start"><svg viewBox="0 0 10 10" width="10" height="10" style="margin-top:4px;flex-shrink:0" fill="none" stroke="var(--gm,#1A4229)" stroke-width="1.7"><path d="M1.5 5L4 7.5L8.5 2"/></svg>Everything in Starter</div>
-          <div style="display:flex;gap:7px;align-items:flex-start"><svg viewBox="0 0 10 10" width="10" height="10" style="margin-top:4px;flex-shrink:0" fill="none" stroke="var(--gm,#1A4229)" stroke-width="1.7"><path d="M1.5 5L4 7.5L8.5 2"/></svg>Unlimited AI outputs</div>
-          <div style="display:flex;gap:7px;align-items:flex-start"><svg viewBox="0 0 10 10" width="10" height="10" style="margin-top:4px;flex-shrink:0" fill="none" stroke="var(--gm,#1A4229)" stroke-width="1.7"><path d="M1.5 5L4 7.5L8.5 2"/></svg>Brand Check uploads</div>
-          <div style="display:flex;gap:7px;align-items:flex-start"><svg viewBox="0 0 10 10" width="10" height="10" style="margin-top:4px;flex-shrink:0" fill="none" stroke="var(--gm,#1A4229)" stroke-width="1.7"><path d="M1.5 5L4 7.5L8.5 2"/></svg>Campaign builder</div>
+        <div style="flex:1;margin-bottom:16px">
+          <div class="pw-feat">200 AI generations / month</div>
+          <div class="pw-feat">3 BrandCore regenerations</div>
+          <div class="pw-feat">Unlimited BrandChecks</div>
+          <div class="pw-feat">Campaign Builder</div>
+          <div class="pw-feat">5 website generations</div>
+          <div class="pw-feat">All export formats</div>
         </div>
-        <button class="btn btn-p" style="width:100%;justify-content:center;font-size:13px" onclick="selectPlan('premium')">Upgrade to Premium</button>
+        <button id="paywall-btn-premium" class="btn btn-p pw-plan-btn" onclick="selectPlan('premium')">Upgrade to Premium</button>
       </div>
+
       <!-- Business -->
-      <div style="border:1px solid rgba(0,0,0,.1);border-radius:12px;padding:20px 18px;display:flex;flex-direction:column">
-        <div style="font-size:10px;font-weight:700;letter-spacing:.1em;color:var(--muted,#888);margin-bottom:14px">BUSINESS</div>
-        <div style="margin-bottom:14px">
-          <span style="font-size:30px;font-weight:700;color:var(--charcoal,#18181A);line-height:1">€39</span>
-          <div style="font-size:12px;color:var(--muted,#888);margin-top:2px">/month</div>
+      <div style="border:1px solid var(--border,rgba(0,0,0,.1));border-radius:14px;padding:20px 16px;display:flex;flex-direction:column">
+        <div style="font-size:9.5px;font-weight:700;letter-spacing:.12em;color:var(--muted,#888);text-transform:uppercase;margin-bottom:12px">Business</div>
+        <div style="margin-bottom:16px">
+          <span style="font-size:28px;font-weight:700;color:var(--charcoal,#18181A);line-height:1">€39</span>
+          <span style="font-size:12px;color:var(--muted,#888);margin-left:4px">/ month</span>
         </div>
-        <div style="flex:1;font-size:12px;color:var(--charcoal,#18181A);line-height:1.9;margin-bottom:18px">
-          <div style="display:flex;gap:7px;align-items:flex-start"><svg viewBox="0 0 10 10" width="10" height="10" style="margin-top:4px;flex-shrink:0" fill="none" stroke="var(--gm,#1A4229)" stroke-width="1.7"><path d="M1.5 5L4 7.5L8.5 2"/></svg>Everything in Premium</div>
-          <div style="display:flex;gap:7px;align-items:flex-start"><svg viewBox="0 0 10 10" width="10" height="10" style="margin-top:4px;flex-shrink:0" fill="none" stroke="var(--gm,#1A4229)" stroke-width="1.7"><path d="M1.5 5L4 7.5L8.5 2"/></svg>5 Brand Cores</div>
-          <div style="display:flex;gap:7px;align-items:flex-start"><svg viewBox="0 0 10 10" width="10" height="10" style="margin-top:4px;flex-shrink:0" fill="none" stroke="var(--gm,#1A4229)" stroke-width="1.7"><path d="M1.5 5L4 7.5L8.5 2"/></svg>Team access</div>
-          <div style="display:flex;gap:7px;align-items:flex-start"><svg viewBox="0 0 10 10" width="10" height="10" style="margin-top:4px;flex-shrink:0" fill="none" stroke="var(--gm,#1A4229)" stroke-width="1.7"><path d="M1.5 5L4 7.5L8.5 2"/></svg>Priority support</div>
+        <div style="flex:1;margin-bottom:16px">
+          <div class="pw-feat">400 AI generations / month</div>
+          <div class="pw-feat">10 BrandCore regenerations</div>
+          <div class="pw-feat">Unlimited BrandChecks</div>
+          <div class="pw-feat">Unlimited websites</div>
+          <div class="pw-feat">Team collaboration</div>
+          <div class="pw-feat">Dedicated support</div>
         </div>
-        <button class="btn btn-g" style="width:100%;justify-content:center;font-size:13px" onclick="selectPlan('business')">Upgrade to Business</button>
+        <button id="paywall-btn-business" class="btn btn-g pw-plan-btn" onclick="selectPlan('business')">Upgrade to Business</button>
       </div>
+
     </div>
     <!-- Footer -->
-    <div style="padding:14px 28px 20px;text-align:center;border-top:1px solid rgba(0,0,0,.06)">
-      <button onclick="closePaywall()" style="background:none;border:none;font-size:12px;color:var(--muted,#888);cursor:pointer;padding:6px 10px">Continue with free plan</button>
+    <div style="padding:12px 24px 18px;text-align:center;border-top:1px solid var(--border,rgba(0,0,0,.06))">
+      <button onclick="closePaywall()" style="background:none;border:none;font-size:12px;color:var(--muted,#888);cursor:pointer;padding:6px 10px;font-family:inherit">Continue with current plan</button>
     </div>
   </div>
 </div>
@@ -1430,10 +1440,7 @@
   </div>
   <div class="gob-content">
     <div class="gob-logo">
-      <div class="gob-logo-mark">
-        <img src="assets/orivenlogo.png" alt="ORIVEN">
-      </div>
-      <span class="gob-logo-name">ORIVEN</span>
+      <img src="assets/orivenlogo.png" alt="ORIVEN" class="gob-logo-img">
     </div>
     <h1 class="gob-headline">Your brand,<br><em>built by AI.</em></h1>
     <p class="gob-sub">One idea. A complete brand identity — ready in minutes.</p>

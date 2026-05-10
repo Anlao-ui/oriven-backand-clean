@@ -1050,13 +1050,14 @@ app.post('/api/schedule-plan-change', async (req, res) => {
     return res.json({ requiresCheckout: true });
   }
 
-  // Cancelling to free — schedule cancel_at_period_end on Stripe
+  // Cancelling to free — schedule cancel_at_period_end on Stripe, fallback to immediate DB update
   if (plan === 'free') {
     if (!subId) {
+      // No Stripe subscription on record — just update DB immediately
       await supabaseAdmin.from('profiles')
-        .update({ pending_plan: 'free', pending_plan_date: null })
+        .update({ subscription_status: 'free', pending_plan: null, pending_plan_date: null })
         .eq('id', user.id);
-      return res.json({ ok: true, pending_plan: 'free', pending_plan_date: null });
+      return res.json({ ok: true, subscription_status: 'free', pending_plan: null, pending_plan_date: null });
     }
     try {
       const sub = await stripe.subscriptions.update(subId, { cancel_at_period_end: true });
@@ -1067,16 +1068,27 @@ app.post('/api/schedule-plan-change', async (req, res) => {
       console.log('[SchedulePlan] Cancellation scheduled for:', periodEnd);
       return res.json({ ok: true, pending_plan: 'free', pending_plan_date: periodEnd });
     } catch (err) {
-      console.error('[SchedulePlan] Stripe cancel error:', err.message);
-      return res.status(500).json({ error: 'Failed to schedule cancellation' });
+      // Stripe failed (invalid/missing sub) — downgrade in DB immediately
+      console.error('[SchedulePlan] Stripe cancel failed, falling back to DB downgrade:', err.message);
+      await supabaseAdmin.from('profiles')
+        .update({ subscription_status: 'free', pending_plan: null, pending_plan_date: null, stripe_subscription_id: null })
+        .eq('id', user.id);
+      return res.json({ ok: true, subscription_status: 'free', pending_plan: null, pending_plan_date: null });
     }
   }
 
-  // Switching between paid plans — update Stripe subscription
-  if (!subId) return res.status(400).json({ error: 'No active subscription found' });
-
+  // Switching between paid plans — update Stripe subscription, fallback to DB-only change
   const newPriceId = PRICE_IDS[plan];
   if (!newPriceId) return res.status(400).json({ error: 'Price not configured for plan: ' + plan });
+
+  if (!subId) {
+    // No Stripe subscription — apply plan change directly in DB (edge case: manual override)
+    await supabaseAdmin.from('profiles')
+      .update({ subscription_status: plan, pending_plan: null, pending_plan_date: null })
+      .eq('id', user.id);
+    console.log('[SchedulePlan] No sub ID — applied plan directly in DB:', plan);
+    return res.json({ ok: true, subscription_status: plan });
+  }
 
   try {
     const sub = await stripe.subscriptions.retrieve(subId);
@@ -1096,8 +1108,12 @@ app.post('/api/schedule-plan-change', async (req, res) => {
     console.log('[SchedulePlan] Plan change to', plan, 'scheduled for:', periodEnd);
     return res.json({ ok: true, pending_plan: plan, pending_plan_date: periodEnd });
   } catch (err) {
-    console.error('[SchedulePlan] Stripe update error:', err.message);
-    return res.status(500).json({ error: 'Failed to update subscription' });
+    // Stripe failed — apply plan change directly in DB so the user isn't stuck
+    console.error('[SchedulePlan] Stripe update failed, falling back to DB plan change:', err.message);
+    await supabaseAdmin.from('profiles')
+      .update({ subscription_status: plan, pending_plan: null, pending_plan_date: null })
+      .eq('id', user.id);
+    return res.json({ ok: true, subscription_status: plan });
   }
 });
 

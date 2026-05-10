@@ -377,6 +377,15 @@ function idShowHub(){
 // NAVIGATION
 // ═══════════════════════════════════════════════════════════════
 function navigate(page){
+  // Plan gate: free users cannot access Inspiration or Brand Assistant
+  if(page==="inspiration" || page==="aichat"){
+    var _gatePlan = (typeof S!=="undefined" && S && S.currentPlan) ? S.currentPlan : "free";
+    if(_gatePlan==="free"){
+      if(typeof toast==="function") toast("Upgrade your plan to access this feature","warn");
+      if(typeof openPaywall==="function") openPaywall();
+      return;
+    }
+  }
   document.querySelectorAll(".ni").forEach(function(e){e.classList.remove("active");});
   document.querySelectorAll(".page").forEach(function(e){e.classList.remove("active");});
   // highlight sidebar item — workspace shares "create" highlight
@@ -392,6 +401,16 @@ function navigate(page){
   if(page==="aichat")     initChat();
   if(page==="create")     S._cwsHistory=[];
   if(page==="team")       { if(typeof initTeamPage==="function") initTeamPage(); }
+}
+
+function openBCRegen(){
+  var plan = (typeof S!=="undefined" && S && S.currentPlan) ? S.currentPlan : "free";
+  if(plan==="free"){
+    if(typeof toast==="function") toast("BrandCore regeneration requires a paid plan","warn");
+    if(typeof openPaywall==="function") openPaywall();
+    return;
+  }
+  if(typeof openModal==="function") openModal("modal-genbrand");
 }
 document.querySelectorAll(".ni").forEach(function(e){
   e.addEventListener("click",function(){ navigate(e.getAttribute("data-page")); });
