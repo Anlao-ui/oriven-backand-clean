@@ -5,10 +5,21 @@
 var SUPABASE_URL  = "https://rsqfoqitooxmkyrkuyzi.supabase.co";
 var SUPABASE_ANON_KEY = "sb_publishable_O7XoiC1YmV94lhwV5o8YBA_7zJ2HA7K";
 
-// ── Production backend base URL ────────────────────────────────
+// ── Backend base URL ──────────────────────────────────────────
 // Single definition — every API fetch across all scripts uses this.
-// To point at a local server during development, change this one line.
-var API_BASE_URL = "https://oriven-backand.onrender.com";
+// DEV:  http://localhost:3000
+// PROD: https://oriven-backand.onrender.com
+var API_BASE_URL = "http://localhost:5500";
+
+// ── Dev mode flag ─────────────────────────────────────────────
+// Detected once here — consumed by auth.js and usage.js to bypass
+// all subscription and usage restrictions during local development.
+// Never true on production (orivenai.com, Render, any non-localhost host).
+var ORIVEN_DEV = (
+  location.hostname === "localhost" ||
+  location.hostname === "127.0.0.1"
+);
+if (ORIVEN_DEV) console.log("[ORIVEN] Dev mode active — subscription and usage limits bypassed");
 
 var SB = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
 

@@ -20,7 +20,7 @@ function _renderPaywallCards(){
   } catch(_){}
 
   var cfg = {
-    starter:  { text: "Get Starter · €9/mo",      cls: "btn btn-g pw-plan-btn" },
+    starter:  { text: "Get Starter · €19/mo",     cls: "btn btn-g pw-plan-btn" },
     premium:  { text: "Upgrade to Premium",        cls: "btn btn-p pw-plan-btn" },
     business: { text: "Upgrade to Business",       cls: "btn btn-g pw-plan-btn" }
   };
@@ -100,10 +100,10 @@ function hideUpgradeBar(){
 
 function _spBuildProgress(){
   var items = [
-    { label: "Brand identity",     done: true  },
-    { label: "Content generation", done: true  },
-    { label: "Campaign creation",  done: false },
-    { label: "Full brand system",  done: false }
+    { label: "Brand identity configured", done: true  },
+    { label: "BrandCore established",     done: true  },
+    { label: "Content generation",        done: false },
+    { label: "Full brand operating system", done: false }
   ];
 
   var done = items.filter(function(i){ return i.done; }).length;

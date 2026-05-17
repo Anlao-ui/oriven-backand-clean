@@ -33,56 +33,58 @@ var SETTINGS_DEFAULTS = {
 var PLANS = [
   {
     id: "free",
-    name: "Free",
+    name: "Explore",
     price: 0,
     features: [
-      "1 BrandCore",
-      "1 AI generation per month",
-      "1 BrandCheck per month",
-      "PNG export only"
+      "BrandCore creation & editing",
+      "Platform exploration",
+      "Onboarding experience",
+      "No content generation"
     ]
   },
   {
     id: "starter",
     name: "Starter",
-    price: 9,
+    price: 19,
     features: [
-      "1 BrandCore",
-      "1 BrandCore regeneration per month",
-      "50 AI generations per month",
-      "10 BrandChecks per month",
-      "Brand Assistant",
-      "1 website generation"
+      "50 creative generations/month",
+      "Unlimited Brand Assistant",
+      "Ads & campaign generation",
+      "Text & image generation",
+      "5 website generations/month",
+      "5 Brand Identity regenerations",
+      "Social creative workflows"
     ]
   },
   {
     id: "premium",
     name: "Premium",
-    price: 19,
+    price: 49,
     popular: true,
     features: [
-      "1 BrandCore",
-      "3 BrandCore regenerations per month",
-      "200 AI generations per month",
-      "Unlimited BrandChecks",
-      "Campaign Builder",
-      "5 website generations",
-      "All export formats",
+      "200 creative generations/month",
+      "Unlimited Brand Assistant",
+      "Unlimited website generations",
+      "10 Brand Identity regenerations",
+      "Premium generation quality",
+      "Advanced creative workflows",
+      "Multi-brand workflows",
       "Priority support"
     ]
   },
   {
     id: "business",
     name: "Business",
-    price: 39,
+    price: 99,
     features: [
-      "1 BrandCore",
-      "10 BrandCore regenerations per month",
-      "400 AI generations per month",
-      "Unlimited BrandChecks",
+      "400 creative generations/month",
+      "Unlimited Brand Assistant",
       "Unlimited website generations",
-      "Team collaboration",
-      "Dedicated account support"
+      "Unlimited Brand Identity regenerations",
+      "Team collaboration systems",
+      "Shared BrandCore systems",
+      "Multi-user & agency workflows",
+      "Premium support"
     ]
   }
 ];
@@ -293,7 +295,7 @@ var LANG_STRINGS = {
     welcomeMsg:"How can I support your brand today?",
     // Create page
     createSub:"Choose a creation type to get started. Your Brand Core shapes every output.",
-    imageTitle:"Image",      imageDesc:"Create visuals, posters, and social media designs.",
+    imageTitle:"Visuals",     imageDesc:"Generate on-brand visuals, ads, and social media designs.",
     textTitle:"Text",        textDesc:"Generate captions, headlines, and brand copy.",
     campaignTitle:"Campaign",campaignDesc:"Build full campaigns with visuals and copy.",
     videoTitle:"Video",      videoDesc:"Create video ideas, scripts, and concepts.",
@@ -409,7 +411,6 @@ var LANG_STRINGS = {
     resetBCDesc:"This resets your entire brand setup — colors, tone of voice, positioning, and identity data. Your generated assets saved in Studio will not be affected, but all future generations will lose brand context until you create a new BrandCore. This action is permanent and cannot be reversed.",
     resetBCBtn:"Reset Brand Core",
     // Banner
-    betaBannerText:"You're using the first version of ORIVEN, the product is still being refined. Pricing will increase once this early version closes. We welcome your feedback:",
     // Builder
     builderResultLabel:"Result", regenerateBtn:"Regenerate", saveToStudioBtn:"Save to Studio"
   },
@@ -569,7 +570,6 @@ var LANG_STRINGS = {
     resetBCTitle:"Brand Core resetten",
     resetBCDesc:"Dit reset jouw volledige merkinstelling — kleuren, toon, positionering en identiteitsdata. Jouw opgeslagen bestanden in Studio worden niet beïnvloed, maar toekomstige generaties verliezen merkcontext. Deze actie is permanent en kan niet worden teruggedraaid.",
     resetBCBtn:"Brand Core resetten",
-    betaBannerText:"Je gebruikt de eerste versie van ORIVEN, het product wordt nog verder verfijnd. De prijs stijgt zodra deze vroege versie sluit. We verwelkomen jouw feedback:",
     builderResultLabel:"Resultaat", regenerateBtn:"Opnieuw genereren", saveToStudioBtn:"Opslaan in Studio"
   },
 
@@ -682,7 +682,6 @@ var LANG_STRINGS = {
     autoSaveSub:"Guarda automáticamente los cambios y el contenido generado en Studio.",
     spDangerSub:"Acciones permanentes — no se pueden deshacer.",
     resetBCTitle:"Resetear Brand Core", resetBCBtn:"Resetear Brand Core",
-    betaBannerText:"Estás usando la primera versión de ORIVEN, el producto aún se está refinando. El precio aumentará una vez que cierre esta versión anticipada. Agradecemos tu feedback:",
     builderResultLabel:"Resultado", regenerateBtn:"Regenerar", saveToStudioBtn:"Guardar en Studio"
   },
 
@@ -795,7 +794,6 @@ var LANG_STRINGS = {
     autoSaveSub:"Salve automaticamente as alterações e o conteúdo gerado no Studio.",
     spDangerSub:"Ações permanentes — não podem ser desfeitas.",
     resetBCTitle:"Redefinir Brand Core", resetBCBtn:"Redefinir Brand Core",
-    betaBannerText:"Você está usando a primeira versão do ORIVEN, o produto ainda está sendo refinado. O preço aumentará quando esta versão inicial fechar. Agradecemos seu feedback:",
     builderResultLabel:"Resultado", regenerateBtn:"Regenerar", saveToStudioBtn:"Salvar no Studio"
   },
 
@@ -908,7 +906,6 @@ var LANG_STRINGS = {
     autoSaveSub:"Speichere Workspace-Änderungen und generierten Inhalt automatisch im Studio.",
     spDangerSub:"Dauerhafte Aktionen — diese können nicht rückgängig gemacht werden.",
     resetBCTitle:"Brand Core zurücksetzen", resetBCBtn:"Brand Core zurücksetzen",
-    betaBannerText:"Du verwendest die erste Version von ORIVEN, das Produkt wird noch weiterentwickelt. Der Preis steigt, sobald diese Frühphase endet. Wir freuen uns über dein Feedback:",
     builderResultLabel:"Ergebnis", regenerateBtn:"Neu generieren", saveToStudioBtn:"In Studio speichern"
   },
 
@@ -1021,7 +1018,6 @@ var LANG_STRINGS = {
     autoSaveSub:"自动将您的工作区更改和生成内容保存到Studio。",
     spDangerSub:"永久操作 — 无法撤销。",
     resetBCTitle:"重置品牌核心", resetBCBtn:"重置品牌核心",
-    betaBannerText:"您正在使用ORIVEN的第一个版本，产品仍在完善中。早期版本关闭后价格将上涨。欢迎您的反馈：",
     builderResultLabel:"结果", regenerateBtn:"重新生成", saveToStudioBtn:"保存到Studio"
   }
 };
@@ -1078,10 +1074,6 @@ function applyLanguage(){
   if(typeof refreshDash === "function") refreshDash();
   var fabTag = document.getElementById("fabBCTag");
   if(fabTag && S.brandCore) fabTag.textContent = S.brandCore.name + " " + t("brandCore");
-
-  // ── Beta banner text ────────────────────────────────────────────────────────
-  var bannerTxt = document.querySelector(".beta-banner-text");
-  if(bannerTxt) bannerTxt.innerHTML = t("betaBannerText") + ' <a href="mailto:studio.oriven@outlook.com" class="beta-banner-link">studio.oriven@outlook.com</a>';
 
   // ── Idea panel — re-render if one is currently open ────────────────────────
   if(typeof idShowPanel === "function" && typeof S !== "undefined" && S._currentIdPanel){
@@ -1148,27 +1140,6 @@ function confirmReset(){
 
   toast("Brand Core has been reset");
   navigate("studio");
-}
-
-
-// ════════════════════════════════════════════════════════════════
-// BETA BANNER
-// ════════════════════════════════════════════════════════════════
-
-function _initBetaBanner(){
-  var banner   = document.getElementById("betaBanner");
-  var closeBtn = document.getElementById("betaBannerClose");
-  if(!banner || !closeBtn) return;
-
-  closeBtn.addEventListener("click", function(){
-    banner.style.opacity = "0";
-    banner.style.transform = "translateY(-100%)";
-    setTimeout(function(){
-      banner.style.display = "none";
-      document.body.classList.add("no-banner");
-    }, 260);
-    // Intentionally NOT writing to localStorage — banner reappears next session
-  });
 }
 
 
@@ -1328,7 +1299,11 @@ function renderPlanPanel(){
   var html = '<div class="plan-status-bar">';
   html += '<div class="plan-status-left">';
   html += '<span class="plan-status-badge">' + (currentData ? currentData.name : currentId) + '</span>';
-  html += '<span class="plan-status-renew">Renews on ' + renewalStr + '</span>';
+  if(currentId === "free"){
+    html += '<span class="plan-status-renew">Explore mode — upgrade to generate content</span>';
+  } else {
+    html += '<span class="plan-status-renew">Renews on ' + renewalStr + '</span>';
+  }
   html += '</div>';
   if(pendingId){
     var pendingData = PLANS.find(function(p){ return p.id === pendingId; });
@@ -1338,7 +1313,7 @@ function renderPlanPanel(){
     html += '<div class="plan-status-pending">';
     html += '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" width="13" height="13"><circle cx="8" cy="8" r="6"/><path d="M8 5v3l2 2"/></svg>';
     if(isCancellation){
-      html += 'Cancellation scheduled — access active until <strong>' + pendingDate + '</strong>';
+      html += 'Cancellation scheduled — full access active until <strong>' + pendingDate + '</strong>';
       html += '<button class="plan-cancel-btn" onclick="cancelPlanChange()">Undo Cancellation</button>';
     } else {
       html += 'Scheduled change: <strong>' + pendingName + '</strong> starts ' + pendingDate;
@@ -1394,32 +1369,18 @@ function renderPlanPanel(){
   });
   html += '</div>';
 
-  // ── Free tier row ─────────────────────────────────────────────
+  // ── Explore (free) tier row ───────────────────────────────────
   var freePlan = PLANS.find(function(p){ return p.id === "free"; });
-  if(freePlan){
-    var fIsCurrent = currentId === "free";
-    var fIsPending = pendingId === "free";
-    var fCls = 'plan-free-row';
-    if(fIsCurrent) fCls += ' plan-free-row--current';
-    if(fIsPending) fCls += ' plan-free-row--pending';
-
+  if(freePlan && currentId === "free"){
+    var fCls = 'plan-free-row plan-free-row--current';
     html += '<div class="' + fCls + '">';
     html += '<div class="plan-free-info">';
-    html += '<div class="plan-free-name">Free';
-    if(fIsCurrent)      html += '&ensp;<span class="plan-badge plan-badge--current" style="vertical-align:2px">Current Plan</span>';
-    else if(fIsPending) html += '&ensp;<span class="plan-badge plan-badge--pending" style="vertical-align:2px">Scheduled</span>';
-    html += '</div>';
-    html += '<div class="plan-free-feats">' + freePlan.features.join(' &middot; ') + '</div>';
+    html += '<div class="plan-free-name">Explore&ensp;<span class="plan-badge plan-badge--current" style="vertical-align:2px">Current Plan</span></div>';
+    html += '<div class="plan-free-feats">BrandCore creation &middot; Platform exploration &middot; No content generation</div>';
     html += '</div>';
     html += '<div class="plan-free-right">';
     html += '<span class="plan-free-price">Free</span>';
-    if(fIsCurrent){
-      html += '<button class="btn btn-g btn-sm" disabled>Current Plan</button>';
-    } else if(fIsPending){
-      html += '<button class="btn btn-g btn-sm" disabled>Scheduled</button>';
-    } else {
-      html += '<button class="btn btn-g btn-sm" onclick="switchPlan(\'free\')">Switch to Free</button>';
-    }
+    html += '<button class="btn btn-g btn-sm" disabled>Current Plan</button>';
     html += '</div>';
     html += '</div>';
   }
@@ -1429,12 +1390,12 @@ function renderPlanPanel(){
     html += '<div class="plan-cancel-section">';
     html += '<div class="plan-cancel-section-info">';
     html += '<div class="plan-cancel-section-title">Cancel Plan</div>';
-    html += '<div class="plan-cancel-section-sub">Your access stays active until ' + renewalStr + '. After that you move to the Free plan.</div>';
+    html += '<div class="plan-cancel-section-sub">Your access stays active until ' + renewalStr + '. After that your account moves to Explore (no generation access).</div>';
     html += '</div>';
     html += '<button class="btn btn-g btn-sm" onclick="_showCancelConfirm()">Cancel Plan</button>';
     html += '</div>';
     html += '<div class="plan-cancel-confirm" id="planCancelConfirm" style="display:none">';
-    html += '<div class="plan-cancel-confirm-text">Cancel your <strong>' + (currentData ? currentData.name : currentId) + '</strong> plan? You\'ll keep access until <strong>' + renewalStr + '</strong>, then move to Free.</div>';
+    html += '<div class="plan-cancel-confirm-text">Cancel your <strong>' + (currentData ? currentData.name : currentId) + '</strong> plan? You\'ll keep full access until <strong>' + renewalStr + '</strong>, then move to Explore mode (no generation access).</div>';
     html += '<div class="plan-cancel-confirm-btns">';
     html += '<button class="btn btn-danger btn-sm" onclick="switchPlan(\'free\')">Yes, Cancel Plan</button>';
     html += '<button class="btn btn-g btn-sm" onclick="_hideCancelConfirm()">Keep Plan</button>';
@@ -1498,7 +1459,6 @@ function _initSettingsNav(){
 document.addEventListener("DOMContentLoaded", function(){
   initSettings();
   _initSettingsNav();
-  _initBetaBanner();
   refreshDash();
   renderInspiration();
   renderAssets();

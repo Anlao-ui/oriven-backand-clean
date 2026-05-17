@@ -44,6 +44,44 @@ var CF_FLOWS = {
       ]
     },
     {
+      key:  "imgVisualStyle",
+      q:    "What visual style do you want?",
+      desc: "This sets the aesthetic direction — composition, mood, and overall look.",
+      options: [
+        { val: "editorial",    label: "Editorial" },
+        { val: "minimal",      label: "Minimal" },
+        { val: "bold",         label: "Bold" },
+        { val: "cinematic",    label: "Cinematic" },
+        { val: "lifestyle",    label: "Lifestyle" },
+        { val: "dark",         label: "Dark" }
+      ]
+    },
+    {
+      key:  "imgMood",
+      q:    "What mood should this image evoke?",
+      desc: "Mood shapes the emotional response and energy of the composition.",
+      options: [
+        { val: "premium",   label: "Premium" },
+        { val: "energetic", label: "Energetic" },
+        { val: "calm",      label: "Calm" },
+        { val: "dramatic",  label: "Dramatic" },
+        { val: "playful",   label: "Playful" },
+        { val: "serene",    label: "Serene" }
+      ]
+    },
+    {
+      key:  "imgLighting",
+      q:    "What lighting style do you want?",
+      desc: "Lighting is one of the strongest signals of quality and brand feel.",
+      options: [
+        { val: "natural",  label: "Natural" },
+        { val: "studio",   label: "Studio" },
+        { val: "dramatic", label: "Dramatic" },
+        { val: "soft",     label: "Soft" },
+        { val: "ambient",  label: "Ambient" }
+      ]
+    },
+    {
       key:  "imgIncludeText",
       q:    "Do you want to include text in the image?",
       desc: "Add a title, slogan, or message that should appear in the image.",
@@ -113,6 +151,30 @@ var CF_FLOWS = {
       ]
     },
     {
+      key:  "txtObjective",
+      q:    "What is the writing objective?",
+      desc: "This shapes the angle, structure, and intensity of the copy.",
+      options: [
+        { val: "promote",  label: "Promote" },
+        { val: "educate",  label: "Educate" },
+        { val: "convert",  label: "Convert" },
+        { val: "engage",   label: "Engage" },
+        { val: "inspire",  label: "Inspire" },
+        { val: "announce", label: "Announce" }
+      ]
+    },
+    {
+      key:  "txtCtaStyle",
+      q:    "What CTA style do you want?",
+      desc: "Defines how the call-to-action is delivered in the copy.",
+      options: [
+        { val: "direct",  label: "Direct Action" },
+        { val: "soft",    label: "Soft Nudge" },
+        { val: "urgency", label: "Urgency" },
+        { val: "none",    label: "No CTA" }
+      ]
+    },
+    {
       key:  "_extraNotes",
       q:    "Anything else you'd like to add?",
       desc: "The more specific your input, the better the final result.",
@@ -169,6 +231,27 @@ var CF_FLOWS = {
       ]
     },
     {
+      key:  "campFunnelStage",
+      q:    "What stage of the funnel is this campaign for?",
+      desc: "Funnel stage defines message intensity and creative direction.",
+      options: [
+        { val: "awareness",     label: "Awareness" },
+        { val: "consideration", label: "Consideration" },
+        { val: "conversion",    label: "Conversion" },
+        { val: "retention",     label: "Retention" }
+      ]
+    },
+    {
+      key:  "campAudienceWarmth",
+      q:    "How warm is your target audience?",
+      desc: "Warm audiences already know your brand — cold ones don't.",
+      options: [
+        { val: "cold",       label: "Cold Audience" },
+        { val: "warm",       label: "Warm Audience" },
+        { val: "retargeted", label: "Retargeted" }
+      ]
+    },
+    {
       key:  "campVariations",
       q:    "How many ad variations do you want?",
       desc: "Each variation is a unique creative angle within the campaign.",
@@ -185,6 +268,100 @@ var CF_FLOWS = {
       type: "textarea",
       placeholder: "Describe your offer, audience, key messages, or any creative direction…",
       optional: true
+    }
+  ],
+
+  ugc: [
+    {
+      key:         "ucProduct",
+      q:           "What product or service are you promoting?",
+      desc:        "Be specific — the more precise, the more authentic the script.",
+      type:        "textarea",
+      placeholder: "e.g. Glow Serum by Lumina, TaskFlow productivity app, Premium Matcha Kit…",
+      optional:    false
+    },
+    {
+      key:         "ucNiche",
+      q:           "What niche or industry is this for?",
+      desc:        "This shapes the creator's language, references, and cultural tone.",
+      type:        "textarea",
+      placeholder: "e.g. Skincare, B2B SaaS, Fitness, E-commerce fashion…",
+      optional:    true
+    },
+    {
+      key:         "ucAudience",
+      q:           "Who is the target audience?",
+      desc:        "The creator will speak directly to this person.",
+      type:        "textarea",
+      placeholder: "e.g. Women 25–34, busy founders, gym-goers who want results…",
+      optional:    true
+    },
+    {
+      key:  "ucGoal",
+      q:    "What is the ad goal?",
+      desc: "This defines the script's structure — hook, body, and call-to-action.",
+      options: [
+        { val: "awareness",  label: "Brand Awareness" },
+        { val: "sales",      label: "Drive Sales" },
+        { val: "launch",     label: "Product Launch" },
+        { val: "engagement", label: "Engagement" }
+      ]
+    },
+    {
+      key:  "ucTone",
+      q:    "What tone should the creator use?",
+      desc: "Sets the energy, personality, and delivery style of the ad.",
+      options: [
+        { val: "natural",      label: "Natural & Honest" },
+        { val: "enthusiastic", label: "Enthusiastic" },
+        { val: "professional", label: "Professional" },
+        { val: "casual",       label: "Casual & Fun" },
+        { val: "confident",    label: "Confident" }
+      ]
+    },
+    {
+      key:  "ucCreator",
+      q:    "Which creator should deliver this ad?",
+      desc: "Each creator has a distinct presence and delivery style.",
+      options: [
+        { val: "lifestyle",    label: "Lifestyle",    desc: "Female · Expressive · Relatable" },
+        { val: "professional", label: "Professional", desc: "Male · Confident · Authoritative" },
+        { val: "studio",       label: "Studio",       desc: "Female · Polished · Premium" }
+      ]
+    },
+    {
+      key:  "ucBackground",
+      q:    "What is the background setting?",
+      desc: "The setting shapes the script's references and the visual feel of the ad.",
+      options: [
+        { val: "white_studio",    label: "White Studio" },
+        { val: "luxury_interior", label: "Luxury Interior" },
+        { val: "lifestyle",       label: "Lifestyle" },
+        { val: "gym_fitness",     label: "Gym / Fitness" },
+        { val: "office",          label: "Office" },
+        { val: "street_outdoor",  label: "Street / Outdoor" },
+        { val: "minimal_dark",    label: "Minimal Dark" },
+        { val: "ecommerce_shelf", label: "Product Shelf" }
+      ]
+    },
+    {
+      key:  "ucScriptMode",
+      q:    "How do you want the script handled?",
+      desc: "ORIVEN can write the script for you, or you can provide your own.",
+      options: [
+        { val: "ai",     label: "Generate with AI",  desc: "ORIVEN writes a script using your brief" },
+        { val: "custom", label: "Use My Own Script", desc: "Paste a script you've already written" }
+      ]
+    },
+    {
+      key:          "ucCustomScript",
+      q:            "Paste your script below.",
+      desc:         "This will be spoken directly by the AI creator. Keep it conversational.",
+      type:         "textarea",
+      placeholder:  "Paste your UGC script here…",
+      optional:     false,
+      conditional:  "ucScriptMode",
+      conditionalVal: "custom"
     }
   ],
 
@@ -227,6 +404,19 @@ var CF_FLOWS = {
         { val: "startup",    label: "Startup" },
         { val: "dark",       label: "Dark" },
         { val: "light",      label: "Light" }
+      ]
+    },
+    {
+      key:  "webConversionGoal",
+      q:    "What is the primary conversion goal?",
+      desc: "Every element on the page will orient toward this goal.",
+      options: [
+        { val: "signup",    label: "Sign Up / Free Trial" },
+        { val: "purchase",  label: "Purchase" },
+        { val: "contact",   label: "Contact / Enquiry" },
+        { val: "download",  label: "Download" },
+        { val: "book_call", label: "Book a Call" },
+        { val: "awareness", label: "Brand Awareness" }
       ]
     },
     {
@@ -283,6 +473,10 @@ var CF_META = {
   web: {
     label: "Web",
     icon: '<svg viewBox="0 0 20 20" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><rect x="1" y="2" width="18" height="13" rx="2.5"/><path d="M1 6h18"/><path d="M4 4h.01M6.5 4h.01M9 4h.01"/><path d="M6 18h8M10 15v3"/></svg>'
+  },
+  ugc: {
+    label: "UGC Creator",
+    icon: '<svg viewBox="0 0 20 20" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="1.5" y="4" width="12" height="12" rx="2.5"/><path d="M13.5 8L18 6v9l-4.5-2"/></svg>'
   }
 };
 
@@ -629,8 +823,9 @@ function _cfLaunch(){
     // Show generating message
     var qEl   = document.getElementById("cfQuestionText");
     var dEl   = document.getElementById("cfQuestionDesc");
-    if(qEl)   qEl.textContent = "Building your " + _cfType + "…";
-    if(dEl)   dEl.textContent = "Sending your brief to ORIVEN AI.";
+    var _typeName = (CF_META[_cfType] && CF_META[_cfType].label) || _cfType;
+    if(qEl)   qEl.textContent = _cfType === "ugc" ? "Generating your UGC video…" : "Building your " + _typeName + "…";
+    if(dEl)   dEl.textContent = _cfType === "ugc" ? "Submitting your brief to HeyGen." : "Sending your brief to ORIVEN AI.";
 
     if(block){
       block.style.transition = "none";
@@ -645,7 +840,11 @@ function _cfLaunch(){
 
     setTimeout(function(){
       closeAIFlow();
-      _cfDispatch();
+      if(_cfType === "ugc"){
+        _cfDispatchUGC();
+      } else {
+        _cfDispatch();
+      }
     }, 520);
   }, 200);
 }
@@ -714,6 +913,54 @@ function _cfDispatch(){
   } else {
     setTimeout(function(){ _flowGenerate(); }, 90);
   }
+}
+
+// ── UGC flow dispatch — opens result overlay + triggers generation ──
+function _cfDispatchUGC(){
+  var a = _cfAnswers;
+
+  // Map flow answers into ugc.js state variables
+  _ucScriptMode      = (a.ucScriptMode && a.ucScriptMode.val)  || "ai";
+  _ucSelectedBg      = (a.ucBackground && a.ucBackground.val)  || null;
+  var creatorId      = (a.ucCreator    && a.ucCreator.val)     || null;
+  _ucSelectedCreator = (typeof UC_CREATORS !== "undefined")
+    ? (UC_CREATORS.find(function(c){ return c.id === creatorId; }) || null)
+    : null;
+
+  // Reset video state
+  _ucActiveId = null;
+  if(typeof _ucPollTimer !== "undefined" && _ucPollTimer){
+    clearInterval(_ucPollTimer); _ucPollTimer = null;
+  }
+
+  // Clear result UI
+  var statusWrap = document.getElementById("ucStatusWrap");
+  var videoWrap  = document.getElementById("ucVideoWrap");
+  var retryRow   = document.getElementById("ucRetryRow");
+  var newRow     = document.getElementById("ucNewRow");
+  if(statusWrap) statusWrap.innerHTML = "";
+  if(videoWrap)  videoWrap.style.display  = "none";
+  if(retryRow)   retryRow.style.display   = "none";
+  if(newRow)     newRow.style.display     = "none";
+
+  // Open the result overlay
+  var overlay = document.getElementById("ucOverlay");
+  if(overlay){
+    overlay.style.display    = "flex";
+    overlay.style.opacity    = "0";
+    overlay.style.transition = "none";
+    requestAnimationFrame(function(){
+      requestAnimationFrame(function(){
+        overlay.style.transition = "opacity 0.25s ease";
+        overlay.style.opacity    = "1";
+      });
+    });
+  }
+
+  // Trigger generation after overlay is visible
+  setTimeout(function(){
+    if(typeof ucGenerateFromFlow === "function") ucGenerateFromFlow(a);
+  }, 280);
 }
 
 // ── HTML escape ───────────────────────────────────────────────

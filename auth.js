@@ -199,6 +199,12 @@ async function authSignOut(){
 // ── After sign in: update UI, load BrandCore, show app ───────
 
 async function syncSubscriptionFromDB(){
+  if(typeof ORIVEN_DEV !== "undefined" && ORIVEN_DEV){
+    if(typeof S !== "undefined" && S) S.currentPlan = "business";
+    if(typeof _updateSidebarPlan === "function") _updateSidebarPlan("business");
+    if(typeof invalidatePlanCache === "function") invalidatePlanCache();
+    return;
+  }
   try {
     var sessionResult = await SB.auth.getSession();
     var session = sessionResult.data && sessionResult.data.session;
@@ -262,8 +268,12 @@ async function _loadUserProfile(user){
       _showVerifyBanner(daysLeft);
     }
 
-    // Subscription sync from DB
-    if(data && data.subscription_status){
+    // Subscription sync from DB — dev mode always wins
+    if(typeof ORIVEN_DEV !== "undefined" && ORIVEN_DEV){
+      S.currentPlan = "business";
+      if(typeof _updateSidebarPlan === "function") _updateSidebarPlan("business");
+      if(typeof invalidatePlanCache === "function") invalidatePlanCache();
+    } else if(data && data.subscription_status){
       S.currentPlan = data.subscription_status;
       saveSettings({ currentPlan: data.subscription_status });
       if(typeof _updateSidebarPlan === "function") _updateSidebarPlan(S.currentPlan);
@@ -563,6 +573,10 @@ async function deleteBCFromDB(){
 // ── Paywall ───────────────────────────────────────────────────
 
 async function checkSubscriptionStatus(){
+  if(typeof ORIVEN_DEV !== "undefined" && ORIVEN_DEV){
+    if(typeof S !== "undefined" && S) S.currentPlan = "business";
+    return "business";
+  }
   if(typeof SB === "undefined"){
     console.error("[Paywall] SB client not initialized — cannot check subscription");
     return "free";

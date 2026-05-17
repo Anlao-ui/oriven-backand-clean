@@ -401,6 +401,7 @@ function navigate(page){
   if(page==="aichat")     initChat();
   if(page==="create")     S._cwsHistory=[];
   if(page==="team")       { if(typeof initTeamPage==="function") initTeamPage(); }
+  if(page==="ugc")        { if(typeof ugcInit==="function") ugcInit(); }
 }
 
 function openBCRegen(){

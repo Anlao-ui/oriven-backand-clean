@@ -640,6 +640,34 @@ function _buildImageBuilderPrompt(custom){
   var purposeLabel = purposeLabels[b.imgPurpose] || "";
   var purposeBlock = purposeLabel ? ("Purpose: " + purposeLabel) : "";
 
+  // 3b. Visual style, mood, lighting (from flow enrichment)
+  var visualStyleMap = {
+    editorial: "editorial — bold graphic composition, fashion-magazine aesthetic, strong geometric structure",
+    minimal:   "minimal — abundant white space, single strong focal point, quiet and deliberate",
+    bold:      "bold — high contrast, saturated color, immediate visual impact, no ambiguity",
+    cinematic: "cinematic — widescreen feel, dramatic lighting, film-quality atmosphere, depth of field",
+    lifestyle: "lifestyle — authentic, natural, human-first, real-world context, organic and unposed",
+    dark:      "dark — low-key, premium, moody, shadow-dominant, depth and mystery"
+  };
+  var moodMap = {
+    premium:   "premium, aspirational, elevated and refined",
+    energetic: "energetic, active, dynamic and high-energy",
+    calm:      "calm, composed, quiet confidence",
+    dramatic:  "dramatic, intense, high-emotion",
+    playful:   "playful, light, approachable and warm",
+    serene:    "serene, peaceful, meditative stillness"
+  };
+  var lightingMap = {
+    natural:  "natural light — soft, directional, authentic and unmanipulated",
+    studio:   "studio lighting — clean, controlled, deliberate shadows",
+    dramatic: "dramatic lighting — high contrast, strong shadows, chiaroscuro effect",
+    soft:     "soft box lighting — diffused, flattering, professional and clean",
+    ambient:  "ambient light — environmental light sources, atmospheric and contextual"
+  };
+  var visualStyleBlock = b.imgVisualStyle ? ("VISUAL STYLE: " + (visualStyleMap[b.imgVisualStyle] || b.imgVisualStyle)) : "";
+  var moodBlock        = b.imgMood        ? ("MOOD: "         + (moodMap[b.imgMood]               || b.imgMood))       : "";
+  var lightingBlock    = b.imgLighting    ? ("LIGHTING: "     + (lightingMap[b.imgLighting]        || b.imgLighting))   : "";
+
   // 4. Person (conditional)
   var personBlock = "";
   if(!isLogo){
@@ -687,7 +715,7 @@ function _buildImageBuilderPrompt(custom){
   var techBlock = "Format: " + fmt + " — fill edge to edge. Keep the " + _imgTextZone(fmt) + " uncluttered for text overlay.";
 
   // ── Assemble: all sections except extras ─────────────────────
-  var coreSections = [opening, brandBlock, purposeBlock, personBlock, textBlock, uploadBlock, qualityBlock, techBlock]
+  var coreSections = [opening, brandBlock, purposeBlock, visualStyleBlock, moodBlock, lightingBlock, personBlock, textBlock, uploadBlock, qualityBlock, techBlock]
     .filter(Boolean);
   var coreText = coreSections.join("\n\n");
   var result   = extraBlock ? (coreText + "\n\n" + extraBlock) : coreText;
@@ -708,7 +736,7 @@ function _buildImageBuilderPrompt(custom){
     var cs2 = _formatBrandColors(bc.colors);
     if(cs2)         shortBrandLines.push("Color palette: " + cs2);
     var shortBrand = shortBrandLines.join("\n");
-    var trimSections = [opening, shortBrand, purposeBlock, personBlock, textBlock, uploadBlock, qualityBlock, techBlock].filter(Boolean);
+    var trimSections = [opening, shortBrand, purposeBlock, visualStyleBlock, moodBlock, lightingBlock, personBlock, textBlock, uploadBlock, qualityBlock, techBlock].filter(Boolean);
     result = trimSections.join("\n\n");
     console.log("[ImagePrompt] Trimmed brand block. Length: " + result.length);
   }
@@ -769,6 +797,26 @@ function _buildTextBuilderPrompt(custom){
 
   var ctx = purposeContext[b.txtPurpose || "awareness"];
   if(ctx) parts.push(ctx);
+
+  // Writing objective (from flow enrichment)
+  var objectiveMap = {
+    promote:  "WRITING OBJECTIVE: Promote — lead with value, create desire, make the offer compelling and specific.",
+    educate:  "WRITING OBJECTIVE: Educate — clarity above all, break down complexity, build authority through precision.",
+    convert:  "WRITING OBJECTIVE: Convert — remove hesitation, value proposition unmissable, strong CTA, urgency without desperation.",
+    engage:   "WRITING OBJECTIVE: Engage — invite interaction, emotionally resonant, prompts a reaction or response.",
+    inspire:  "WRITING OBJECTIVE: Inspire — aspirational, evocative, shifts perspective or sparks ambition.",
+    announce: "WRITING OBJECTIVE: Announce — confident arrival, excitement, unmistakably clear what is new or happening."
+  };
+  var ctaStyleMap = {
+    direct:  "CTA DIRECTION: Direct action — explicit, imperative, clear instruction: \"do this now.\"",
+    soft:    "CTA DIRECTION: Soft nudge — low friction, invitation, zero pressure: \"when you're ready\" energy.",
+    urgency: "CTA DIRECTION: Urgency — scarcity or time-sensitivity, creates genuine immediacy without being manipulative.",
+    none:    "CTA DIRECTION: No CTA — let the copy breathe. Do not include any call-to-action."
+  };
+  var objKey = b.txtObjective;
+  var ctaKey = b.txtCtaStyle;
+  if(objKey && objectiveMap[objKey]) parts.push(objectiveMap[objKey]);
+  if(ctaKey && ctaStyleMap[ctaKey])  parts.push(ctaStyleMap[ctaKey]);
 
   if(custom){
     parts.push(
@@ -914,6 +962,21 @@ function _buildCampaignBuilderPrompt(custom){
   parts.push(channels[b.campChannel || "meta"]    || channels.meta);
   parts.push(formats[b.campFormat || "square"]    || formats.square);
   parts.push(subjects[b.campSubject || "brand"]   || subjects.brand);
+
+  // Funnel stage and audience warmth (from flow enrichment)
+  var funnelMap = {
+    awareness:     "FUNNEL STAGE: Awareness — first impression, brand-first, maximum reach priority over persuasion. Prioritise memorability.",
+    consideration: "FUNNEL STAGE: Consideration — educate, differentiate, build preference. Show why this brand over alternatives.",
+    conversion:    "FUNNEL STAGE: Conversion — drive action now. Remove every objection. Value proposition unmissable. CTA dominant.",
+    retention:     "FUNNEL STAGE: Retention — reward loyalty, deepen relationship. Tone is appreciative, exclusive, insider-feeling."
+  };
+  var audienceMap = {
+    cold:       "AUDIENCE WARMTH: Cold — no prior brand exposure. Lead with problem recognition or strong hook, not brand claims. Earn trust before asking.",
+    warm:       "AUDIENCE WARMTH: Warm — brand-aware. Lean into differentiation, unique proof points, and what makes this brand the right choice.",
+    retargeted: "AUDIENCE WARMTH: Retargeted — visited or engaged before but didn't convert. New angle, social proof, address the specific hesitation."
+  };
+  if(b.campFunnelStage    && funnelMap[b.campFunnelStage])       parts.push(funnelMap[b.campFunnelStage]);
+  if(b.campAudienceWarmth && audienceMap[b.campAudienceWarmth])  parts.push(audienceMap[b.campAudienceWarmth]);
 
   if(custom){
     parts.push(
@@ -1915,15 +1978,17 @@ async function runBuilder(){
     var _c = S.brandCore || {};
     endpoint    = API_BASE_URL+"/api/generate-web";
     requestBody = {
-      brand_name: _c.name       || "",
-      product:    _b.webPromotion || "",
-      audience:   _b.webAudience  || "",
-      tone:       _c.tone        || "",
-      color:      _c.palette     || "#B7FF2A",
-      goal:       "conversion",
-      style:      _b.webStyle      || "modern",
-      animations: _b.webAnimations || "subtle",
-      sections:   _b.webSections   || "hero-features-cta"
+      brand_name:      _c.name             || "",
+      product:         _b.webPromotion     || "",
+      audience:        _b.webAudience      || "",
+      tone:            _c.tone             || "",
+      color:           _c.palette          || "#B7FF2A",
+      goal:            _b.webConversionGoal || "conversion",
+      style:           _b.webStyle          || "modern",
+      animations:      _b.webAnimations     || "subtle",
+      sections:        _b.webSections       || "hero-features-cta",
+      web_type:        _b.webType           || "",
+      layout:          _b.webLayout         || ""
     };
   }
 
@@ -2412,7 +2477,7 @@ function generateWeb(){
   };
   console.log("Payload size:", JSON.stringify(_payload).length);
 
-  fetch("https://oriven-backand.onrender.com/api/generate-web", {
+  fetch(API_BASE_URL + "/api/generate-web", {
     method:  "POST",
     headers: { "Content-Type": "application/json" },
     body:    JSON.stringify(_payload)

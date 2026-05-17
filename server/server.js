@@ -6,15 +6,40 @@ const Stripe = require('stripe');
 const { createClient } = require('@supabase/supabase-js');
 const nodemailer = require('nodemailer');
 const crypto     = require('crypto');
+const path       = require('path');
 const cron       = require('node-cron');
-require('dotenv').config();
+// Resolve .env from the project root (parent of this server/ dir) so the key is
+// found whether the server is started from c:\files\ OR c:\files\server\
+require('dotenv').config({ path: path.resolve(__dirname, '..', '.env') });
 
 const app = express();
-const PORT = 3000;
+const PORT = parseInt(process.env.PORT || '5500', 10);
 
-const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
-const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
-const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
+// Anthropic and Stripe are initialized eagerly with a 'missing' sentinel so
+// the process always starts. Routes call _requireEnv() and get a clean 503
+// if a key is absent rather than a confusing auth error from the SDK.
+const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY || 'missing' });
+const stripe    = new Stripe(process.env.STRIPE_SECRET_KEY            || 'missing');
+
+// OpenAI is initialized LAZILY — only on first use — so a missing key or
+// empty balance never prevents startup or blocks unrelated services
+// (HeyGen avatar/voice loading, Supabase, Stripe, Anthropic all remain up).
+let _openaiInstance = null;
+function _getOpenAI() {
+  if (!_openaiInstance) {
+    const key = process.env.OPENAI_API_KEY;
+    if (!key) return null;
+    _openaiInstance = new OpenAI({ apiKey: key });
+  }
+  return _openaiInstance;
+}
+
+// ── Resolved config constants ─────────────────────────────────────
+// Single definition for every value that would otherwise be duplicated
+// across multiple routes as process.env.X || 'hardcoded-default'.
+const FRONTEND_URL = process.env.FRONTEND_URL || 'https://orivenai.com';
+const SMTP_HOST    = process.env.SMTP_HOST    || 'smtp-mail.outlook.com';
+const SMTP_PORT    = parseInt(process.env.SMTP_PORT || '587', 10);
 
 // Decode a JWT payload without any library
 function decodeJwtRole(token) {
@@ -71,17 +96,33 @@ const supabaseAdmin = createClient(
     console.log('✅ [ENV] FRONTEND_URL =', process.env.FRONTEND_URL);
   }
 
-  // ── Stripe price ID audit — logged every boot so mismatches are obvious ──
-  const priceAudit = {
-    STRIPE_PRICE_STARTER:  process.env.STRIPE_PRICE_STARTER  || '(NOT SET)',
-    STRIPE_PRICE_PREMIUM:  process.env.STRIPE_PRICE_PREMIUM  || '(NOT SET)',
-    STRIPE_PRICE_BUSINESS: process.env.STRIPE_PRICE_BUSINESS || '(NOT SET)',
-    STRIPE_SECRET_KEY:     process.env.STRIPE_SECRET_KEY
-      ? (process.env.STRIPE_SECRET_KEY.startsWith('sk_live') ? '✅ LIVE key' : '⚠️  TEST key')
-      : '❌ NOT SET',
+  // ── AI keys ─────────────────────────────────────────────────────
+  const _ck = (val, label) => {
+    if (!val || val === 'missing') { console.error('❌ [ENV] ' + label + ' is not set'); }
+    else { console.log('✅ [ENV] ' + label + ' = ' + val.slice(0, 10) + '...'); }
   };
-  console.log('[ENV] Stripe price IDs:');
-  Object.entries(priceAudit).forEach(([k, v]) => console.log('  ', k, '=', v));
+  _ck(process.env.ANTHROPIC_API_KEY, 'ANTHROPIC_API_KEY');
+  _ck(process.env.OPENAI_API_KEY,    'OPENAI_API_KEY');
+  _ck(process.env.HEYGEN_API_KEY,    'HEYGEN_API_KEY');
+
+  // ── Stripe ───────────────────────────────────────────────────────
+  const sk = process.env.STRIPE_SECRET_KEY;
+  if (!sk || sk === 'missing') {
+    console.error('❌ [ENV] STRIPE_SECRET_KEY is not set — payments will fail');
+  } else {
+    console.log('✅ [ENV] STRIPE_SECRET_KEY =', sk.startsWith('sk_live') ? '✅ LIVE key' : '⚠️  TEST key');
+  }
+  const _price = (k) => console.log(' ', k, '=', process.env[k] || '❌ NOT SET');
+  _price('STRIPE_PRICE_STARTER');
+  _price('STRIPE_PRICE_PREMIUM');
+  _price('STRIPE_PRICE_BUSINESS');
+
+  // ── SMTP ─────────────────────────────────────────────────────────
+  if (!process.env.SMTP_USER || !process.env.SMTP_PASS) {
+    console.warn('⚠️  [ENV] SMTP_USER / SMTP_PASS not fully set — verification emails will be skipped');
+  } else {
+    console.log('✅ [ENV] SMTP configured for', process.env.SMTP_USER);
+  }
 
   console.log('═══════════════════════════════════════════════════\n');
 })();
@@ -93,6 +134,13 @@ const PRICE_IDS = {
 };
 
 app.use(cors());
+
+// ── Static files — serve the frontend from the project root ────
+// This makes Express the single origin for both HTML and API routes,
+// so relative /api/... URLs from the browser resolve to this process.
+// Must come before express.json() but after cors() so CORS headers
+// are present on static responses too.
+app.use(express.static(path.resolve(__dirname, '..')));
 
 // ── Stripe webhook — must be registered BEFORE express.json() ──
 app.post('/api/stripe-webhook', express.raw({ type: 'application/json' }), async (req, res) => {
@@ -272,11 +320,13 @@ app.use(express.urlencoded({ limit: '20mb', extended: true }));
 
 // ── Web generator — registered immediately after json middleware ──
 app.post('/api/generate-web', async (req, res) => {
+  if (!_requireEnv('ANTHROPIC_API_KEY', res, 'Anthropic')) return;
   const {
     brand_name, product, goal,
     style, animations, sections,
     primary_color, secondary_color, accent_color,
     background_color, text_color,
+    web_type, layout,
     prompt
   } = req.body;
 
@@ -287,13 +337,25 @@ app.post('/api/generate-web', async (req, res) => {
   const secColor  = secondary_color  || '#9FE81F';
   const accColor  = accent_color     || '#BFA07A';
 
+  const conversionGoalLabels = {
+    signup:    'Sign up / free trial — every CTA drives toward account creation or trial',
+    purchase:  'Purchase — product-first, overcome buying hesitation, clear price and value',
+    contact:   'Contact / enquiry — build trust first, make reaching out feel low-friction',
+    download:  'Download — surface the benefit immediately, single-click CTA',
+    book_call: 'Book a call — social proof heavy, calendar CTA prominent',
+    awareness: 'Brand awareness — storytelling over selling, memorability over conversion',
+  };
+  const goalDescription = (goal && conversionGoalLabels[goal]) || (goal ? `Goal: ${goal}` : null);
+
   const userPrompt = prompt || [
-    brand_name ? `Brand name: ${brand_name}`         : null,
-    product    ? `Promoting: ${product}`              : null,
-    goal       ? `Goal: ${goal}`                      : null,
-    style      ? `Design style: ${style}`             : null,
-    animations ? `Animations: ${animations}`          : null,
-    sections   ? `Sections: ${sections}`              : null,
+    brand_name       ? `Brand name: ${brand_name}`                   : null,
+    web_type         ? `Website type: ${web_type}`                   : null,
+    product          ? `Promoting: ${product}`                       : null,
+    goalDescription  ? `Conversion goal: ${goalDescription}`         : null,
+    style            ? `Design style: ${style}`                      : null,
+    layout           ? `Layout direction: ${layout}`                 : null,
+    animations       ? `Animations: ${animations}`                   : null,
+    sections         ? `Sections: ${sections}`                       : null,
     `Background color: ${bgColor}`,
     `Text color: ${txtColor}`,
     `Primary color: ${primColor}`,
@@ -363,6 +425,20 @@ OUTPUT: Return ONLY the HTML document. No explanation, no preamble, no markdown 
   }
 });
 
+// ── Service key guard ─────────────────────────────────────────────
+// Call at the top of any route that needs a specific env var.
+// Returns true if the key exists; otherwise sends a 503 and returns false.
+function _requireEnv(key, res, label) {
+  const val = process.env[key];
+  if (!val || val === 'missing') {
+    const svc = label || key;
+    console.error('[503] ' + key + ' is not configured');
+    res.status(503).json({ error: svc + ' is not configured. Set ' + key + ' in environment variables.' });
+    return false;
+  }
+  return true;
+}
+
 // ── Auth helper — verify Supabase JWT and return user ───────────
 async function getUserFromToken(req) {
   const auth = req.headers.authorization || '';
@@ -378,8 +454,8 @@ async function getUserFromToken(req) {
 // ── Shared SMTP transporter factory ─────────────────────────────
 function _smtpTransporter() {
   return nodemailer.createTransport({
-    host:   process.env.SMTP_HOST || 'smtp-mail.outlook.com',
-    port:   parseInt(process.env.SMTP_PORT || '587', 10),
+    host:   SMTP_HOST,
+    port:   SMTP_PORT,
     secure: false,
     auth:   { user: process.env.SMTP_USER, pass: process.env.SMTP_PASS },
     tls:    { ciphers: 'SSLv3' }
@@ -427,13 +503,11 @@ app.use((req, _res, next) => {
   next();
 });
 
-app.get('/', (_req, res) => {
-  res.send('ORIVEN backend is running');
-});
 
 // ── Shared helpers ──────────────────────────────────────────────
 
 async function callAnthropic(systemPrompt, userPrompt) {
+  if (!process.env.ANTHROPIC_API_KEY) throw new Error('Anthropic API key not configured (ANTHROPIC_API_KEY missing)');
   const params = {
     model: 'claude-opus-4-6',
     max_tokens: 1024,
@@ -446,10 +520,12 @@ async function callAnthropic(systemPrompt, userPrompt) {
 
 // ── DALL-E 3 supported sizes: 1024x1024 | 1024x1792 | 1792x1024 ─
 async function callDallE(imagePrompt, size = '1024x1024') {
+  const client = _getOpenAI();
+  if (!client) throw new Error('OpenAI API key not configured (OPENAI_API_KEY missing)');
   const validSizes = ['1024x1024', '1024x1792', '1792x1024'];
   const safeSize   = validSizes.includes(size) ? size : '1024x1024';
 
-  const response = await openai.images.generate({
+  const response = await client.images.generate({
     model:   'dall-e-3',
     prompt:  imagePrompt,
     n:       1,
@@ -490,6 +566,7 @@ Output ONLY the image prompt. No labels. No explanation. No quotes.`;
 // ── Text — Anthropic only ───────────────────────────────────────
 // Used by: Text, Brand Assistant, Ideas, Video
 app.post('/api/generate-text', async (req, res) => {
+  if (!_requireEnv('ANTHROPIC_API_KEY', res, 'Anthropic')) return;
   const { prompt, type } = req.body;
   if (!prompt) return res.status(400).json({ error: 'prompt is required' });
 
@@ -758,22 +835,54 @@ app.post('/api/generate-brandcore', async (req, res) => {
 
   console.log('[BrandCore] Anthropic → generating brand identity for:', brandName);
   try {
-    const system = `You are a senior brand strategist at a world-class branding agency.
-Your task is to generate a complete, premium brand identity based on the client brief.
-Reply ONLY with valid JSON — no markdown fences, no extra text, no explanation.
+    const system = `You are ORIVEN BrandCore AI — a world-class combination of brand strategist, creative director, UI/UX design systems architect, conversion designer, and visual identity specialist.
+
+Before generating anything, you MUST deeply reason through the brand:
+- Analyze the niche, audience, positioning, emotional tone, and desired perception
+- Consider conversion goals, market sophistication, visual expectations, pricing level, trust requirements, and cultural aesthetic
+- Reason through the psychology of the brand FIRST — then design
+
+You MUST NEVER:
+- Generate generic AI branding
+- Reuse repetitive startup aesthetics or predictable design outputs
+- Default to minimal black-and-white unless strategically justified
+- Use random gradients unless emotionally purposeful
+- Output vague, placeholder, or cliché language
+
+Every brand must feel: strategically unique, emotionally intentional, commercially believable, visually consistent, and professionally designed.
+
+COLOR SYSTEM RULES:
+- Colors must be purposeful hex codes that reflect industry, audience, emotional tone, and pricing perception
+- Primary color must anchor the brand's emotional identity
+- Secondary and accent colors must create deliberate contrast and hierarchy
+- Avoid generic palettes — every color choice must be explainable
+
+TYPOGRAPHY RULES:
+- Heading font must reflect the brand's authority and emotional register
+- Body font must support readability and perceived quality
+- Choose real, widely available fonts (e.g. Montserrat, Inter, Playfair Display, DM Sans, Lora, Geist, Syne, Cabinet Grotesk, Fraunces, Plus Jakarta Sans)
+- Font pairing must feel intentional, not default
+
+LOGO CONCEPT RULES:
+- logoConcept.imagePrompt must be specific, visual, contain NO text or letterforms, and be suitable for AI image generation
+- Describe the mark itself: shape language, geometry, metaphor, weight, mood
+- Style must match the brand's positioning (e.g. not "futuristic wordmark" for an artisan brand)
+
+OUTPUT FORMAT:
+Reply ONLY with valid JSON — no markdown fences, no extra text, no explanation, no preamble.
 The JSON must match this exact structure:
 {
   "brandName": "string",
   "brandStrategy": {
-    "positioning": "string",
-    "targetAudience": "string",
-    "brandPersonality": "string",
-    "toneOfVoice": "string"
+    "positioning": "string (2–3 sentences: what the brand is, who it serves, and what makes it distinct)",
+    "targetAudience": "string (specific psychographic + demographic description)",
+    "brandPersonality": "string (3–5 personality traits with brief reasoning)",
+    "toneOfVoice": "string (how the brand speaks: register, vocabulary, energy level)"
   },
   "brandCore": {
-    "brandPromise": "string",
-    "mission": "string",
-    "vision": "string",
+    "brandPromise": "string (one sharp sentence the customer can hold the brand to)",
+    "mission": "string (why the brand exists beyond profit)",
+    "vision": "string (what success looks like in 5–10 years)",
     "values": ["string", "string", "string"]
   },
   "visualIdentity": {
@@ -782,24 +891,15 @@ The JSON must match this exact structure:
     "accentColor": "string (hex)",
     "headingFont": "string",
     "bodyFont": "string",
-    "styleDirection": "string",
-    "colorMood": "string"
+    "styleDirection": "string (vivid description of the overall visual language and feel)",
+    "colorMood": "string (the emotional effect of the palette)"
   },
   "logoConcept": {
-    "description": "string",
-    "style": "string",
-    "imagePrompt": "string"
+    "description": "string (strategic rationale — what the logo communicates and why)",
+    "style": "string (wordmark / lettermark / icon / combination mark — and why)",
+    "imagePrompt": "string (visual-only DALL-E prompt for the logo mark — no text, no letterforms)"
   }
-}
-
-Rules:
-- Colors must be realistic, purposeful hex codes that reflect the requested color mood and style direction
-- Fonts must be real, widely available fonts (e.g. Montserrat, Inter, Playfair Display, DM Sans, Lora, Geist)
-- Brand personality and tone must be consistent across every field
-- styleDirection and colorMood must directly reflect the client's requested style and mood preferences
-- logoConcept.imagePrompt must be visual, specific, and contain no text — suitable for AI logo generation
-- Outputs must feel like they came from a premium agency, not a generic tool
-- Avoid clichés and vague language`;
+}`;
 
     const userPrompt = `Generate a complete brand identity for the following brief:
 
@@ -961,7 +1061,7 @@ app.post('/api/create-checkout-session', async (req, res) => {
     return res.status(400).json({ error: `No price configured for plan: ${plan}. Contact support.` });
   }
 
-  const frontendUrl = process.env.FRONTEND_URL || 'https://orivenai.com';
+  const frontendUrl = FRONTEND_URL;
 
   try {
     const session = await stripe.checkout.sessions.create({
@@ -1242,8 +1342,8 @@ app.post('/api/signup', async (req, res) => {
   // Send verification email (best-effort — signup succeeds even if email fails)
   const smtpUser = process.env.SMTP_USER;
   const smtpPass = process.env.SMTP_PASS;
-  if (smtpUser && smtpPass && smtpPass !== 'YOUR_OUTLOOK_PASSWORD_HERE') {
-    const verifyUrl = `${process.env.FRONTEND_URL || 'https://orivenai.com'}?verify_token=${verificationToken}`;
+  if (smtpUser && smtpPass) {
+    const verifyUrl = `${FRONTEND_URL}?verify_token=${verificationToken}`;
     try {
       await _smtpTransporter().sendMail({
         from:    process.env.SMTP_FROM || `ORIVEN <${smtpUser}>`,
@@ -1296,12 +1396,12 @@ app.post('/api/resend-verification', async (req, res) => {
 
   const smtpUser = process.env.SMTP_USER;
   const smtpPass = process.env.SMTP_PASS;
-  if (!smtpUser || !smtpPass || smtpPass === 'YOUR_OUTLOOK_PASSWORD_HERE') {
-    return res.status(500).json({ error: 'Email service not configured' });
+  if (!smtpUser || !smtpPass) {
+    return res.status(503).json({ error: 'Email service not configured — set SMTP_USER and SMTP_PASS' });
   }
 
   const verificationToken = crypto.randomBytes(32).toString('hex');
-  const verifyUrl = `${process.env.FRONTEND_URL || 'https://orivenai.com'}?verify_token=${verificationToken}`;
+  const verifyUrl = `${FRONTEND_URL}?verify_token=${verificationToken}`;
 
   const { data: profile } = await supabaseAdmin.from('profiles')
     .select('first_name, email').eq('id', user.id).maybeSingle();
@@ -1342,18 +1442,12 @@ app.post('/api/send-invite', async (req, res) => {
   const smtpUser = process.env.SMTP_USER;
   const smtpPass = process.env.SMTP_PASS;
 
-  if (!smtpUser || !smtpPass || smtpPass === 'YOUR_OUTLOOK_PASSWORD_HERE') {
-    console.error('[Invite] ❌ SMTP credentials not configured in .env');
-    return res.status(500).json({ error: 'Email service not configured — set SMTP_USER and SMTP_PASS in server/.env' });
+  if (!smtpUser || !smtpPass) {
+    console.error('[Invite] ❌ SMTP credentials not configured — set SMTP_USER and SMTP_PASS in .env');
+    return res.status(503).json({ error: 'Email service not configured' });
   }
 
-  const transporter = nodemailer.createTransport({
-    host: process.env.SMTP_HOST || 'smtp-mail.outlook.com',
-    port: parseInt(process.env.SMTP_PORT || '587', 10),
-    secure: false,        // STARTTLS on port 587
-    auth: { user: smtpUser, pass: smtpPass },
-    tls:  { ciphers: 'SSLv3' }
-  });
+  const transporter = _smtpTransporter();
 
   const recipientName    = name  || email.split('@')[0];
   const senderWorkspace  = workspaceName || 'ORIVEN Workspace';
@@ -1467,13 +1561,438 @@ Brand description: ${description || 'a professional brand'}`;
   }
 });
 
-// ── 404 catch-all — must be after all routes ────────────────────
-// Prevents Express from returning an HTML error page for missing routes.
-// Without this, unknown paths produce "Cannot GET /api/..." in HTML,
-// causing the frontend JSON.parse to throw "Unexpected token '<'".
+// ════════════════════════════════════════════════════════════════
+// HEYGEN — AI UGC VIDEO GENERATION
+// ════════════════════════════════════════════════════════════════
+
+const HEYGEN_BASE = 'https://api.heygen.com';
+
+// Safely extract an array from either v1 or v2 HeyGen response shapes:
+//   v1: { code: 100, data: { avatars: [...] } }
+//   v2: { error: null, data: { avatars: [...] } }
+function _heygenExtract(parsed, key) {
+  if (!parsed) return [];
+  if (parsed.data && Array.isArray(parsed.data[key])) return parsed.data[key];
+  if (Array.isArray(parsed[key])) return parsed[key];
+  return [];
+}
+
+// Known-good public HeyGen stock avatars — used as last-resort fallback
+// when the API key is missing or the account has no avatars yet.
+const HEYGEN_FALLBACK_AVATARS = [
+  { avatar_id: 'Abigail_expressive_2024112501', avatar_name: 'Abigail (Upper Body)', gender: 'female' },
+  { avatar_id: 'Abigail_standing_office_front', avatar_name: 'Abigail Office Front', gender: 'female' },
+  { avatar_id: 'Aditya_public_1',               avatar_name: 'Aditya (Blue blazer)',  gender: 'male'   },
+  { avatar_id: 'Aditya_public_4',               avatar_name: 'Aditya (Brown blazer)', gender: 'male'   },
+];
+
+const HEYGEN_FALLBACK_VOICES = [
+  { voice_id: 'f38a635bee7a4d1f9b0a654a31d050d2', name: 'Chill Brian',  language: 'English', gender: 'male'   },
+  { voice_id: 'cef3bc4e0a84424cafcde6f2cf466c97', name: 'Ivy',          language: 'English', gender: 'female' },
+  { voice_id: 'f8c69e517f424cafaecde32dde57096b', name: 'Allison',       language: 'English', gender: 'female' },
+  { voice_id: 'd2f4f24783d04e22ab49ee8fdc3715e0', name: 'Chill Brian 2', language: 'English', gender: 'male'   },
+];
+
+// ── GET /api/ugc-avatars ─────────────────────────────────────────
+// Tries v2 (user-created), then v1 (full stock library), then talking_photo.
+// Falls back to HEYGEN_FALLBACK_AVATARS when no API key is configured.
+app.get('/api/ugc-avatars', async (req, res) => {
+  const user = await getUserFromToken(req);
+  if (!user) return res.status(401).json({ error: 'Unauthorized' });
+
+  const apiKey = process.env.HEYGEN_API_KEY;
+  if (!apiKey) {
+    console.error('[UGC/Avatars] HEYGEN_API_KEY is not set — returning static fallback avatars');
+    return res.json({ avatars: HEYGEN_FALLBACK_AVATARS, fallback: true });
+  }
+
+  try {
+    // ── v2: user-created / studio avatars ───────────────────────
+    console.log('[UGC/Avatars] Fetching v2/avatars…');
+    const v2Res  = await fetch(`${HEYGEN_BASE}/v2/avatars`, { headers: { 'X-Api-Key': apiKey } });
+    const v2Body = await v2Res.text();
+    console.log('[UGC/Avatars] v2 HTTP', v2Res.status);
+    console.log('[UGC/Avatars] v2 body:', v2Body.slice(0, 600));
+
+    let v2Data;
+    try { v2Data = JSON.parse(v2Body); } catch (_) { v2Data = null; }
+
+    let avatars = _heygenExtract(v2Data, 'avatars');
+    console.log('[UGC/Avatars] v2 avatars found:', avatars.length);
+
+    // ── v1 fallback: full public stock library ───────────────────
+    if (!avatars.length) {
+      console.log('[UGC/Avatars] v2 empty — trying v1/avatar.list…');
+      const v1Res  = await fetch(`${HEYGEN_BASE}/v1/avatar.list`, { headers: { 'X-Api-Key': apiKey } });
+      const v1Body = await v1Res.text();
+      console.log('[UGC/Avatars] v1 HTTP', v1Res.status);
+      console.log('[UGC/Avatars] v1 body:', v1Body.slice(0, 600));
+
+      let v1Data;
+      try { v1Data = JSON.parse(v1Body); } catch (_) { v1Data = null; }
+
+      avatars = _heygenExtract(v1Data, 'avatars');
+      console.log('[UGC/Avatars] v1 avatars found:', avatars.length);
+
+      // ── talking_photo fallback ───────────────────────────────
+      if (!avatars.length) {
+        const photos = _heygenExtract(v1Data, 'talking_photo');
+        console.log('[UGC/Avatars] v1 talking_photo found:', photos.length);
+        if (photos.length) {
+          avatars = photos.map(p => ({
+            avatar_id:   p.talking_photo_id || p.id,
+            avatar_name: p.talking_photo_name || p.name || 'Photo Avatar',
+            gender: '',
+          }));
+        }
+      }
+    }
+
+    // ── static fallback: last resort ────────────────────────────
+    if (!avatars.length) {
+      console.warn('[UGC/Avatars] All endpoints returned 0 avatars — using static fallback');
+      return res.json({ avatars: HEYGEN_FALLBACK_AVATARS, fallback: true });
+    }
+
+    console.log('[UGC/Avatars] Returning', Math.min(avatars.length, 40), 'avatars');
+    return res.json({ avatars: avatars.slice(0, 40) });
+
+  } catch (err) {
+    console.error('[UGC/Avatars] Fetch error:', err.message);
+    console.warn('[UGC/Avatars] Using static fallback due to error');
+    return res.json({ avatars: HEYGEN_FALLBACK_AVATARS, fallback: true });
+  }
+});
+
+// ── GET /api/ugc-voices ──────────────────────────────────────────
+app.get('/api/ugc-voices', async (req, res) => {
+  const user = await getUserFromToken(req);
+  if (!user) return res.status(401).json({ error: 'Unauthorized' });
+
+  const apiKey = process.env.HEYGEN_API_KEY;
+  if (!apiKey) {
+    console.error('[UGC/Voices] HEYGEN_API_KEY is not set — returning static fallback voices');
+    return res.json({ voices: HEYGEN_FALLBACK_VOICES, fallback: true });
+  }
+
+  try {
+    console.log('[UGC/Voices] Fetching v2/voices…');
+    const v2Res  = await fetch(`${HEYGEN_BASE}/v2/voices`, { headers: { 'X-Api-Key': apiKey } });
+    const v2Body = await v2Res.text();
+    console.log('[UGC/Voices] v2 HTTP', v2Res.status);
+    console.log('[UGC/Voices] v2 body:', v2Body.slice(0, 600));
+
+    let v2Data;
+    try { v2Data = JSON.parse(v2Body); } catch (_) { v2Data = null; }
+
+    let voices = _heygenExtract(v2Data, 'voices');
+    console.log('[UGC/Voices] Total voices from API:', voices.length);
+
+    if (!voices.length) {
+      console.warn('[UGC/Voices] API returned 0 voices — using static fallback');
+      return res.json({ voices: HEYGEN_FALLBACK_VOICES, fallback: true });
+    }
+
+    // Normalise names (some have leading newlines / trailing spaces)
+    voices = voices.map(v => ({ ...v, name: (v.name || '').trim() || v.voice_id }));
+
+    // Prefer English voices; fall back to all if none match
+    const en = voices.filter(v => {
+      const lang = (v.language || '').toLowerCase();
+      return lang.includes('english') || lang.startsWith('en');
+    });
+    const result = (en.length ? en : voices).slice(0, 60);
+
+    console.log('[UGC/Voices] Returning', result.length, 'voices (English preferred)');
+    return res.json({ voices: result });
+
+  } catch (err) {
+    console.error('[UGC/Voices] Fetch error:', err.message);
+    console.warn('[UGC/Voices] Using static fallback due to error');
+    return res.json({ voices: HEYGEN_FALLBACK_VOICES, fallback: true });
+  }
+});
+
+// ── POST /api/generate-ugc ──────────────────────────────────────
+// Combined: Anthropic writes the script, HeyGen generates the video.
+// Frontend calls one endpoint, gets back a videoId to poll.
+app.post('/api/generate-ugc', async (req, res) => {
+  const user = await getUserFromToken(req);
+  if (!user) return res.status(401).json({ error: 'Unauthorized' });
+
+  const { product, niche, audience, goal, tone, avatarId, voiceId, brandName, brandDesc, background, customScript } = req.body || {};
+  if (!product  || !product.trim())  return res.status(400).json({ error: 'Product is required' });
+  if (!avatarId)                     return res.status(400).json({ error: 'Avatar ID is required' });
+  if (!voiceId)                      return res.status(400).json({ error: 'Voice ID is required' });
+
+  const heygenKey = process.env.HEYGEN_API_KEY;
+  if (!heygenKey) return res.status(500).json({ error: 'HeyGen API key not configured' });
+
+  const goalLabel = {
+    awareness:  'build brand awareness',
+    sales:      'drive sales and conversions',
+    launch:     'announce a product launch',
+    engagement: 'drive social engagement'
+  }[goal] || 'promote the product';
+
+  const toneLabel = {
+    natural:      'natural, honest and relatable',
+    enthusiastic: 'enthusiastic and energetic',
+    professional: 'professional and trustworthy',
+    casual:       'casual and fun',
+    confident:    'confident and authoritative'
+  }[tone] || 'natural and relatable';
+
+  // Background context shapes how the script feels and references the setting
+  const bgScriptContext = {
+    white_studio:    'clean, professional white studio',
+    luxury_interior: 'high-end luxury interior space',
+    lifestyle:       'authentic lifestyle setting — natural, real-world environment',
+    gym_fitness:     'energetic gym or fitness environment — active, motivated',
+    office:          'modern professional office or workspace',
+    street_outdoor:  'outdoor or street setting — authentic, urban, unscripted feel',
+    minimal_dark:    'sleek minimal dark studio — premium, editorial aesthetic',
+    ecommerce_shelf: 'clean product shelf presentation — ecommerce, direct-to-consumer',
+  };
+  const bgNote = background && bgScriptContext[background]
+    ? `\nCreator setting: ${bgScriptContext[background]} — the script's language and references should feel authentic to this environment.`
+    : '';
+
+  // Background color mapping for HeyGen (solid colors only; others rely on script flavor)
+  const bgHeyGenMap = {
+    white_studio: { type: 'color', value: '#ffffff' },
+    minimal_dark: { type: 'color', value: '#111111' },
+  };
+
+  // ── Step 1: Script — use provided or generate with AI ────────
+  let script;
+  if (customScript && customScript.trim()) {
+    script = customScript.trim();
+    console.log('[UGC] Using custom script for:', product, '(', script.length, 'chars )');
+  } else {
+    if (!_requireEnv('ANTHROPIC_API_KEY', res, 'Anthropic')) return;
+    try {
+      const system = `You are an expert UGC ad scriptwriter for TikTok and Instagram Reels.
+Write scripts that sound like real creators talking to camera — never like traditional ads.
+Rules:
+- Open with a strong hook that grabs attention in the first 3 seconds
+- Use first-person testimonial or authentic story in the body
+- End with a clear, natural CTA
+- Conversational language only — like a real person talking, not a script
+- NO stage directions, NO [brackets], NO (actions), NO scene descriptions
+- Output ONLY the words the creator speaks aloud
+- Target 8 to 12 sentences for a 30–45 second read`;
+
+      const userMsg = `Write a UGC ad script:
+Product: ${product.trim()}
+Niche: ${niche || 'general'}
+Target audience: ${audience || 'general audience'}
+Goal: ${goalLabel}
+Tone: ${toneLabel}${brandName ? `\nBrand: ${brandName}` : ''}${brandDesc ? `\nBrand context: ${brandDesc}` : ''}${bgNote}
+
+Output ONLY the script text.`;
+
+      script = (await callAnthropic(system, userMsg)).trim();
+      if (!script) return res.status(500).json({ error: 'Anthropic returned an empty script' });
+      console.log('[UGC] Script generated for:', product, '(', script.length, 'chars )');
+    } catch (err) {
+      console.error('[UGC] Script generation error:', err.message);
+      return res.status(500).json({ error: 'Failed to write script: ' + err.message });
+    }
+  }
+
+  // ── Step 2: Submit to HeyGen ──────────────────────────────────
+  try {
+    const videoInput = {
+      character: { type: 'avatar', avatar_id: avatarId, avatar_style: 'normal' },
+      voice:     { type: 'text',   input_text: script,  voice_id: voiceId, speed: 1.0 }
+    };
+    const heygenBg = background && bgHeyGenMap[background];
+    if (heygenBg) videoInput.background = heygenBg;
+
+    const heygenRes = await fetch(`${HEYGEN_BASE}/v2/video/generate`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-Api-Key': heygenKey },
+      body: JSON.stringify({
+        video_inputs: [videoInput],
+        dimension: { width: 720, height: 1280 },
+        test: false
+      })
+    });
+
+    const heygenData = await heygenRes.json();
+
+    if (!heygenRes.ok || heygenData.error) {
+      const errMsg = (heygenData.error && (heygenData.error.message || JSON.stringify(heygenData.error))) || heygenData.message || 'HeyGen error';
+      console.error('[UGC] HeyGen submission failed:', errMsg);
+      return res.status(400).json({ error: errMsg });
+    }
+
+    const videoId = heygenData.data && heygenData.data.video_id;
+    if (!videoId) return res.status(500).json({ error: 'HeyGen did not return a video ID' });
+
+    console.log('[UGC] Video submitted to HeyGen:', videoId, '| user:', user.id);
+    return res.json({ ok: true, videoId, status: 'processing' });
+  } catch (err) {
+    console.error('[UGC] HeyGen submission error:', err.message);
+    return res.status(500).json({ error: 'Failed to submit to HeyGen: ' + err.message });
+  }
+});
+
+// ── POST /api/generate-ugc-script ───────────────────────────────
+app.post('/api/generate-ugc-script', async (req, res) => {
+  if (!_requireEnv('ANTHROPIC_API_KEY', res, 'Anthropic')) return;
+  const user = await getUserFromToken(req);
+  if (!user) return res.status(401).json({ error: 'Unauthorized' });
+
+  const { product, niche, audience, goal, tone, brandName, brandDesc, background } = req.body || {};
+  if (!product || !product.trim()) return res.status(400).json({ error: 'Product is required' });
+
+  const goalLabel = {
+    awareness:  'build brand awareness',
+    sales:      'drive sales and conversions',
+    launch:     'announce a product launch',
+    engagement: 'drive social engagement'
+  }[goal] || 'promote the product';
+
+  const toneLabel = {
+    natural:      'natural, honest and relatable',
+    enthusiastic: 'enthusiastic and energetic',
+    professional: 'professional and trustworthy',
+    casual:       'casual and fun',
+    confident:    'confident and authoritative'
+  }[tone] || 'natural and relatable';
+
+  const bgContextLabels = {
+    white_studio:    'clean, professional white studio',
+    luxury_interior: 'high-end luxury interior space',
+    lifestyle:       'authentic lifestyle setting',
+    gym_fitness:     'energetic gym or fitness environment',
+    office:          'modern professional office',
+    street_outdoor:  'outdoor or street setting',
+    minimal_dark:    'sleek minimal dark studio',
+    ecommerce_shelf: 'clean product shelf presentation',
+  };
+  const bgNote = background && bgContextLabels[background]
+    ? `\nCreator setting: ${bgContextLabels[background]} — the script's language and references should feel authentic to this environment.`
+    : '';
+
+  const system = `You are an expert UGC ad scriptwriter for TikTok and Instagram Reels.
+Write scripts that sound like real creators talking to camera — never like traditional ads.
+Rules:
+- Open with a strong hook that grabs attention in the first 3 seconds
+- Use a personal, first-person testimonial or story in the body
+- End with a clear, natural CTA
+- Conversational language only — like a real person talking, not a script
+- NO stage directions, NO [brackets], NO (actions), NO scene descriptions
+- Output ONLY the words the creator speaks aloud
+- Target 8 to 12 sentences for a 30–45 second read`;
+
+  const userMsg = `Write a UGC ad script:
+Product: ${product.trim()}
+Niche: ${niche || 'general'}
+Target audience: ${audience || 'general audience'}
+Goal: ${goalLabel}
+Tone: ${toneLabel}${brandName ? `\nBrand: ${brandName}` : ''}${brandDesc ? `\nBrand context: ${brandDesc}` : ''}${bgNote}
+
+Output ONLY the script text.`;
+
+  try {
+    const script = (await callAnthropic(system, userMsg)).trim();
+    if (!script) return res.status(500).json({ error: 'Empty script generated' });
+
+    console.log('[UGC] Script generated for:', product, '| user:', user.id);
+    return res.json({ ok: true, script });
+  } catch (err) {
+    console.error('[UGC] Script generation error:', err.message);
+    return res.status(500).json({ error: 'Failed to generate script: ' + err.message });
+  }
+});
+
+// ── POST /api/generate-ugc-video ─────────────────────────────────
+app.post('/api/generate-ugc-video', async (req, res) => {
+  const user = await getUserFromToken(req);
+  if (!user) return res.status(401).json({ error: 'Unauthorized' });
+
+  const { script, avatarId, voiceId } = req.body || {};
+  if (!script || !script.trim()) return res.status(400).json({ error: 'Script is required' });
+  if (!avatarId)                  return res.status(400).json({ error: 'Avatar ID is required' });
+  if (!voiceId)                   return res.status(400).json({ error: 'Voice ID is required' });
+
+  const apiKey = process.env.HEYGEN_API_KEY;
+  if (!apiKey) return res.status(500).json({ error: 'HeyGen API key not configured' });
+
+  try {
+    const response = await fetch(`${HEYGEN_BASE}/v2/video/generate`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-Api-Key': apiKey },
+      body: JSON.stringify({
+        video_inputs: [{
+          character: { type: 'avatar', avatar_id: avatarId, avatar_style: 'normal' },
+          voice:     { type: 'text',   input_text: script.trim(), voice_id: voiceId, speed: 1.0 }
+        }],
+        dimension: { width: 720, height: 1280 },
+        test: false
+      })
+    });
+
+    const data = await response.json();
+
+    if (!response.ok || data.error) {
+      const errMsg = (data.error && (data.error.message || JSON.stringify(data.error))) || data.message || 'HeyGen error';
+      console.error('[UGC] Generation failed:', errMsg);
+      return res.status(400).json({ error: errMsg });
+    }
+
+    const videoId = data.data && data.data.video_id;
+    if (!videoId) return res.status(500).json({ error: 'No video ID returned from HeyGen' });
+
+    console.log('[UGC] Generation started:', videoId, 'for user:', user.id);
+    return res.json({ ok: true, videoId, status: 'processing' });
+  } catch (err) {
+    console.error('[UGC] Generation error:', err.message);
+    return res.status(500).json({ error: 'Failed to start video generation' });
+  }
+});
+
+// ── GET /api/ugc-video-status/:videoId ──────────────────────────
+app.get('/api/ugc-video-status/:videoId', async (req, res) => {
+  const user = await getUserFromToken(req);
+  if (!user) return res.status(401).json({ error: 'Unauthorized' });
+
+  const { videoId } = req.params;
+  const apiKey = process.env.HEYGEN_API_KEY;
+  if (!apiKey) return res.status(500).json({ error: 'HeyGen API key not configured' });
+
+  try {
+    const response = await fetch(`${HEYGEN_BASE}/v1/video_status.get?video_id=${encodeURIComponent(videoId)}`, {
+      headers: { 'X-Api-Key': apiKey }
+    });
+    const data = await response.json();
+    const video = (data && data.data) || {};
+    return res.json({
+      status:       video.status        || 'unknown',
+      videoUrl:     video.video_url     || null,
+      thumbnailUrl: video.thumbnail_url || null,
+      error:        video.error         || null
+    });
+  } catch (err) {
+    console.error('[UGC] Status error:', err.message);
+    return res.status(500).json({ error: 'Failed to check video status' });
+  }
+});
+
+// ── Fallback — after all routes ──────────────────────────────────
+// /api/* paths return a JSON 404 so the frontend fetch wrapper gets
+// parseable JSON instead of an HTML error page.
+// All other paths (SPA routes like /app, /studio, /settings, etc.)
+// return index.html so the client-side router takes over on refresh.
 app.use(function(req, res) {
-  console.warn('[404]', req.method, req.url);
-  res.status(404).json({ error: 'Route not found: ' + req.method + ' ' + req.url });
+  if (req.path.startsWith('/api/')) {
+    console.warn('[404]', req.method, req.url);
+    return res.status(404).json({ error: 'Route not found: ' + req.method + ' ' + req.url });
+  }
+  res.sendFile(path.resolve(__dirname, '..', 'index.html'));
 });
 
 // ── Global error handler — catches unhandled errors in routes ───
@@ -1513,6 +2032,7 @@ cron.schedule('0 2 * * *', async () => {
     console.error('[Cron] Unexpected error:', err.message);
   }
 }, { timezone: 'UTC' });
+
 
 app.listen(PORT, async () => {
   console.log(`Server running on http://localhost:${PORT}`);

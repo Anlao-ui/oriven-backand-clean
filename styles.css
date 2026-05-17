@@ -84,6 +84,10 @@ textarea.inp{resize:vertical;min-height:80px}
 .sel:focus{border-color:var(--gm)}
 .lbl{display:block;font-size:12px;font-weight:500;color:var(--c2);margin-bottom:5px}
 .fg{margin-bottom:16px}
+.gb-tags{display:flex;flex-wrap:wrap;gap:7px;margin-top:6px}
+.fb{display:inline-flex;align-items:center;padding:6px 13px;border-radius:20px;border:1.5px solid var(--border,#2a2a2a);background:var(--bg2);color:var(--muted,#888);font-size:12px;font-weight:500;cursor:pointer;transition:border-color .15s,color .15s,background .15s;user-select:none;letter-spacing:.01em;line-height:1}
+.fb:hover{border-color:#5a5a5a;color:var(--charcoal,#f0f0f0)}
+.fb.active{border-color:#B7FF2A;background:rgba(183,255,42,.08);color:#B7FF2A;font-weight:600}
 
 /* UTILS */
 .badge{display:inline-flex;align-items:center;gap:4px;padding:3px 9px;border-radius:20px;font-size:11px;font-weight:600}
@@ -138,7 +142,7 @@ textarea.inp{resize:vertical;min-height:80px}
 .glov p{font-size:13px;color:var(--muted);margin-bottom:24px}
 
 /* ═══ LAYOUT ═══════════════════════════════════════════════════ */
-.app{display:flex;height:100vh;width:100%;overflow:hidden}
+.app{display:flex;height:100vh;width:100%;overflow:hidden;margin-top:0}
 
 /* SIDEBAR ─────────────────────────────────────────────────────
    Two flex children:
@@ -150,9 +154,6 @@ textarea.inp{resize:vertical;min-height:80px}
 ──────────────────────────────────────────────────────────────── */
 .sb{
   width:200px;min-width:200px;
-  /* height comes from parent .app via flex align-items:stretch — do NOT set
-     height:100vh here or the sidebar will extend past the viewport when the
-     beta banner adds margin-top to .app */
   background:var(--surface);border-right:1px solid var(--border);
   display:flex;flex-direction:column;
   overflow:hidden;
@@ -486,8 +487,8 @@ body.dark-mode .dash-hl-grad{
   display:flex;flex-direction:column;
   cursor:pointer;
   transition:
-    transform .28s cubic-bezier(.34,1.38,.64,1),
-    box-shadow .28s ease,
+    transform .3s cubic-bezier(.25,.46,.45,.94),
+    box-shadow .3s ease,
     background .22s ease,
     border-color .22s ease;
   text-align:left;
@@ -496,10 +497,10 @@ body.dark-mode .dash-hl-grad{
   user-select:none;
 }
 .cblk:hover{
-  transform:translateY(-4px) scale(1.015);
-  box-shadow:0 14px 40px rgba(0,0,0,.14);
+  transform:translateY(-3px) scale(1.008);
+  box-shadow:0 12px 36px rgba(0,0,0,.10);
 }
-.cblk:active{transform:translateY(-1px) scale(1.006);transition-duration:.07s}
+.cblk:active{transform:translateY(-1px) scale(1.003);transition-duration:.07s}
 
 /* Type accent — icon resting state */
 .cblk-image .cblk-ico{background:#0d1829;border-color:rgba(59,91,219,0.25)}
@@ -566,6 +567,39 @@ body.dark-mode .dash-hl-grad{
 @media(max-width:520px){
   .create-grid{grid-template-columns:1fr;gap:10px}
   .create-h1{font-size:30px}
+}
+
+/* ── Coming Soon cards — integrated into the same grid ─────── */
+.cblk.cblk-coming{
+  cursor:default;
+  pointer-events:none;
+  border-style:dashed;
+  border-color:var(--b2);
+}
+.cblk.cblk-coming:hover{
+  transform:none;
+  box-shadow:none;
+}
+/* Icon palettes */
+.cblk-shoots .cblk-ico{background:#061a1a;border-color:rgba(0,168,150,0.18)}
+.cblk-shoots .cblk-ico svg{stroke:#00A896;opacity:.7}
+.cblk-packaging .cblk-ico{background:#1a0611;border-color:rgba(210,60,120,0.18)}
+.cblk-packaging .cblk-ico svg{stroke:#D23C78;opacity:.7}
+.cblk-motion .cblk-ico{background:#0e0b1a;border-color:rgba(120,80,220,0.18)}
+.cblk-motion .cblk-ico svg{stroke:#7850DC;opacity:.7}
+/* Muted text treatment */
+.cblk-coming .cblk-title{color:var(--muted)}
+.cblk-coming .cblk-desc{color:var(--m2)}
+.cblk-coming .cblk-arr{display:none}
+/* Subtle bottom label */
+.cblk-soon{
+  margin-top:auto;
+  padding-top:18px;
+  font-size:9px;
+  font-weight:600;
+  letter-spacing:.13em;
+  text-transform:uppercase;
+  color:var(--m2);
 }
 
 /* ── FLOATING BRAND ASSISTANT ─────────────────────────────── */
@@ -1288,53 +1322,6 @@ body.dark-mode .dash-hl-grad{
   .id-panel-content{padding:20px}
 }
 
-
-/* ═══ BETA BANNER ═══════════════════════════════════════════════ */
-.beta-banner{
-  position:fixed;
-  top:0;left:0;right:0;
-  z-index:8000;
-  background:var(--green-deep);
-  display:flex;
-  align-items:center;
-  justify-content:center;
-  gap:12px;
-  padding:10px 48px 10px 20px;
-  transition:opacity .26s ease, transform .26s ease;
-}
-.beta-banner-text{
-  font-size:12px;
-  color:rgba(255,255,255,.75);
-  text-align:center;
-  line-height:1.5;
-}
-.beta-banner-link{
-  color:rgba(255,255,255,.9);
-  text-decoration:underline;
-  text-underline-offset:2px;
-}
-.beta-banner-link:hover{color:#fff}
-.beta-banner-close{
-  position:absolute;
-  right:14px;
-  top:50%;
-  transform:translateY(-50%);
-  background:none;
-  border:none;
-  color:rgba(255,255,255,.5);
-  cursor:pointer;
-  padding:4px;
-  display:flex;
-  align-items:center;
-  justify-content:center;
-  transition:color .14s ease;
-}
-.beta-banner-close:hover{color:rgba(255,255,255,.9)}
-/* When banner is visible: push app down AND shrink its height so it stays
-   within the viewport. Without height:calc(100vh-37px), the app extends
-   37px past the viewport bottom, clipping the sidebar's bottom section. */
-.app{margin-top:37px;height:calc(100vh - 37px)}
-body.no-banner .app{margin-top:0;height:100vh}
 
 /* ═══ SIDEBAR USAGE INDICATOR ══════════════════════════════════ */
 .sb-usage-wrap{padding:4px 8px 2px}
@@ -2440,13 +2427,7 @@ textarea.flow-inp{min-height:90px;resize:vertical}
 
 /* ── TABLET / MOBILE BREAKPOINT ─────────────────────────────── */
 @media(max-width:768px){
-  /* ── 1. Kill the beta banner — it overlaps the hamburger (z-index
-          conflict) and is unreadable on small screens. The app margin
-          that compensates for the banner height must also be reset. ── */
-  .beta-banner{display:none!important}
-  .app{margin-top:0!important;height:100vh!important}
-
-  /* ── 2. Show hamburger ── */
+  /* ── 1. Show hamburger ── */
   #sbToggle{display:flex}
 
   /* ── 3. Sidebar off-canvas drawer ── */
@@ -4245,3 +4226,54 @@ body:not(.dark-mode) .gg-input:focus{ border-color:rgba(26,66,41,0.4); backgroun
   border-color:var(--border,rgba(0,0,0,.1)) !important;
   box-shadow:none !important;
 }
+
+/* ── UGC Video Test ─────────────────────────────────────────── */
+.ugc-wrap{ padding:0 32px 48px; }
+.ugc-card{ background:var(--bg2,#F4EFE7);border-radius:16px;padding:24px;max-width:640px;display:flex;flex-direction:column;gap:16px; }
+.ugc-label{ font-size:11px;font-weight:700;letter-spacing:.06em;color:var(--muted,#888);text-transform:uppercase;display:block;margin-bottom:6px; }
+.ugc-textarea{ width:100%;box-sizing:border-box;min-height:120px;resize:vertical;font-size:14px;line-height:1.65;padding:12px 14px;border:1.5px solid var(--border,rgba(0,0,0,.1));border-radius:10px;background:var(--bg,#FAF6F0);font-family:inherit;color:var(--charcoal,#18181A);outline:none;transition:border-color .15s; }
+.ugc-textarea:focus{ border-color:var(--gm,#9FE81F); }
+.ugc-selects{ display:grid;grid-template-columns:1fr 1fr;gap:12px; }
+.ugc-field{ display:flex;flex-direction:column; }
+.ugc-sel{ width:100%; }
+.ugc-result{ max-width:640px;margin-top:4px; }
+.ugc-status-row{ display:flex;align-items:center;gap:10px;font-size:13px;color:var(--muted,#888);padding:14px 0; }
+.ugc-spinner{ width:16px!important;height:16px!important;border-width:2.5px!important;flex-shrink:0; }
+.ugc-status-ok{ font-size:13px;color:#22c55e;font-weight:600;padding:14px 0; }
+.ugc-status-err{ font-size:13px;color:#EF4444;padding:14px 0;line-height:1.5; }
+@media(max-width:600px){ .ugc-wrap{ padding:0 16px 48px; } .ugc-selects{ grid-template-columns:1fr; } }
+
+/* ── UGC Creator Overlay ─────────────────────────────────────── */
+.uc-panel{ max-width:680px; }
+.uc-body{ padding:24px 24px 20px;overflow-y:auto;flex:1;display:flex;flex-direction:column;gap:0; }
+.uc-ai-row{ display:flex;align-items:flex-start;gap:10px;margin-bottom:20px; }
+.uc-ai-msg{ font-size:14px;font-weight:500;color:var(--charcoal,#18181A);line-height:1.55;padding-top:3px; }
+.uc-fields{ display:flex;flex-direction:column;gap:14px;margin-bottom:24px; }
+.uc-grid-2{ display:grid;grid-template-columns:1fr 1fr;gap:12px; }
+.uc-footer{ display:flex;align-items:center;gap:10px;padding-top:4px; }
+.uc-main-btn{ display:flex;align-items:center;gap:7px;padding:10px 20px; }
+.uc-script-ta{ min-height:140px;resize:vertical;line-height:1.65;font-size:13.5px;font-family:inherit; }
+.uc-status-wrap{ padding:20px 0; }
+.uc-video-el{ width:100%;max-width:360px;border-radius:14px;display:block;margin:0 auto;box-shadow:0 8px 32px rgba(0,0,0,.14); }
+.uc-creator-grid{ display:grid;grid-template-columns:repeat(3,1fr);gap:8px; }
+.uc-creator-card{ background:var(--bg2);border:1.5px solid var(--border,#2a2a2a);border-radius:10px;padding:12px 10px;cursor:pointer;text-align:left;transition:border-color .15s,background .15s;display:flex;flex-direction:column;gap:3px;width:100%; }
+.uc-creator-card:hover{ border-color:#5a5a5a; }
+.uc-creator-active{ border-color:#B7FF2A!important;background:rgba(183,255,42,.06)!important; }
+.uc-creator-name{ font-size:13px;font-weight:600;color:var(--charcoal,#f0f0f0); }
+.uc-creator-sub{ font-size:11px;color:var(--muted,#888); }
+
+/* Background selection pills */
+.uc-bg-grid{ display:flex;flex-wrap:wrap;gap:7px; }
+.uc-bg-pill{ background:var(--bg3,#1a1a1a);border:1.5px solid var(--border,#2a2a2a);border-radius:8px;padding:7px 13px;font-size:12px;font-weight:500;color:var(--muted,#888);cursor:pointer;transition:border-color .15s,color .15s,background .15s;white-space:nowrap; }
+.uc-bg-pill:hover{ border-color:#5a5a5a;color:var(--charcoal,#f0f0f0); }
+.uc-bg-pill-active{ border-color:#B7FF2A!important;color:var(--charcoal,#f0f0f0)!important;background:rgba(183,255,42,.07)!important; }
+
+/* Script mode toggle */
+.uc-script-mode-row{ display:grid;grid-template-columns:1fr 1fr;gap:8px; }
+.uc-script-opt{ background:var(--bg2,#141414);border:1.5px solid var(--border,#2a2a2a);border-radius:10px;padding:11px 13px;cursor:pointer;text-align:left;transition:border-color .15s,background .15s;display:flex;flex-direction:column;gap:3px;width:100%; }
+.uc-script-opt:hover{ border-color:#5a5a5a; }
+.uc-script-opt-active{ border-color:#B7FF2A!important;background:rgba(183,255,42,.06)!important; }
+.uc-sopt-title{ font-size:13px;font-weight:600;color:var(--charcoal,#f0f0f0); }
+.uc-sopt-desc{ font-size:11px;color:var(--muted,#888);line-height:1.4; }
+
+@media(max-width:520px){ .uc-grid-2{ grid-template-columns:1fr; } .uc-creator-grid{ grid-template-columns:1fr; } .uc-script-mode-row{ grid-template-columns:1fr; } .uc-panel{ max-width:100%; } }
