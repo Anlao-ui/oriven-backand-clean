@@ -1727,9 +1727,6 @@ app.post('/api/generate-ugc', async (req, res) => {
 
   console.log("UGC ROUTE HIT");
 
-  // rest of your code here...
-});
-
   const { product, niche, audience, goal, tone, avatarId, voiceId, brandName, brandDesc, background, customScript } = req.body || {};
   if (!product  || !product.trim())  return res.status(400).json({ error: 'Product is required' });
   if (!avatarId)                     return res.status(400).json({ error: 'Avatar ID is required' });
