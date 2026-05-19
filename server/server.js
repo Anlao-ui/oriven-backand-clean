@@ -1713,12 +1713,22 @@ app.get('/api/ugc-voices', async (req, res) => {
   }
 });
 
+console.log("UGC ROUTE REGISTERED");
+
 // ── POST /api/generate-ugc ──────────────────────────────────────
 // Combined: Anthropic writes the script, HeyGen generates the video.
 // Frontend calls one endpoint, gets back a videoId to poll.
 app.post('/api/generate-ugc', async (req, res) => {
   const user = await getUserFromToken(req);
-  if (!user) return res.status(401).json({ error: 'Unauthorized' });
+
+  if (!user) {
+    return res.status(401).json({ error: 'Unauthorized' });
+  }
+
+  console.log("UGC ROUTE HIT");
+
+  // rest of your code here...
+});
 
   const { product, niche, audience, goal, tone, avatarId, voiceId, brandName, brandDesc, background, customScript } = req.body || {};
   if (!product  || !product.trim())  return res.status(400).json({ error: 'Product is required' });
