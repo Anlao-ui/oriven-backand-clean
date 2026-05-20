@@ -1726,6 +1726,7 @@ app.post('/api/generate-ugc', async (req, res) => {
   }
 
   console.log("UGC ROUTE HIT");
+  console.log("UGC BODY", JSON.stringify(req.body));
 
   const { creatorStyle, adFeeling, avatarId, voiceId, brandName, brandDesc, background, customScript, format } = req.body || {};
 
