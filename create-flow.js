@@ -273,94 +273,62 @@ var CF_FLOWS = {
 
   ugc: [
     {
-      key:         "ucProduct",
-      q:           "What product or service are you promoting?",
-      desc:        "Be specific — the more precise, the more authentic the script.",
-      type:        "textarea",
-      placeholder: "e.g. Glow Serum by Lumina, TaskFlow productivity app, Premium Matcha Kit…",
-      optional:    false
-    },
-    {
-      key:         "ucNiche",
-      q:           "What niche or industry is this for?",
-      desc:        "This shapes the creator's language, references, and cultural tone.",
-      type:        "textarea",
-      placeholder: "e.g. Skincare, B2B SaaS, Fitness, E-commerce fashion…",
-      optional:    true
-    },
-    {
-      key:         "ucAudience",
-      q:           "Who is the target audience?",
-      desc:        "The creator will speak directly to this person.",
-      type:        "textarea",
-      placeholder: "e.g. Women 25–34, busy founders, gym-goers who want results…",
-      optional:    true
-    },
-    {
-      key:  "ucGoal",
-      q:    "What is the ad goal?",
-      desc: "This defines the script's structure — hook, body, and call-to-action.",
+      key:  "ucCreatorStyle",
+      q:    "Choose your creator style.",
+      desc: "Sets the visual environment, framing, and presence of your AI creator.",
       options: [
-        { val: "awareness",  label: "Brand Awareness" },
-        { val: "sales",      label: "Drive Sales" },
-        { val: "launch",     label: "Product Launch" },
-        { val: "engagement", label: "Engagement" }
+        { val: "studio",       label: "Studio Creator",       desc: "Clean white backdrop · Direct to camera · Premium" },
+        { val: "lifestyle",    label: "Lifestyle Creator",    desc: "Authentic setting · Relatable · Real-world energy" },
+        { val: "professional", label: "Professional Creator", desc: "Office environment · Authoritative · High trust" },
+        { val: "podcast",      label: "Podcast Creator",      desc: "Conversational setup · Engaging · Natural delivery" },
+        { val: "luxury",       label: "Luxury Creator",       desc: "Dark minimal studio · Aspirational · Elevated" },
+        { val: "fitness",      label: "Fitness Creator",      desc: "Active setting · High energy · Motivating" },
+        { val: "street",       label: "Street Creator",       desc: "Urban outdoor · Unscripted feel · Viral potential" }
       ]
     },
     {
-      key:  "ucTone",
-      q:    "What tone should the creator use?",
-      desc: "Sets the energy, personality, and delivery style of the ad.",
+      key:  "ucAdFeeling",
+      q:    "What should the ad feel like?",
+      desc: "Shapes the hook style, script energy, pacing, and call-to-action.",
       options: [
-        { val: "natural",      label: "Natural & Honest" },
-        { val: "enthusiastic", label: "Enthusiastic" },
-        { val: "professional", label: "Professional" },
-        { val: "casual",       label: "Casual & Fun" },
-        { val: "confident",    label: "Confident" }
+        { val: "viral",       label: "Viral",       desc: "Punchy, shareable, built to spread" },
+        { val: "premium",     label: "Premium",     desc: "Polished, elevated, high-quality feel" },
+        { val: "emotional",   label: "Emotional",   desc: "Heart-led, personal, drives connection" },
+        { val: "aggressive",  label: "Aggressive",  desc: "Direct, bold, no fluff — buy now energy" },
+        { val: "startup",     label: "Startup",     desc: "Scrappy, exciting, disruption energy" },
+        { val: "luxury",      label: "Luxury",      desc: "Slow, deliberate, aspirational" },
+        { val: "friendly",    label: "Friendly",    desc: "Warm, helpful, genuinely likeable" },
+        { val: "high_energy", label: "High Energy", desc: "Fast, loud, nonstop excitement" }
       ]
     },
     {
-      key:  "ucCreator",
-      q:    "Which creator should deliver this ad?",
-      desc: "Each creator has a distinct presence and delivery style.",
+      key:  "ucFormat",
+      q:    "What format should the video be in?",
+      desc: "Choose based on where you'll publish the ad.",
       options: [
-        { val: "lifestyle",    label: "Lifestyle",    desc: "Female · Expressive · Relatable" },
-        { val: "professional", label: "Professional", desc: "Male · Confident · Authoritative" },
-        { val: "studio",       label: "Studio",       desc: "Female · Polished · Premium" }
-      ]
-    },
-    {
-      key:  "ucBackground",
-      q:    "What is the background setting?",
-      desc: "The setting shapes the script's references and the visual feel of the ad.",
-      options: [
-        { val: "white_studio",    label: "White Studio" },
-        { val: "luxury_interior", label: "Luxury Interior" },
-        { val: "lifestyle",       label: "Lifestyle" },
-        { val: "gym_fitness",     label: "Gym / Fitness" },
-        { val: "office",          label: "Office" },
-        { val: "street_outdoor",  label: "Street / Outdoor" },
-        { val: "minimal_dark",    label: "Minimal Dark" },
-        { val: "ecommerce_shelf", label: "Product Shelf" }
+        { val: "vertical",  label: "Vertical (9:16)",  desc: "TikTok, Reels, Stories — default" },
+        { val: "square",    label: "Square (1:1)",      desc: "Works across all platforms" },
+        { val: "landscape", label: "Landscape (16:9)",  desc: "YouTube, website embeds, ads" }
       ]
     },
     {
       key:  "ucScriptMode",
       q:    "How do you want the script handled?",
-      desc: "ORIVEN can write the script for you, or you can provide your own.",
+      desc: "ORIVEN can write a high-converting script, or you can bring your own.",
       options: [
-        { val: "ai",     label: "Generate with AI",  desc: "ORIVEN writes a script using your brief" },
+        { val: "ai",     label: "Generate with AI",  desc: "ORIVEN writes a script tailored to your brand" },
         { val: "custom", label: "Use My Own Script", desc: "Paste a script you've already written" }
       ]
     },
     {
-      key:          "ucCustomScript",
-      q:            "Paste your script below.",
-      desc:         "This will be spoken directly by the AI creator. Keep it conversational.",
-      type:         "textarea",
-      placeholder:  "Paste your UGC script here…",
-      optional:     false,
-      conditional:  "ucScriptMode",
+      key:            "ucCustomScript",
+      q:              "Paste your script below.",
+      desc:           "Spoken directly by the AI creator. Keep it conversational — aim for 30–60 seconds.",
+      type:           "textarea",
+      placeholder:    "Paste your UGC script here…",
+      optional:       false,
+      maxChars:       900,
+      conditional:    "ucScriptMode",
       conditionalVal: "custom"
     }
   ],
@@ -626,10 +594,33 @@ function _cfRenderOptions(step){
   if(step.type === "textarea"){
     opts.innerHTML = "";
     if(free){
-      var ta   = document.getElementById("cfTextarea");
-      var skip = document.getElementById("cfSkipBtn");
-      if(ta){ ta.value = ""; ta.setAttribute("placeholder", step.placeholder || "Type here…"); }
+      var ta      = document.getElementById("cfTextarea");
+      var skip    = document.getElementById("cfSkipBtn");
+      var counter = document.getElementById("cfCharCounter");
+
+      // Remove stale counter from previous step
+      if(counter) counter.parentNode.removeChild(counter);
+
+      if(ta){ ta.value = ""; ta.setAttribute("placeholder", step.placeholder || "Type here…"); ta.oninput = null; }
       if(skip) skip.style.display = step.optional ? "" : "none";
+
+      // Inject live counter for steps with a character cap
+      if(step.maxChars && ta){
+        var ctr = document.createElement("div");
+        ctr.id        = "cfCharCounter";
+        ctr.className = "cf-char-counter";
+        ctr.innerHTML = "0 / " + step.maxChars + " chars";
+        ta.parentNode.insertBefore(ctr, ta.nextSibling);
+
+        ta.oninput = function(){
+          var len  = ta.value.length;
+          var sec  = Math.round(len / 12);
+          ctr.innerHTML = len + " / " + step.maxChars + " chars · ~" + sec + "s";
+          ctr.className = "cf-char-counter"
+            + (len > step.maxChars ? " cf-char-over" : len > step.maxChars * 0.8 ? " cf-char-warn" : "");
+        };
+      }
+
       free.style.display   = "";
       free.style.opacity   = "0";
       free.style.transform = "translateY(10px)";
@@ -701,6 +692,10 @@ function cfSubmitText(){
   if(!steps) return;
   var step  = steps[_cfStep];
   if(!step) return;
+  if(step.maxChars && val.length > step.maxChars){
+    if(typeof toast === "function") toast("Script too long — keep it under " + step.maxChars + " characters (~60 seconds)", "warn");
+    return;
+  }
   _cfAnswers[step.key] = { val: val, label: val ? val.slice(0, 48) + (val.length > 48 ? "…" : "") : "Added details" };
   _cfAdvance(step, _cfAnswers[step.key].label);
 }
@@ -920,12 +915,15 @@ function _cfDispatchUGC(){
   var a = _cfAnswers;
 
   // Map flow answers into ugc.js state variables
-  _ucScriptMode      = (a.ucScriptMode && a.ucScriptMode.val)  || "ai";
-  _ucSelectedBg      = (a.ucBackground && a.ucBackground.val)  || null;
-  var creatorId      = (a.ucCreator    && a.ucCreator.val)     || null;
+  _ucScriptMode  = (a.ucScriptMode   && a.ucScriptMode.val)   || "ai";
+  _ucVideoFormat = (a.ucFormat       && a.ucFormat.val)       || "vertical";
+  _ucAdFeeling   = (a.ucAdFeeling    && a.ucAdFeeling.val)    || "viral";
+  var creatorId  = (a.ucCreatorStyle && a.ucCreatorStyle.val) || null;
   _ucSelectedCreator = (typeof UC_CREATORS !== "undefined")
     ? (UC_CREATORS.find(function(c){ return c.id === creatorId; }) || null)
     : null;
+  // Background is derived from the creator style — no separate selector
+  _ucSelectedBg = _ucSelectedCreator ? (_ucSelectedCreator.background || null) : null;
 
   // Reset video state
   _ucActiveId = null;

@@ -1727,81 +1727,95 @@ app.post('/api/generate-ugc', async (req, res) => {
 
   console.log("UGC ROUTE HIT");
 
-  const { product, niche, audience, goal, tone, avatarId, voiceId, brandName, brandDesc, background, customScript } = req.body || {};
-  if (!product  || !product.trim())  return res.status(400).json({ error: 'Product is required' });
-  if (!avatarId)                     return res.status(400).json({ error: 'Avatar ID is required' });
-  if (!voiceId)                      return res.status(400).json({ error: 'Voice ID is required' });
+  const { creatorStyle, adFeeling, avatarId, voiceId, brandName, brandDesc, background, customScript, format } = req.body || {};
+
+  const formatDimensions = {
+    vertical:  { width: 720,  height: 1280 },
+    square:    { width: 1080, height: 1080 },
+    landscape: { width: 1280, height: 720  },
+  };
+  const dimension = formatDimensions[format] || formatDimensions.vertical;
+  if (!avatarId) return res.status(400).json({ error: 'Avatar ID is required' });
+  if (!voiceId)  return res.status(400).json({ error: 'Voice ID is required' });
 
   const heygenKey = process.env.HEYGEN_API_KEY;
   if (!heygenKey) return res.status(500).json({ error: 'HeyGen API key not configured' });
 
-  const goalLabel = {
-    awareness:  'build brand awareness',
-    sales:      'drive sales and conversions',
-    launch:     'announce a product launch',
-    engagement: 'drive social engagement'
-  }[goal] || 'promote the product';
+  console.log('[UGC] Received → creatorStyle:', creatorStyle, '| adFeeling:', adFeeling, '| avatarId:', avatarId, '| background:', background, '| format:', format, '| scriptMode:', customScript ? 'custom' : 'ai');
 
-  const toneLabel = {
-    natural:      'natural, honest and relatable',
-    enthusiastic: 'enthusiastic and energetic',
-    professional: 'professional and trustworthy',
-    casual:       'casual and fun',
-    confident:    'confident and authoritative'
-  }[tone] || 'natural and relatable';
+  // Ad feeling → HeyGen voice speed
+  const feelingSpeed = {
+    viral:       1.08,
+    premium:     0.92,
+    emotional:   0.95,
+    aggressive:  1.1,
+    startup:     1.05,
+    luxury:      0.88,
+    friendly:    1.0,
+    high_energy: 1.12,
+  }[adFeeling] || 1.0;
 
-  // Background context shapes how the script feels and references the setting
-  const bgScriptContext = {
-    white_studio:    'clean, professional white studio',
-    luxury_interior: 'high-end luxury interior space',
-    lifestyle:       'authentic lifestyle setting — natural, real-world environment',
-    gym_fitness:     'energetic gym or fitness environment — active, motivated',
-    office:          'modern professional office or workspace',
-    street_outdoor:  'outdoor or street setting — authentic, urban, unscripted feel',
-    minimal_dark:    'sleek minimal dark studio — premium, editorial aesthetic',
-    ecommerce_shelf: 'clean product shelf presentation — ecommerce, direct-to-consumer',
-  };
-  const bgNote = background && bgScriptContext[background]
-    ? `\nCreator setting: ${bgScriptContext[background]} — the script's language and references should feel authentic to this environment.`
-    : '';
-
-  // Background color mapping for HeyGen (solid colors only; others rely on script flavor)
+  // Background: only inject solid color for the two explicit color settings.
+  // All other creator styles leave background unset — HeyGen uses the avatar's
+  // own built-in scene, which IS the environment for that creator style.
   const bgHeyGenMap = {
-    white_studio: { type: 'color', value: '#ffffff' },
-    minimal_dark: { type: 'color', value: '#111111' },
+    white_studio: { type: 'color', value: '#FFFFFF' },
+    minimal_dark: { type: 'color', value: '#0D0D0D' },
+  };
+
+  // Creator style → visual/script context
+  const creatorStyleContext = {
+    studio:       'clean white studio — direct to camera, premium and polished',
+    lifestyle:    'authentic everyday setting — real, relatable, natural feel',
+    professional: 'professional workspace or office — authoritative, credible, high trust',
+    podcast:      'conversational podcast-style setup — engaging, thoughtful, natural delivery',
+    luxury:       'minimal dark studio — elevated, aspirational, slow and deliberate',
+    fitness:      'gym or active environment — high energy, motivating, raw',
+    street:       'outdoor or urban street setting — unscripted, spontaneous, viral energy',
   };
 
   // ── Step 1: Script — use provided or generate with AI ────────
   let script;
   if (customScript && customScript.trim()) {
     script = customScript.trim();
-    console.log('[UGC] Using custom script for:', product, '(', script.length, 'chars )');
+    console.log('[UGC] Using custom script (', script.length, 'chars )');
   } else {
     if (!_requireEnv('ANTHROPIC_API_KEY', res, 'Anthropic')) return;
     try {
-      const system = `You are an expert UGC ad scriptwriter for TikTok and Instagram Reels.
-Write scripts that sound like real creators talking to camera — never like traditional ads.
+      const feelingInstruction = {
+        viral:       'Write with rapid-fire energy — punchy, shareable hooks, made to go viral. Short sentences, bold statements.',
+        premium:     'Write in an elevated, confident tone — polished language, quality-first messaging, zero hype.',
+        emotional:   'Write with heart — personal story, authentic emotion, vulnerability that drives genuine connection.',
+        aggressive:  'Write direct and hard-hitting — no fluff, bold claims, urgency in every line. Buy now energy.',
+        startup:     'Write with scrappy excitement — disruptive framing, founder energy, "we\'re changing everything" attitude.',
+        luxury:      'Write slowly and deliberately — sparse, aspirational language, every word earns its place.',
+        friendly:    'Write warm, helpful, and genuinely likeable — feels like a trusted friend giving a recommendation.',
+        high_energy: 'Write at maximum energy — fast pace, exclamation points, nonstop excitement from hook to CTA.',
+      }[adFeeling] || 'Write in a genuine, natural first-person voice.';
+
+      const styleNote = creatorStyle && creatorStyleContext[creatorStyle]
+        ? `\nCreator environment: ${creatorStyleContext[creatorStyle]}`
+        : '';
+
+      const system = `You are an expert direct-response UGC ad scriptwriter for TikTok, Instagram Reels, and YouTube Shorts.
+Write scripts that sound like real creators talking to camera — authentic, never like a traditional ad.
+AD FEELING RULE (highest priority): ${feelingInstruction}
 Rules:
-- Open with a strong hook that grabs attention in the first 3 seconds
-- Use first-person testimonial or authentic story in the body
-- End with a clear, natural CTA
-- Conversational language only — like a real person talking, not a script
-- NO stage directions, NO [brackets], NO (actions), NO scene descriptions
-- Output ONLY the words the creator speaks aloud
+- Open with a pattern-interrupt hook that stops the scroll in the first 3 seconds
+- Speak in first person — genuine testimonial or story, never corporate language
+- End with a clear, punchy CTA that matches the feeling
+- Conversational only — no stage directions, no [brackets], no (actions), no scene notes
+- Output ONLY the spoken words — nothing else
 - Target 8 to 12 sentences for a 30–45 second read`;
 
-      const userMsg = `Write a UGC ad script:
-Product: ${product.trim()}
-Niche: ${niche || 'general'}
-Target audience: ${audience || 'general audience'}
-Goal: ${goalLabel}
-Tone: ${toneLabel}${brandName ? `\nBrand: ${brandName}` : ''}${brandDesc ? `\nBrand context: ${brandDesc}` : ''}${bgNote}
+      const userMsg = `Write a UGC ad script.${brandName ? `\nBrand: ${brandName}` : ''}${brandDesc ? `\nAbout: ${brandDesc}` : ''}${styleNote}
+Ad feeling: ${adFeeling || 'viral'}
 
-Output ONLY the script text.`;
+Output ONLY the spoken script text.`;
 
       script = (await callAnthropic(system, userMsg)).trim();
       if (!script) return res.status(500).json({ error: 'Anthropic returned an empty script' });
-      console.log('[UGC] Script generated for:', product, '(', script.length, 'chars )');
+      console.log('[UGC] Script generated (', script.length, 'chars )');
     } catch (err) {
       console.error('[UGC] Script generation error:', err.message);
       return res.status(500).json({ error: 'Failed to write script: ' + err.message });
@@ -1812,19 +1826,24 @@ Output ONLY the script text.`;
   try {
     const videoInput = {
       character: { type: 'avatar', avatar_id: avatarId, avatar_style: 'normal' },
-      voice:     { type: 'text',   input_text: script,  voice_id: voiceId, speed: 1.0 }
+      voice:     { type: 'text',   input_text: script,  voice_id: voiceId, speed: feelingSpeed },
     };
-    const heygenBg = background && bgHeyGenMap[background];
+    // Only inject background when we have an explicit solid-color mapping.
+    // Unset → HeyGen uses the avatar's natural built-in scene.
+    const heygenBg = bgHeyGenMap[background];
     if (heygenBg) videoInput.background = heygenBg;
+
+    const heygenPayload = {
+      video_inputs: [videoInput],
+      dimension,
+      test: false,
+    };
+    console.log('[UGC] HeyGen payload:', JSON.stringify(heygenPayload));
 
     const heygenRes = await fetch(`${HEYGEN_BASE}/v2/video/generate`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'X-Api-Key': heygenKey },
-      body: JSON.stringify({
-        video_inputs: [videoInput],
-        dimension: { width: 720, height: 1280 },
-        test: false
-      })
+      body: JSON.stringify(heygenPayload),
     });
 
     const heygenData = await heygenRes.json();

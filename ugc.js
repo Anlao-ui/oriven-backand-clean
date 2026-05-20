@@ -3,35 +3,82 @@
 // ════════════════════════════════════════════════════════════════
 
 // ── Creator presets ───────────────────────────────────────────
-// Hardcoded for stable MVP. avatarId / voiceId are confirmed
-// valid HeyGen public stock IDs (tested against live API).
+// 7 styles — each maps to a visual environment via the background field.
+// avatarId / voiceId are seeded with known HeyGen public stock IDs and
+// updated at generation time by _ucInitAvatars / _ucInitVoices.
 var UC_CREATORS = [
   {
-    id:       'lifestyle',
-    label:    'Lifestyle',
-    sub:      'Female · Expressive',
-    avatarId: 'Abigail_expressive_2024112501',
-    voiceId:  'cef3bc4e0a84424cafcde6f2cf466c97',
+    id:         'studio',
+    label:      'Studio Creator',
+    sub:        'Clean · Premium · Direct',
+    gender:     'female',
+    background: 'white_studio',
+    avatarId:   'Abigail_expressive_2024112501',
+    voiceId:    'cef3bc4e0a84424cafcde6f2cf466c97',
   },
   {
-    id:       'professional',
-    label:    'Professional',
-    sub:      'Male · Confident',
-    avatarId: 'Aditya_public_1',
-    voiceId:  'f38a635bee7a4d1f9b0a654a31d050d2',
+    id:         'lifestyle',
+    label:      'Lifestyle Creator',
+    sub:        'Authentic · Relatable · Real',
+    gender:     'female',
+    background: null,
+    avatarId:   'Abigail_standing_office_front',
+    voiceId:    'f8c69e517f424cafaecde32dde57096b',
   },
   {
-    id:       'studio',
-    label:    'Studio',
-    sub:      'Female · Polished',
-    avatarId: 'Abigail_standing_office_front',
-    voiceId:  'f8c69e517f424cafaecde32dde57096b',
+    id:         'professional',
+    label:      'Professional Creator',
+    sub:        'Authoritative · Credible · Bold',
+    gender:     'male',
+    background: null,
+    avatarId:   'Aditya_public_1',
+    voiceId:    'f38a635bee7a4d1f9b0a654a31d050d2',
+  },
+  {
+    id:         'podcast',
+    label:      'Podcast Creator',
+    sub:        'Conversational · Engaging · Natural',
+    gender:     'male',
+    background: 'minimal_dark',
+    avatarId:   'Aditya_public_1',
+    voiceId:    'f38a635bee7a4d1f9b0a654a31d050d2',
+  },
+  {
+    id:         'luxury',
+    label:      'Luxury Creator',
+    sub:        'Elevated · Minimal · Aspirational',
+    gender:     'female',
+    background: 'minimal_dark',
+    avatarId:   'Abigail_expressive_2024112501',
+    voiceId:    'cef3bc4e0a84424cafcde6f2cf466c97',
+  },
+  {
+    id:         'fitness',
+    label:      'Fitness Creator',
+    sub:        'Energetic · Motivating · Raw',
+    gender:     'male',
+    background: null,
+    avatarId:   'Aditya_public_1',
+    voiceId:    'f38a635bee7a4d1f9b0a654a31d050d2',
+  },
+  {
+    id:         'street',
+    label:      'Street Creator',
+    sub:        'Urban · Unscripted · Viral',
+    gender:     'female',
+    background: null,
+    avatarId:   'Abigail_expressive_2024112501',
+    voiceId:    'cef3bc4e0a84424cafcde6f2cf466c97',
   },
 ];
 
-var _ucSelectedCreator = null;
-var _ucSelectedBg      = null;
-var _ucScriptMode      = 'ai';
+var _ucSelectedCreator  = null;
+var _ucSelectedBg       = null;
+var _ucScriptMode       = 'ai';
+var _ucVideoFormat      = 'vertical';
+var _ucAdFeeling        = 'viral';
+var _ucAvatarsFetched   = false;
+var _ucVoicesFetched    = false;
 
 // ── Shared helpers ────────────────────────────────────────────
 
@@ -50,6 +97,90 @@ function _ucSpinRow(msg) {
 function _ucSetStatus(html) {
   var el = document.getElementById('ucStatusWrap');
   if (el) el.innerHTML = html;
+}
+
+// ── Dynamic HeyGen avatar init ────────────────────────────────
+// Fetches real available avatar IDs from /api/ugc-avatars and maps
+// them to UC_CREATORS slots by gender so stale hardcoded IDs never
+// silently fall back to HeyGen's default actor.
+async function _ucInitAvatars(token) {
+  if (_ucAvatarsFetched) return;
+  _ucAvatarsFetched = true;
+  try {
+    var result = await apiFetch('/api/ugc-avatars', {
+      headers: { 'Authorization': 'Bearer ' + token }
+    });
+    if (!result.ok || !result.data || !result.data.avatars || !result.data.avatars.length) return;
+
+    var avatars = result.data.avatars;
+    var female  = avatars.filter(function(a) {
+      var g = (a.gender || '').toLowerCase();
+      var n = (a.avatar_name || '').toLowerCase();
+      return g === 'female' || n.match(/female|woman|abigail|anna|susan|eva|alice|sophie|clara/);
+    });
+    var male = avatars.filter(function(a) {
+      var g = (a.gender || '').toLowerCase();
+      var n = (a.avatar_name || '').toLowerCase();
+      return g === 'male' || n.match(/male|man|aditya|john|david|michael|alex|james|marcus/);
+    });
+    if (!female.length && !male.length) {
+      avatars.forEach(function(a, i) { if (i % 2 === 0) female.push(a); else male.push(a); });
+    }
+
+    // Slot indices by gender preference:
+    // female: studio(0), lifestyle(1), luxury(4), street(6)
+    // male:   professional(2), podcast(3), fitness(5)
+    var femaleSlots = [0, 1, 4, 6];
+    var maleSlots   = [2, 3, 5];
+    femaleSlots.forEach(function(slot, i) {
+      var a = female[i] || female[female.length - 1] || male[0];
+      if (a) UC_CREATORS[slot].avatarId = a.avatar_id;
+    });
+    maleSlots.forEach(function(slot, i) {
+      var a = male[i] || male[male.length - 1] || female[0];
+      if (a) UC_CREATORS[slot].avatarId = a.avatar_id;
+    });
+
+    console.log('[UGC] Avatars loaded:', UC_CREATORS.map(function(c){ return c.id + '=' + c.avatarId; }).join(' | '));
+  } catch (err) {
+    _ucAvatarsFetched = false;
+    console.warn('[UGC] Avatar fetch failed, using defaults:', err.message);
+  }
+}
+
+// Fetches real HeyGen voice IDs and maps by gender to UC_CREATORS slots.
+async function _ucInitVoices(token) {
+  if (_ucVoicesFetched) return;
+  _ucVoicesFetched = true;
+  try {
+    var result = await apiFetch('/api/ugc-voices', {
+      headers: { 'Authorization': 'Bearer ' + token }
+    });
+    if (!result.ok || !result.data || !result.data.voices || !result.data.voices.length) return;
+
+    var voices = result.data.voices;
+    var female = voices.filter(function(v) { return (v.gender || '').toLowerCase() === 'female'; });
+    var male   = voices.filter(function(v) { return (v.gender || '').toLowerCase() === 'male';   });
+    if (!female.length && !male.length) {
+      voices.forEach(function(v, i) { if (i % 2 === 0) female.push(v); else male.push(v); });
+    }
+
+    var femaleSlots = [0, 1, 4, 6];
+    var maleSlots   = [2, 3, 5];
+    femaleSlots.forEach(function(slot, i) {
+      var v = female[i] || female[female.length - 1] || male[0];
+      if (v) UC_CREATORS[slot].voiceId = v.voice_id;
+    });
+    maleSlots.forEach(function(slot, i) {
+      var v = male[i] || male[male.length - 1] || female[0];
+      if (v) UC_CREATORS[slot].voiceId = v.voice_id;
+    });
+
+    console.log('[UGC] Voices loaded:', UC_CREATORS.map(function(c){ return c.id + '=' + c.voiceId.slice(0,8); }).join(' | '));
+  } catch (err) {
+    _ucVoicesFetched = false;
+    console.warn('[UGC] Voice fetch failed, using defaults:', err.message);
+  }
 }
 
 // ════════════════════════════════════════════════════════════════
@@ -313,11 +444,8 @@ function ucStartOver() {
 
 // ── ucGenerateFromFlow — called by _cfDispatchUGC() with flow answers ──
 async function ucGenerateFromFlow(answers) {
-  var product      = (answers.ucProduct      && answers.ucProduct.val)      || '';
-  var niche        = (answers.ucNiche         && answers.ucNiche.val)         || '';
-  var audience     = (answers.ucAudience      && answers.ucAudience.val)      || '';
-  var goal         = (answers.ucGoal          && answers.ucGoal.val)          || 'awareness';
-  var tone         = (answers.ucTone          && answers.ucTone.val)          || 'natural';
+  var creatorStyle = (answers.ucCreatorStyle && answers.ucCreatorStyle.val) || '';
+  var adFeeling    = _ucAdFeeling || 'viral';
   var customScript = (_ucScriptMode === 'custom' && answers.ucCustomScript && answers.ucCustomScript.val)
     ? answers.ucCustomScript.val.trim()
     : null;
@@ -326,17 +454,6 @@ async function ucGenerateFromFlow(answers) {
   var newRow   = document.getElementById('ucNewRow');
   if (retryRow) retryRow.style.display = 'none';
   if (newRow)   newRow.style.display   = 'none';
-
-  if (!product.trim()) {
-    _ucSetStatus('<div class="ugc-status-err">No product provided — please try again.</div>');
-    if (retryRow) retryRow.style.display = '';
-    return;
-  }
-  if (!_ucSelectedCreator) {
-    _ucSetStatus('<div class="ugc-status-err">No creator selected — please try again.</div>');
-    if (retryRow) retryRow.style.display = '';
-    return;
-  }
 
   var statusMsg = _ucScriptMode === 'custom'
     ? 'Sending your script to HeyGen…'
@@ -355,16 +472,31 @@ async function ucGenerateFromFlow(answers) {
       return;
     }
 
+    // Refresh HeyGen avatar + voice IDs — updates UC_CREATORS in-place so
+    // stale hardcoded IDs never silently fall back to HeyGen's default actor.
+    await Promise.all([_ucInitAvatars(token), _ucInitVoices(token)]);
+
+    if (!_ucSelectedCreator) {
+      _ucSetStatus('<div class="ugc-status-err">No creator selected — please try again.</div>');
+      if (retryRow) retryRow.style.display = '';
+      return;
+    }
+
+    console.log('[UGC] Sending → creatorStyle:', creatorStyle,
+      '| adFeeling:', adFeeling,
+      '| avatarId:', _ucSelectedCreator.avatarId,
+      '| voiceId:', _ucSelectedCreator.voiceId,
+      '| background:', _ucSelectedBg,
+      '| format:', _ucVideoFormat);
+
     var result = await apiFetch('/api/generate-ugc', {
       method:  'POST',
       headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + token },
       body:    JSON.stringify({
-        product:      product,
-        niche:        niche,
-        audience:     audience,
-        goal:         goal,
-        tone:         tone,
+        creatorStyle: creatorStyle,
+        adFeeling:    adFeeling,
         background:   _ucSelectedBg   || null,
+        format:       _ucVideoFormat  || 'vertical',
         customScript: customScript,
         avatarId:     _ucSelectedCreator.avatarId,
         voiceId:      _ucSelectedCreator.voiceId,
@@ -401,17 +533,21 @@ async function _ucPollVideoStatus() {
 
     if (d.status === 'completed' && d.videoUrl) {
       clearInterval(_ucPollTimer); _ucPollTimer = null;
-      _ucSetStatus('<div class="ugc-status-ok">Your video is ready</div>');
+      _ucSetStatus(
+        '<div class="ugc-status-ok">'
+        + '<svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="margin-right:6px;vertical-align:-2px"><path d="M2 8l4 4 8-8"/></svg>'
+        + 'Your video is ready</div>'
+      );
 
-      var videoEl     = document.getElementById('ucVideoEl');
-      var downloadBtn = document.getElementById('ucDownloadBtn');
-      var videoWrap   = document.getElementById('ucVideoWrap');
-      var newRow      = document.getElementById('ucNewRow');
+      var videoEl   = document.getElementById('ucVideoEl');
+      var videoWrap = document.getElementById('ucVideoWrap');
+      var videoFrame= document.getElementById('ucVideoFrame');
+      var newRow    = document.getElementById('ucNewRow');
 
-      if (videoEl)     videoEl.src = d.videoUrl;
-      if (downloadBtn) downloadBtn.href = d.videoUrl;
-      if (videoWrap)   videoWrap.style.display = '';
-      if (newRow)      newRow.style.display    = '';
+      if (videoEl)    videoEl.src = d.videoUrl;
+      if (videoFrame) videoFrame.className = 'uc-video-frame uc-fmt-' + (_ucVideoFormat || 'vertical');
+      if (videoWrap)  videoWrap.style.display = '';
+      if (newRow)     newRow.style.display    = '';
 
       if (typeof toast === 'function') toast('Your UGC video is ready!');
 

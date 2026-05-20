@@ -1536,17 +1536,20 @@
 
     <div class="uc-body">
       <div id="ucStatusWrap" class="uc-status-wrap"></div>
-      <div id="ucVideoWrap" style="display:none;text-align:center">
-        <video id="ucVideoEl" controls playsinline class="uc-video-el"></video>
-        <div class="uc-footer" style="margin-top:16px;justify-content:center">
-          <a id="ucDownloadBtn" class="btn btn-p" target="_blank" rel="noopener" style="text-decoration:none">Download Video</a>
+      <div id="ucVideoWrap" style="display:none">
+        <div id="ucVideoFrame" class="uc-video-frame uc-fmt-vertical">
+          <video id="ucVideoEl" controls playsinline class="uc-video-el"></video>
         </div>
+        <p class="uc-dl-hint">Use the ⋯ menu on the video to download.</p>
       </div>
-      <div class="uc-footer" id="ucRetryRow" style="margin-top:12px;display:none">
+      <div id="ucRetryRow" class="uc-action-row" style="display:none">
         <button class="btn btn-g" onclick="ucStartOver()">Try Again</button>
       </div>
-      <div class="uc-footer" id="ucNewRow" style="margin-top:12px;display:none">
-        <button class="btn btn-g" style="font-size:12px;padding:7px 14px" onclick="ucStartOver()">Create Another</button>
+      <div id="ucNewRow" class="uc-action-row" style="display:none">
+        <button class="btn btn-p" style="display:flex;align-items:center;gap:7px" onclick="ucStartOver()">
+          <svg viewBox="0 0 16 16" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><rect x="1.5" y="3.5" width="9" height="9" rx="2"/><path d="M10.5 7l4-1.5v6L10.5 10"/></svg>
+          Create Another
+        </button>
       </div>
     </div>
 
