@@ -3,57 +3,31 @@
 // ════════════════════════════════════════════════════════════════
 
 // ── Creator presets ───────────────────────────────────────────
-// 7 styles — each maps to a visual environment via the background field.
+// 8 styles — each has a gender preference for avatar assignment and a
+// background that creates visual distinctiveness for the style.
 // avatarId / voiceId are seeded with known HeyGen public stock IDs and
 // updated at generation time by _ucInitAvatars / _ucInitVoices.
 var UC_CREATORS = [
   {
-    id:         'studio',
-    label:      'Studio Creator',
-    sub:        'Clean · Premium · Direct',
-    gender:     'female',
-    background: 'white_studio',
-    avatarId:   'Abigail_expressive_2024112501',
-    voiceId:    'cef3bc4e0a84424cafcde6f2cf466c97',
-  },
-  {
-    id:         'lifestyle',
-    label:      'Lifestyle Creator',
-    sub:        'Authentic · Relatable · Real',
-    gender:     'female',
-    background: null,
-    avatarId:   'Abigail_standing_office_front',
-    voiceId:    'f8c69e517f424cafaecde32dde57096b',
-  },
-  {
-    id:         'professional',
-    label:      'Professional Creator',
-    sub:        'Authoritative · Credible · Bold',
+    id:         'startup_founder',
+    label:      'Startup Founder',
+    sub:        'Bold · Visionary · Direct',
     gender:     'male',
     background: null,
     avatarId:   'Aditya_public_1',
     voiceId:    'f38a635bee7a4d1f9b0a654a31d050d2',
   },
   {
-    id:         'podcast',
+    id:         'podcast_creator',
     label:      'Podcast Creator',
-    sub:        'Conversational · Engaging · Natural',
-    gender:     'male',
-    background: 'minimal_dark',
-    avatarId:   'Aditya_public_1',
-    voiceId:    'f38a635bee7a4d1f9b0a654a31d050d2',
-  },
-  {
-    id:         'luxury',
-    label:      'Luxury Creator',
-    sub:        'Elevated · Minimal · Aspirational',
+    sub:        'Conversational · Trusted · Natural',
     gender:     'female',
     background: 'minimal_dark',
     avatarId:   'Abigail_expressive_2024112501',
     voiceId:    'cef3bc4e0a84424cafcde6f2cf466c97',
   },
   {
-    id:         'fitness',
+    id:         'fitness_creator',
     label:      'Fitness Creator',
     sub:        'Energetic · Motivating · Raw',
     gender:     'male',
@@ -62,13 +36,49 @@ var UC_CREATORS = [
     voiceId:    'f38a635bee7a4d1f9b0a654a31d050d2',
   },
   {
-    id:         'street',
+    id:         'luxury_influencer',
+    label:      'Luxury Influencer',
+    sub:        'Elevated · Aspirational · Refined',
+    gender:     'female',
+    background: 'minimal_dark',
+    avatarId:   'Abigail_expressive_2024112501',
+    voiceId:    'cef3bc4e0a84424cafcde6f2cf466c97',
+  },
+  {
+    id:         'tech_reviewer',
+    label:      'Tech Reviewer',
+    sub:        'Analytical · Credible · Expert',
+    gender:     'male',
+    background: 'white_studio',
+    avatarId:   'Aditya_public_1',
+    voiceId:    'f38a635bee7a4d1f9b0a654a31d050d2',
+  },
+  {
+    id:         'street_creator',
     label:      'Street Creator',
-    sub:        'Urban · Unscripted · Viral',
+    sub:        'Raw · Unscripted · Viral',
+    gender:     'female',
+    background: null,
+    avatarId:   'Abigail_standing_office_front',
+    voiceId:    'f8c69e517f424cafaecde32dde57096b',
+  },
+  {
+    id:         'vacation_creator',
+    label:      'Vacation Creator',
+    sub:        'Relaxed · Lifestyle · Discovery',
     gender:     'female',
     background: null,
     avatarId:   'Abigail_expressive_2024112501',
     voiceId:    'cef3bc4e0a84424cafcde6f2cf466c97',
+  },
+  {
+    id:         'office_creator',
+    label:      'Office Creator',
+    sub:        'Professional · Clean · Focused',
+    gender:     'male',
+    background: null,
+    avatarId:   'Aditya_public_1',
+    voiceId:    'f38a635bee7a4d1f9b0a654a31d050d2',
   },
 ];
 
@@ -128,16 +138,16 @@ async function _ucInitAvatars(token) {
     }
 
     // Slot indices by gender preference:
-    // female: studio(0), lifestyle(1), luxury(4), street(6)
-    // male:   professional(2), podcast(3), fitness(5)
-    var femaleSlots = [0, 1, 4, 6];
-    var maleSlots   = [2, 3, 5];
-    femaleSlots.forEach(function(slot, i) {
-      var a = female[i] || female[female.length - 1] || male[0];
-      if (a) UC_CREATORS[slot].avatarId = a.avatar_id;
-    });
+    // male:   startup_founder(0), fitness_creator(2), tech_reviewer(4), office_creator(7)
+    // female: podcast_creator(1), luxury_influencer(3), street_creator(5), vacation_creator(6)
+    var maleSlots   = [0, 2, 4, 7];
+    var femaleSlots = [1, 3, 5, 6];
     maleSlots.forEach(function(slot, i) {
       var a = male[i] || male[male.length - 1] || female[0];
+      if (a) UC_CREATORS[slot].avatarId = a.avatar_id;
+    });
+    femaleSlots.forEach(function(slot, i) {
+      var a = female[i] || female[female.length - 1] || male[0];
       if (a) UC_CREATORS[slot].avatarId = a.avatar_id;
     });
 
@@ -165,14 +175,14 @@ async function _ucInitVoices(token) {
       voices.forEach(function(v, i) { if (i % 2 === 0) female.push(v); else male.push(v); });
     }
 
-    var femaleSlots = [0, 1, 4, 6];
-    var maleSlots   = [2, 3, 5];
-    femaleSlots.forEach(function(slot, i) {
-      var v = female[i] || female[female.length - 1] || male[0];
-      if (v) UC_CREATORS[slot].voiceId = v.voice_id;
-    });
+    var maleSlots   = [0, 2, 4, 7];
+    var femaleSlots = [1, 3, 5, 6];
     maleSlots.forEach(function(slot, i) {
       var v = male[i] || male[male.length - 1] || female[0];
+      if (v) UC_CREATORS[slot].voiceId = v.voice_id;
+    });
+    femaleSlots.forEach(function(slot, i) {
+      var v = female[i] || female[female.length - 1] || male[0];
       if (v) UC_CREATORS[slot].voiceId = v.voice_id;
     });
 

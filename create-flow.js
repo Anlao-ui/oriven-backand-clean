@@ -275,28 +275,29 @@ var CF_FLOWS = {
     {
       key:  "ucCreatorStyle",
       q:    "Choose your creator style.",
-      desc: "Sets the visual environment, framing, and presence of your AI creator.",
+      desc: "Sets the visual environment, voice, and presence of your AI creator.",
       options: [
-        { val: "studio",       label: "Studio Creator",       desc: "Clean white backdrop · Direct to camera · Premium" },
-        { val: "lifestyle",    label: "Lifestyle Creator",    desc: "Authentic setting · Relatable · Real-world energy" },
-        { val: "professional", label: "Professional Creator", desc: "Office environment · Authoritative · High trust" },
-        { val: "podcast",      label: "Podcast Creator",      desc: "Conversational setup · Engaging · Natural delivery" },
-        { val: "luxury",       label: "Luxury Creator",       desc: "Dark minimal studio · Aspirational · Elevated" },
-        { val: "fitness",      label: "Fitness Creator",      desc: "Active setting · High energy · Motivating" },
-        { val: "street",       label: "Street Creator",       desc: "Urban outdoor · Unscripted feel · Viral potential" }
+        { val: "startup_founder",   label: "Startup Founder",    desc: "Bold · Visionary · Direct to camera" },
+        { val: "podcast_creator",   label: "Podcast Creator",    desc: "Conversational · Trusted · Natural delivery" },
+        { val: "fitness_creator",   label: "Fitness Creator",    desc: "Energetic · Motivating · High intensity" },
+        { val: "luxury_influencer", label: "Luxury Influencer",  desc: "Elevated · Aspirational · Refined presence" },
+        { val: "tech_reviewer",     label: "Tech Reviewer",      desc: "Analytical · Credible · Expert voice" },
+        { val: "street_creator",    label: "Street Creator",     desc: "Raw · Unscripted · Viral energy" },
+        { val: "vacation_creator",  label: "Vacation Creator",   desc: "Relaxed · Lifestyle · Discovery vibe" },
+        { val: "office_creator",    label: "Office Creator",     desc: "Professional · Clean · Outcome-focused" }
       ]
     },
     {
       key:  "ucAdFeeling",
       q:    "What should the ad feel like?",
-      desc: "Shapes the hook style, script energy, pacing, and call-to-action.",
+      desc: "Controls hook structure, script energy, pacing, and call-to-action.",
       options: [
         { val: "viral",       label: "Viral",       desc: "Punchy, shareable, built to spread" },
-        { val: "premium",     label: "Premium",     desc: "Polished, elevated, high-quality feel" },
+        { val: "cinematic",   label: "Cinematic",   desc: "Evocative, visual, emotionally charged" },
         { val: "emotional",   label: "Emotional",   desc: "Heart-led, personal, drives connection" },
         { val: "aggressive",  label: "Aggressive",  desc: "Direct, bold, no fluff — buy now energy" },
-        { val: "startup",     label: "Startup",     desc: "Scrappy, exciting, disruption energy" },
         { val: "luxury",      label: "Luxury",      desc: "Slow, deliberate, aspirational" },
+        { val: "startup",     label: "Startup",     desc: "Scrappy, exciting, disruption energy" },
         { val: "friendly",    label: "Friendly",    desc: "Warm, helpful, genuinely likeable" },
         { val: "high_energy", label: "High Energy", desc: "Fast, loud, nonstop excitement" }
       ]

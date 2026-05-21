@@ -1744,35 +1744,75 @@ app.post('/api/generate-ugc', async (req, res) => {
 
   console.log('[UGC] Received → creatorStyle:', creatorStyle, '| adFeeling:', adFeeling, '| avatarId:', avatarId, '| background:', background, '| format:', format, '| scriptMode:', customScript ? 'custom' : 'ai');
 
-  // Ad feeling → HeyGen voice speed
+  // ── Cinematic brief registry — each style is a full creative direction ──
+  const CREATOR_BRIEFS = {
+    startup_founder: {
+      context:   'A bold startup founder speaking directly from their workspace — authentic, disruptive, has been in the trenches and knows the audience\'s exact pain point.',
+      hookStyle: 'Lead with the problem the audience already knows. One line. Then flip it hard.',
+      language:  'Founder energy: "we built this", "shipped it last week", "changed the way I work completely"',
+      ctaStyle:  'Direct and urgent: "try it now", "link in bio", "ship faster starting today"',
+    },
+    podcast_creator: {
+      context:   'A trusted podcast host mid-recommendation — relaxed, genuinely enthusiastic, talking like they\'re in the middle of a real conversation with a close friend.',
+      hookStyle: 'Start mid-story or mid-thought. Like you jumped into a conversation already in progress.',
+      language:  'Warm and authentic: "honestly", "I\'ve been using this for months now", "you need to hear about this"',
+      ctaStyle:  'Soft confidence: "worth checking out", "grab the link below", "you\'ll thank me later"',
+    },
+    fitness_creator: {
+      context:   'A results-obsessed fitness creator in their element — pumped, direct, every single word carries physical energy and drive.',
+      hookStyle: 'Open with a transformation or a challenge. Make them feel the intensity in the first sentence.',
+      language:  'Active and relentless: "gains", "no excuses", "I don\'t stop until", "results speak for themselves"',
+      ctaStyle:  'No hesitation: "get it now", "stop waiting", "your move"',
+    },
+    luxury_influencer: {
+      context:   'A luxury lifestyle creator speaking from a premium environment — measured, deliberate, every word is intentional and earns its place.',
+      hookStyle: 'Paint the aspirational scene first. Let the audience want the life before they hear anything about the product.',
+      language:  'Elevated and sparse: "exceptional", "the kind of quality that stays with you", "not for everyone — and that\'s the point"',
+      ctaStyle:  'Restrained and exclusive: "discover it", "if you know, you know", "for those who notice the difference"',
+    },
+    tech_reviewer: {
+      context:   'An authoritative tech reviewer who has tested everything, cuts through the noise, and only recommends what genuinely works.',
+      hookStyle: 'Lead with your boldest claim immediately, then back it up with specifics. Credibility through detail.',
+      language:  'Informed and precise: "tested this for 30 days straight", "here\'s what actually surprised me", "the feature that changes everything"',
+      ctaStyle:  'Confident endorsement: "worth every penny", "link in the description", "upgraded and never looked back"',
+    },
+    street_creator: {
+      context:   'A spontaneous street creator filming on-the-go — raw, unfiltered energy, just discovered something and physically cannot wait to share it.',
+      hookStyle: 'React first. "Okay wait—" or "I need to stop and talk about this right now" — pull them into the urgency.',
+      language:  'Raw and viral: "no cap", "lowkey obsessed", "fr fr", "I can\'t believe this actually works"',
+      ctaStyle:  'Impulsive and urgent: "grab it fr", "link in bio right now", "you\'re welcome in advance"',
+    },
+    vacation_creator: {
+      context:   'A travel creator on location — relaxed, fully in their element, makes the audience want the experience before they even know what the product is.',
+      hookStyle: 'Pull them into the scene. Set where you are and how it feels before revealing anything.',
+      language:  'Lifestyle and discovery: "couldn\'t leave without it", "this changed how I travel", "the vibe here is completely different"',
+      ctaStyle:  'Aspirational close: "take me back", "get yours before they\'re gone", "you genuinely deserve this"',
+    },
+    office_creator: {
+      context:   'A sharp professional in a clean modern workspace — focused, outcome-driven, respects the audience\'s time and treats them as intelligent adults.',
+      hookStyle: 'Name the professional pain point in the first sentence. Time is the asset — get to the solution fast.',
+      language:  'Direct and measurable: "saves me two hours every day", "our entire team switched", "the ROI showed up immediately"',
+      ctaStyle:  'Measured and clear: "try it free", "book the demo", "your workflow will thank you"',
+    },
+  };
+
+  // Ad feeling → voice speed (real HeyGen parameter)
   const feelingSpeed = {
     viral:       1.08,
-    premium:     0.92,
-    emotional:   0.95,
-    aggressive:  1.1,
+    cinematic:   0.9,
+    emotional:   0.93,
+    aggressive:  1.12,
+    luxury:      0.85,
     startup:     1.05,
-    luxury:      0.88,
     friendly:    1.0,
-    high_energy: 1.12,
+    high_energy: 1.15,
   }[adFeeling] || 1.0;
 
-  // Background: only inject solid color for the two explicit color settings.
-  // All other creator styles leave background unset — HeyGen uses the avatar's
-  // own built-in scene, which IS the environment for that creator style.
+  // Background: solid color only for styles that use it.
+  // All others leave background unset — HeyGen uses the avatar's natural scene.
   const bgHeyGenMap = {
     white_studio: { type: 'color', value: '#FFFFFF' },
     minimal_dark: { type: 'color', value: '#0D0D0D' },
-  };
-
-  // Creator style → visual/script context
-  const creatorStyleContext = {
-    studio:       'clean white studio — direct to camera, premium and polished',
-    lifestyle:    'authentic everyday setting — real, relatable, natural feel',
-    professional: 'professional workspace or office — authoritative, credible, high trust',
-    podcast:      'conversational podcast-style setup — engaging, thoughtful, natural delivery',
-    luxury:       'minimal dark studio — elevated, aspirational, slow and deliberate',
-    fitness:      'gym or active environment — high energy, motivating, raw',
-    street:       'outdoor or urban street setting — unscripted, spontaneous, viral energy',
   };
 
   // ── Step 1: Script — use provided or generate with AI ────────
@@ -1783,40 +1823,51 @@ app.post('/api/generate-ugc', async (req, res) => {
   } else {
     if (!_requireEnv('ANTHROPIC_API_KEY', res, 'Anthropic')) return;
     try {
+      const brief = CREATOR_BRIEFS[creatorStyle] || {};
+
+      // Ad feeling → directorial instruction (shapes hook structure and energy)
       const feelingInstruction = {
-        viral:       'Write with rapid-fire energy — punchy, shareable hooks, made to go viral. Short sentences, bold statements.',
-        premium:     'Write in an elevated, confident tone — polished language, quality-first messaging, zero hype.',
-        emotional:   'Write with heart — personal story, authentic emotion, vulnerability that drives genuine connection.',
-        aggressive:  'Write direct and hard-hitting — no fluff, bold claims, urgency in every line. Buy now energy.',
-        startup:     'Write with scrappy excitement — disruptive framing, founder energy, "we\'re changing everything" attitude.',
-        luxury:      'Write slowly and deliberately — sparse, aspirational language, every word earns its place.',
-        friendly:    'Write warm, helpful, and genuinely likeable — feels like a trusted friend giving a recommendation.',
-        high_energy: 'Write at maximum energy — fast pace, exclamation points, nonstop excitement from hook to CTA.',
-      }[adFeeling] || 'Write in a genuine, natural first-person voice.';
+        viral:       'Make this spread. Rapid-fire energy, punchy hooks designed to be shared. Short sentences. Bold, declarative statements.',
+        cinematic:   'Write like a film director narrating a moment — evocative, visual language. Every sentence paints a picture. Slow and deliberate. Emotionally charged.',
+        emotional:   'Lead with heart. Personal story, raw honesty, vulnerability that earns real connection. Make them feel something before you ask them to do anything.',
+        aggressive:  'No warmup. Direct, hard-hitting, zero fluff. Bold claims, urgency in every line. This is a closer — make them feel like they\'re missing out right now.',
+        luxury:      'Nothing is rushed. Sparse, aspirational language where every word earns its place. The silence between sentences matters. Elevated throughout.',
+        startup:     'Scrappy and exciting. Disruptive framing, founder-level conviction, the energy of someone who genuinely believes they\'re changing something.',
+        friendly:    'Warm, genuine, completely likeable. Feels exactly like a trusted friend giving an honest recommendation with zero agenda.',
+        high_energy: 'Maximum energy from the first word. Fast pace, exclamation, nonstop forward momentum. There is no gear below fifth.',
+      }[adFeeling] || 'Write in a genuine, natural first-person voice with authentic energy.';
 
-      const styleNote = creatorStyle && creatorStyleContext[creatorStyle]
-        ? `\nCreator environment: ${creatorStyleContext[creatorStyle]}`
-        : '';
+      const system = `You are an expert UGC ad scriptwriter and creative director for TikTok, Instagram Reels, and YouTube Shorts.
 
-      const system = `You are an expert direct-response UGC ad scriptwriter for TikTok, Instagram Reels, and YouTube Shorts.
-Write scripts that sound like real creators talking to camera — authentic, never like a traditional ad.
-AD FEELING RULE (highest priority): ${feelingInstruction}
-Rules:
-- Open with a pattern-interrupt hook that stops the scroll in the first 3 seconds
-- Speak in first person — genuine testimonial or story, never corporate language
-- End with a clear, punchy CTA that matches the feeling
-- Conversational only — no stage directions, no [brackets], no (actions), no scene notes
-- Output ONLY the spoken words — nothing else
-- Target 8 to 12 sentences for a 30–45 second read`;
+CREATOR PROFILE: ${brief.context || 'An authentic creator speaking directly to camera.'}
+HOOK STYLE: ${brief.hookStyle || 'Open with a strong attention-grabbing hook in the first 3 seconds.'}
+LANGUAGE GUIDE: ${brief.language || 'Conversational, first-person, authentic.'}
+CTA STYLE: ${brief.ctaStyle || 'End with a clear, natural call-to-action.'}
 
-      const userMsg = `Write a UGC ad script.${brandName ? `\nBrand: ${brandName}` : ''}${brandDesc ? `\nAbout: ${brandDesc}` : ''}${styleNote}
-Ad feeling: ${adFeeling || 'viral'}
+AD FEELING — apply this to every sentence (HIGHEST PRIORITY): ${feelingInstruction}
 
-Output ONLY the spoken script text.`;
+Script rules:
+- Open with EXACTLY the hook style above — the first 3 seconds must stop the scroll
+- Write as this creator, in their voice, their world, their language patterns
+- End with EXACTLY the CTA style above
+- First person only — no "you should" constructions at the start
+- No stage directions, brackets, parenthetical actions, or scene descriptions
+- Output ONLY the spoken script — nothing else, no titles, no labels
+- Target 8–12 sentences for a 30–45 second read`;
+
+      const userMsg = [
+        'Write a UGC ad script.',
+        brandName  ? `Brand: ${brandName}` : '',
+        brandDesc  ? `About the brand: ${brandDesc}` : '',
+        `Creator style: ${(creatorStyle || '').replace(/_/g, ' ')}`,
+        `Ad feeling: ${adFeeling || 'viral'}`,
+        '',
+        'Output ONLY the spoken script.',
+      ].filter(Boolean).join('\n');
 
       script = (await callAnthropic(system, userMsg)).trim();
       if (!script) return res.status(500).json({ error: 'Anthropic returned an empty script' });
-      console.log('[UGC] Script generated (', script.length, 'chars )');
+      console.log('[UGC] Script generated (', script.length, 'chars ) | style:', creatorStyle, '| feeling:', adFeeling);
     } catch (err) {
       console.error('[UGC] Script generation error:', err.message);
       return res.status(500).json({ error: 'Failed to write script: ' + err.message });
@@ -1876,46 +1927,50 @@ app.post('/api/generate-ugc-script', async (req, res) => {
 
   const { creatorStyle, adFeeling, brandName, brandDesc } = req.body || {};
 
-  const creatorStyleContext = {
-    studio:       'clean white studio — direct to camera, premium and polished',
-    lifestyle:    'authentic everyday setting — real, relatable, natural feel',
-    professional: 'professional workspace or office — authoritative, credible, high trust',
-    podcast:      'conversational podcast-style setup — engaging, thoughtful, natural delivery',
-    luxury:       'minimal dark studio — elevated, aspirational, slow and deliberate',
-    fitness:      'gym or active environment — high energy, motivating, raw',
-    street:       'outdoor or urban street setting — unscripted, spontaneous, viral energy',
+  const CREATOR_BRIEFS = {
+    startup_founder:   { context: 'A bold startup founder speaking directly from their workspace — authentic, disruptive, knows the audience\'s pain point firsthand.', hookStyle: 'Lead with the problem the audience already knows. One line. Then flip it.', language: 'Founder energy: "we built this", "shipped it", "changed the way I work"', ctaStyle: 'Direct and urgent: "try it now", "link in bio", "ship faster today"' },
+    podcast_creator:   { context: 'A trusted podcast host mid-recommendation — relaxed, genuine, talking like they\'re in conversation with a close friend.', hookStyle: 'Start mid-story or mid-thought. Like jumping into a conversation already in progress.', language: 'Warm: "honestly", "I\'ve been using this for months", "you need to hear this"', ctaStyle: 'Soft confidence: "worth checking out", "grab the link", "you\'ll thank me"' },
+    fitness_creator:   { context: 'A results-obsessed fitness creator in their element — pumped, direct, every word carries physical energy.', hookStyle: 'Open with a transformation claim or challenge. Make them feel the intensity.', language: 'Active: "gains", "no excuses", "results don\'t lie"', ctaStyle: 'No hesitation: "get it now", "stop waiting", "your move"' },
+    luxury_influencer: { context: 'A luxury lifestyle creator in a premium environment — measured, deliberate, every word is intentional.', hookStyle: 'Paint the aspirational scene first. Let the audience want the life before the product.', language: 'Elevated: "exceptional", "the kind of quality that stays with you", "not for everyone"', ctaStyle: 'Restrained: "discover it", "if you know, you know", "for those who notice"' },
+    tech_reviewer:     { context: 'An authoritative tech reviewer who only recommends what genuinely works. Credibility through specificity.', hookStyle: 'Lead with the boldest claim immediately, then back it up with detail.', language: 'Precise: "tested for 30 days", "here\'s what surprised me", "the feature that matters"', ctaStyle: 'Confident: "worth every penny", "link in description", "never looked back"' },
+    street_creator:    { context: 'A spontaneous street creator filming on-the-go — raw, just discovered something and can\'t wait to share it.', hookStyle: 'React first. "Okay wait—" or "I need to talk about this right now".', language: 'Raw: "no cap", "lowkey obsessed", "fr fr", "can\'t believe this works"', ctaStyle: 'Urgent: "grab it fr", "link in bio now", "you\'re welcome"' },
+    vacation_creator:  { context: 'A travel creator on location — relaxed, makes the audience want the experience before they know the product.', hookStyle: 'Set the scene first. Pull them into where you are and how it feels.', language: 'Lifestyle: "couldn\'t leave without it", "changed how I travel", "the vibe is different"', ctaStyle: 'Aspirational: "get yours", "you deserve this", "take me back"' },
+    office_creator:    { context: 'A sharp professional in a clean workspace — focused, outcome-driven, respects the audience\'s time.', hookStyle: 'Name the pain point in the first sentence. Get to the solution fast.', language: 'Measurable: "saves me two hours daily", "whole team switched", "ROI showed up immediately"', ctaStyle: 'Clear: "try it free", "book the demo", "your workflow will thank you"' },
   };
 
   const feelingInstruction = {
-    viral:       'Write with rapid-fire energy — punchy, shareable hooks, made to go viral. Short sentences, bold statements.',
-    premium:     'Write in an elevated, confident tone — polished language, quality-first messaging, zero hype.',
-    emotional:   'Write with heart — personal story, authentic emotion, vulnerability that drives genuine connection.',
-    aggressive:  'Write direct and hard-hitting — no fluff, bold claims, urgency in every line. Buy now energy.',
-    startup:     'Write with scrappy excitement — disruptive framing, founder energy, "we\'re changing everything" attitude.',
-    luxury:      'Write slowly and deliberately — sparse, aspirational language, every word earns its place.',
-    friendly:    'Write warm, helpful, and genuinely likeable — feels like a trusted friend giving a recommendation.',
-    high_energy: 'Write at maximum energy — fast pace, exclamation points, nonstop excitement from hook to CTA.',
+    viral:       'Make this spread. Rapid-fire energy, punchy hooks designed to be shared. Short sentences, bold statements.',
+    cinematic:   'Write like a film director — evocative, visual language. Every sentence paints a picture. Slow, deliberate, emotionally charged.',
+    emotional:   'Lead with heart. Raw honesty and vulnerability that earns real connection.',
+    aggressive:  'No warmup. Direct, hard-hitting, urgency in every line. Make them feel like they\'re missing out right now.',
+    luxury:      'Nothing is rushed. Sparse, aspirational language where every word earns its place.',
+    startup:     'Scrappy and exciting. Disruptive framing, founder conviction, energy of someone changing something.',
+    friendly:    'Warm, genuine, completely likeable — a trusted friend giving an honest recommendation.',
+    high_energy: 'Maximum energy from the first word. Fast pace, nonstop forward momentum. No lower gear.',
   }[adFeeling] || 'Write in a genuine, natural first-person voice.';
 
-  const styleNote = creatorStyle && creatorStyleContext[creatorStyle]
-    ? `\nCreator environment: ${creatorStyleContext[creatorStyle]}`
-    : '';
+  const brief = CREATOR_BRIEFS[creatorStyle] || {};
 
-  const system = `You are an expert direct-response UGC ad scriptwriter for TikTok, Instagram Reels, and YouTube Shorts.
-Write scripts that sound like real creators talking to camera — authentic, never like a traditional ad.
-AD FEELING RULE (highest priority): ${feelingInstruction}
-Rules:
-- Open with a pattern-interrupt hook that stops the scroll in the first 3 seconds
-- Speak in first person — genuine testimonial or story, never corporate language
-- End with a clear, punchy CTA that matches the feeling
-- Conversational only — no stage directions, no [brackets], no (actions), no scene notes
-- Output ONLY the spoken words — nothing else
-- Target 8 to 12 sentences for a 30–45 second read`;
+  const system = `You are an expert UGC ad scriptwriter and creative director for TikTok, Instagram Reels, and YouTube Shorts.
 
-  const userMsg = `Write a UGC ad script.${brandName ? `\nBrand: ${brandName}` : ''}${brandDesc ? `\nAbout: ${brandDesc}` : ''}${styleNote}
-Ad feeling: ${adFeeling || 'viral'}
+CREATOR PROFILE: ${brief.context || 'An authentic creator speaking directly to camera.'}
+HOOK STYLE: ${brief.hookStyle || 'Open with a strong attention-grabbing hook.'}
+LANGUAGE GUIDE: ${brief.language || 'Conversational, first-person, authentic.'}
+CTA STYLE: ${brief.ctaStyle || 'End with a clear, natural call-to-action.'}
 
-Output ONLY the spoken script text.`;
+AD FEELING (HIGHEST PRIORITY): ${feelingInstruction}
+
+Rules: first-person only, no stage directions, no brackets, output ONLY the spoken script, 8–12 sentences.`;
+
+  const userMsg = [
+    'Write a UGC ad script.',
+    brandName ? `Brand: ${brandName}` : '',
+    brandDesc ? `About: ${brandDesc}` : '',
+    `Creator: ${(creatorStyle || '').replace(/_/g, ' ')}`,
+    `Feeling: ${adFeeling || 'viral'}`,
+    '',
+    'Output ONLY the spoken script.',
+  ].filter(Boolean).join('\n');
 
   try {
     const script = (await callAnthropic(system, userMsg)).trim();
