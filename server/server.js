@@ -1728,7 +1728,7 @@ app.post('/api/generate-ugc', async (req, res) => {
   console.log("UGC ROUTE HIT");
   console.log("UGC BODY", JSON.stringify(req.body));
 
-  const { creatorStyle, adFeeling, avatarId, voiceId, brandName, brandDesc, background, customScript, format } = req.body || {};
+  const { adFeeling, avatarId, voiceId, avatarStyle, brandName, brandDesc, background, customScript, format } = req.body || {};
 
   const formatDimensions = {
     vertical:  { width: 720,  height: 1280 },
@@ -1742,7 +1742,7 @@ app.post('/api/generate-ugc', async (req, res) => {
   const heygenKey = process.env.HEYGEN_API_KEY;
   if (!heygenKey) return res.status(500).json({ error: 'HeyGen API key not configured' });
 
-  console.log('[UGC] Received → creatorStyle:', creatorStyle, '| adFeeling:', adFeeling, '| avatarId:', avatarId, '| background:', background, '| format:', format, '| scriptMode:', customScript ? 'custom' : 'ai');
+  console.log('[UGC] Received → adFeeling:', adFeeling, '| avatarId:', avatarId, '| avatarStyle:', avatarStyle || 'normal', '| background:', background, '| format:', format, '| scriptMode:', customScript ? 'custom' : 'ai');
 
   // ── Cinematic brief registry — each style is a full creative direction ──
   const CREATOR_BRIEFS = {
@@ -1823,8 +1823,6 @@ app.post('/api/generate-ugc', async (req, res) => {
   } else {
     if (!_requireEnv('ANTHROPIC_API_KEY', res, 'Anthropic')) return;
     try {
-      const brief = CREATOR_BRIEFS[creatorStyle] || {};
-
       // Ad feeling → directorial instruction (shapes hook structure and energy)
       const feelingInstruction = {
         viral:       'Make this spread. Rapid-fire energy, punchy hooks designed to be shared. Short sentences. Bold, declarative statements.',
@@ -1839,17 +1837,12 @@ app.post('/api/generate-ugc', async (req, res) => {
 
       const system = `You are an expert UGC ad scriptwriter and creative director for TikTok, Instagram Reels, and YouTube Shorts.
 
-CREATOR PROFILE: ${brief.context || 'An authentic creator speaking directly to camera.'}
-HOOK STYLE: ${brief.hookStyle || 'Open with a strong attention-grabbing hook in the first 3 seconds.'}
-LANGUAGE GUIDE: ${brief.language || 'Conversational, first-person, authentic.'}
-CTA STYLE: ${brief.ctaStyle || 'End with a clear, natural call-to-action.'}
-
 AD FEELING — apply this to every sentence (HIGHEST PRIORITY): ${feelingInstruction}
 
 Script rules:
-- Open with EXACTLY the hook style above — the first 3 seconds must stop the scroll
-- Write as this creator, in their voice, their world, their language patterns
-- End with EXACTLY the CTA style above
+- Open with a strong attention-grabbing hook that stops the scroll in the first 3 seconds
+- Speak in a genuine first-person voice as an authentic creator
+- End with a clear, natural call-to-action
 - First person only — no "you should" constructions at the start
 - No stage directions, brackets, parenthetical actions, or scene descriptions
 - Output ONLY the spoken script — nothing else, no titles, no labels
@@ -1859,7 +1852,6 @@ Script rules:
         'Write a UGC ad script.',
         brandName  ? `Brand: ${brandName}` : '',
         brandDesc  ? `About the brand: ${brandDesc}` : '',
-        `Creator style: ${(creatorStyle || '').replace(/_/g, ' ')}`,
         `Ad feeling: ${adFeeling || 'viral'}`,
         '',
         'Output ONLY the spoken script.',
@@ -1867,7 +1859,7 @@ Script rules:
 
       script = (await callAnthropic(system, userMsg)).trim();
       if (!script) return res.status(500).json({ error: 'Anthropic returned an empty script' });
-      console.log('[UGC] Script generated (', script.length, 'chars ) | style:', creatorStyle, '| feeling:', adFeeling);
+      console.log('[UGC] Script generated (', script.length, 'chars ) | feeling:', adFeeling);
     } catch (err) {
       console.error('[UGC] Script generation error:', err.message);
       return res.status(500).json({ error: 'Failed to write script: ' + err.message });
@@ -1877,7 +1869,7 @@ Script rules:
   // ── Step 2: Submit to HeyGen ──────────────────────────────────
   try {
     const videoInput = {
-      character: { type: 'avatar', avatar_id: avatarId, avatar_style: 'normal' },
+      character: { type: 'avatar', avatar_id: avatarId, avatar_style: avatarStyle || 'normal' },
       voice:     { type: 'text',   input_text: script,  voice_id: voiceId, speed: feelingSpeed },
     };
     // Only inject background when we have an explicit solid-color mapping.

@@ -273,19 +273,10 @@ var CF_FLOWS = {
 
   ugc: [
     {
-      key:  "ucCreatorStyle",
-      q:    "Choose your creator style.",
-      desc: "Sets the visual environment, voice, and presence of your AI creator.",
-      options: [
-        { val: "startup_founder",   label: "Startup Founder",    desc: "Bold · Visionary · Direct to camera" },
-        { val: "podcast_creator",   label: "Podcast Creator",    desc: "Conversational · Trusted · Natural delivery" },
-        { val: "fitness_creator",   label: "Fitness Creator",    desc: "Energetic · Motivating · High intensity" },
-        { val: "luxury_influencer", label: "Luxury Influencer",  desc: "Elevated · Aspirational · Refined presence" },
-        { val: "tech_reviewer",     label: "Tech Reviewer",      desc: "Analytical · Credible · Expert voice" },
-        { val: "street_creator",    label: "Street Creator",     desc: "Raw · Unscripted · Viral energy" },
-        { val: "vacation_creator",  label: "Vacation Creator",   desc: "Relaxed · Lifestyle · Discovery vibe" },
-        { val: "office_creator",    label: "Office Creator",     desc: "Professional · Clean · Outcome-focused" }
-      ]
+      key:  "ucAvatar",
+      type: "avatar-picker",
+      q:    "Choose your creator.",
+      desc: "Select the AI creator that will deliver your ad."
     },
     {
       key:  "ucAdFeeling",
@@ -591,6 +582,85 @@ function _cfRenderOptions(step){
   var opts = document.getElementById("cfOptions");
   var free = document.getElementById("cfFreeInput");
   if(!opts) return;
+
+  // ── Avatar picker — fetches real HeyGen thumbnails ────────
+  if(step.type === "avatar-picker"){
+    if(free) free.style.display = "none";
+    opts.className = "cf-options cf-avatar-grid-wrap";
+    opts.innerHTML = '<div class="cf-avatar-loading">'
+      + '<div class="spin" style="width:16px;height:16px;border-width:2px;margin:0 auto 10px;display:block"></div>'
+      + '<span>Loading creators…</span></div>';
+    opts.style.opacity   = "1";
+    opts.style.transform = "none";
+
+    var capturedStep = step;
+    SB.auth.getSession().then(function(s){
+      var token = s && s.data && s.data.session && s.data.session.access_token;
+      if(!token){ opts.innerHTML = '<p class="cf-avatar-err">Please sign in to browse creators.</p>'; return null; }
+      return Promise.all([
+        apiFetch("/api/ugc-avatars", { headers: { "Authorization": "Bearer " + token } }),
+        apiFetch("/api/ugc-voices",  { headers: { "Authorization": "Bearer " + token } })
+      ]);
+    }).then(function(results){
+      if(!results) return;
+      var avatars = (results[0].ok && results[0].data && results[0].data.avatars) || [];
+      var voices  = (results[1].ok && results[1].data && results[1].data.voices)   || [];
+
+      var femaleVoice  = voices.find(function(v){ return (v.gender||"").toLowerCase() === "female"; });
+      var maleVoice    = voices.find(function(v){ return (v.gender||"").toLowerCase() === "male";   });
+      var defaultVoice = femaleVoice || maleVoice || voices[0] || {};
+
+      if(!avatars.length){
+        opts.innerHTML = "<p class=\"cf-avatar-err\">No avatars found in your HeyGen account.</p>";
+        return;
+      }
+
+      opts.innerHTML = "";
+      opts.className = "cf-options cf-avatar-grid";
+
+      console.log("[UGC] Fetched", avatars.length, "avatars from HeyGen");
+
+      avatars.forEach(function(avatar){
+        var gender   = (avatar.gender || "").toLowerCase();
+        var voiceObj = gender === "female" ? (femaleVoice || defaultVoice)
+                     : gender === "male"   ? (maleVoice   || defaultVoice)
+                     : defaultVoice;
+        var voiceId  = voiceObj.voice_id || "";
+        var name     = avatar.avatar_name || avatar.avatar_id;
+        var thumb    = avatar.preview_image_url || "";
+
+        var card = document.createElement("button");
+        card.type      = "button";
+        card.className = "cf-avatar-card";
+        card.innerHTML = (thumb
+          ? '<img src="' + _cfEsc(thumb) + '" class="cf-avatar-thumb" loading="lazy" />'
+          : '<div class="cf-avatar-thumb cf-avatar-nothumb"></div>')
+          + '<span class="cf-avatar-name">' + _cfEsc(name) + '</span>';
+
+        card.onclick = function(){
+          document.querySelectorAll(".cf-avatar-card").forEach(function(c){
+            c.classList.remove("cf-avatar-selected");
+            c.disabled = true;
+          });
+          card.classList.add("cf-avatar-selected");
+          card.disabled = false;
+          _cfAnswers[capturedStep.key] = {
+            val:     avatar.avatar_id,
+            label:   name,
+            voiceId: voiceId,
+            gender:  gender,
+          };
+          console.log("[UGC] Avatar selected:", avatar.avatar_id, "| voice:", voiceId);
+          setTimeout(function(){ _cfAdvance(capturedStep, name); }, 340);
+        };
+
+        opts.appendChild(card);
+      });
+    }).catch(function(err){
+      opts.innerHTML = '<p class="cf-avatar-err">Could not load creators: ' + _cfEsc(err.message) + '</p>';
+    });
+    return;
+  }
 
   if(step.type === "textarea"){
     opts.innerHTML = "";
@@ -915,16 +985,25 @@ function _cfDispatch(){
 function _cfDispatchUGC(){
   var a = _cfAnswers;
 
-  // Map flow answers into ugc.js state variables
-  _ucScriptMode  = (a.ucScriptMode   && a.ucScriptMode.val)   || "ai";
-  _ucVideoFormat = (a.ucFormat       && a.ucFormat.val)       || "vertical";
-  _ucAdFeeling   = (a.ucAdFeeling    && a.ucAdFeeling.val)    || "viral";
-  var creatorId  = (a.ucCreatorStyle && a.ucCreatorStyle.val) || null;
-  _ucSelectedCreator = (typeof UC_CREATORS !== "undefined")
-    ? (UC_CREATORS.find(function(c){ return c.id === creatorId; }) || null)
-    : null;
-  // Background is derived from the creator style — no separate selector
-  _ucSelectedBg = _ucSelectedCreator ? (_ucSelectedCreator.background || null) : null;
+  _ucScriptMode  = (a.ucScriptMode && a.ucScriptMode.val) || "ai";
+  _ucVideoFormat = (a.ucFormat     && a.ucFormat.val)     || "vertical";
+  _ucAdFeeling   = (a.ucAdFeeling  && a.ucAdFeeling.val)  || "viral";
+
+  // Avatar is now directly selected by the user from real HeyGen data
+  var avatarAnswer = a.ucAvatar;
+  if(avatarAnswer && avatarAnswer.val){
+    _ucSelectedCreator = {
+      id:       "custom",
+      label:    avatarAnswer.label   || "Creator",
+      avatarId: avatarAnswer.val,
+      voiceId:  avatarAnswer.voiceId || "",
+      background: null,
+    };
+  } else {
+    _ucSelectedCreator = null;
+  }
+  // Use avatar's natural built-in scene — no separate background override
+  _ucSelectedBg = null;
 
   // Reset video state
   _ucActiveId = null;

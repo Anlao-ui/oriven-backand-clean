@@ -454,7 +454,6 @@ function ucStartOver() {
 
 // ── ucGenerateFromFlow — called by _cfDispatchUGC() with flow answers ──
 async function ucGenerateFromFlow(answers) {
-  var creatorStyle = (answers.ucCreatorStyle && answers.ucCreatorStyle.val) || '';
   var adFeeling    = _ucAdFeeling || 'viral';
   var customScript = (_ucScriptMode === 'custom' && answers.ucCustomScript && answers.ucCustomScript.val)
     ? answers.ucCustomScript.val.trim()
@@ -482,9 +481,10 @@ async function ucGenerateFromFlow(answers) {
       return;
     }
 
-    // Refresh HeyGen avatar + voice IDs — updates UC_CREATORS in-place so
-    // stale hardcoded IDs never silently fall back to HeyGen's default actor.
-    await Promise.all([_ucInitAvatars(token), _ucInitVoices(token)]);
+    // Only run slot-based init when no explicit avatar was chosen in the picker
+    if (!_ucSelectedCreator || _ucSelectedCreator.id !== 'custom') {
+      await Promise.all([_ucInitAvatars(token), _ucInitVoices(token)]);
+    }
 
     if (!_ucSelectedCreator) {
       _ucSetStatus('<div class="ugc-status-err">No creator selected — please try again.</div>');
@@ -492,8 +492,7 @@ async function ucGenerateFromFlow(answers) {
       return;
     }
 
-    console.log('[UGC] Sending → creatorStyle:', creatorStyle,
-      '| adFeeling:', adFeeling,
+    console.log('[UGC] Sending → adFeeling:', adFeeling,
       '| avatarId:', _ucSelectedCreator.avatarId,
       '| voiceId:', _ucSelectedCreator.voiceId,
       '| background:', _ucSelectedBg,
@@ -503,7 +502,6 @@ async function ucGenerateFromFlow(answers) {
       method:  'POST',
       headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + token },
       body:    JSON.stringify({
-        creatorStyle: creatorStyle,
         adFeeling:    adFeeling,
         background:   _ucSelectedBg   || null,
         format:       _ucVideoFormat  || 'vertical',
