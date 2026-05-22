@@ -2866,9 +2866,55 @@ textarea.flow-inp{min-height:90px;resize:vertical}
   width:100%;
   display:flex;
   flex-direction:column;
-  align-items:center;
-  justify-content:center;
+  align-items:stretch;
+  gap:12px;
   min-height:100px;
+}
+
+/* ── Format tabs ── */
+.cf-fmt-tabs{
+  display:flex;
+  gap:6px;
+  flex-shrink:0;
+}
+.cf-fmt-tab{
+  flex:1;
+  display:flex;
+  flex-direction:column;
+  align-items:center;
+  gap:3px;
+  padding:9px 6px 8px;
+  border:1.5px solid var(--border);
+  border-radius:10px;
+  background:rgba(255,255,255,.03);
+  color:var(--muted);
+  font-family:inherit;
+  cursor:pointer;
+  transition:border-color .14s, background .14s, color .14s;
+}
+.cf-fmt-tab:hover{
+  border-color:rgba(183,255,42,.3);
+  background:rgba(183,255,42,.04);
+  color:var(--charcoal);
+}
+.cf-fmt-tab-active{
+  border-color:#B7FF2A!important;
+  background:rgba(183,255,42,.08)!important;
+  color:var(--charcoal)!important;
+}
+.cf-fmt-ratio{
+  font-size:10px;
+  font-weight:700;
+  letter-spacing:.04em;
+  color:inherit;
+  opacity:.7;
+}
+.cf-fmt-tab-active .cf-fmt-ratio{ color:#B7FF2A; opacity:1; }
+.cf-fmt-label{
+  font-size:12px;
+  font-weight:600;
+  color:inherit;
+  letter-spacing:-.01em;
 }
 .cf-avatar-grid{
   display:grid;

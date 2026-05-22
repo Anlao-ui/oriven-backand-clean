@@ -340,15 +340,6 @@ var CF_FLOWS = {
       conditional:    "ucScriptMode",
       conditionalVal: "custom"
     },
-    {
-      key:  "ucFormat",
-      q:    "What format should the video be in?",
-      desc: "Choose the native ratio for where you'll publish the ad.",
-      options: [
-        { val: "vertical",  label: "Vertical (9:16)",  desc: "TikTok, Reels, Stories — native social" },
-        { val: "landscape", label: "Landscape (16:9)", desc: "YouTube, website embeds, paid ads" }
-      ]
-    }
   ],
 
   web: [
@@ -609,7 +600,7 @@ function _cfRenderOptions(step){
   var free = document.getElementById("cfFreeInput");
   if(!opts) return;
 
-  // ── Avatar picker — fetches real HeyGen thumbnails with video preview ──
+  // ── Avatar picker — format tabs + real HeyGen thumbnails + ratio detection ──
   if(step.type === "avatar-picker"){
     if(free) free.style.display = "none";
     opts.className = "cf-options cf-avatar-grid-wrap";
@@ -619,7 +610,50 @@ function _cfRenderOptions(step){
     opts.style.opacity   = "1";
     opts.style.transform = "none";
 
-    var capturedStep = step;
+    var capturedStep  = step;
+    var _cfActiveFmt  = "vertical";  // default format tab
+
+    // Filter grid cards by the active format tab
+    function _applyFmtFilter(grid){
+      grid.querySelectorAll(".cf-avatar-card").forEach(function(card){
+        var ratio = card.dataset.ratio || "all";
+        card.style.display = (ratio === "all" || ratio === _cfActiveFmt) ? "" : "none";
+      });
+    }
+
+    // Async: load video metadata to detect native aspect ratio
+    // Uses loadedmetadata (downloads only container headers, not full video)
+    function _detectRatios(avatars, cardMap, grid){
+      avatars.slice(0, 50).forEach(function(avatar){
+        var card = cardMap[avatar.avatar_id];
+        if(!card || !avatar.preview_video_url) return;
+        var vid  = document.createElement("video");
+        var done = false;
+        var timer = setTimeout(function(){
+          if(done) return; done = true;
+          vid.src = "";
+          // no update — stays 'all', filter unchanged
+        }, 5000);
+        vid.addEventListener("loadedmetadata", function(){
+          if(done) return; done = true;
+          clearTimeout(timer);
+          var w = vid.videoWidth, h = vid.videoHeight;
+          vid.src = "";
+          if(!w || !h) return;
+          var r = w / h;
+          card.dataset.ratio = r < 0.75 ? "vertical" : r > 1.4 ? "landscape" : "square";
+          _applyFmtFilter(grid);
+        });
+        vid.addEventListener("error", function(){
+          if(done) return; done = true;
+          clearTimeout(timer);
+          vid.src = "";
+        });
+        vid.preload = "metadata";
+        vid.src = avatar.preview_video_url;
+      });
+    }
+
     SB.auth.getSession().then(function(s){
       var token = s && s.data && s.data.session && s.data.session.access_token;
       if(!token){ opts.innerHTML = '<p class="cf-avatar-err">Please sign in to browse creators.</p>'; return null; }
@@ -642,9 +676,42 @@ function _cfRenderOptions(step){
       }
 
       opts.innerHTML = "";
-      opts.className = "cf-options cf-avatar-grid";
-
+      opts.className = "cf-options cf-avatar-grid-wrap";
       console.log("[UGC] Fetched", avatars.length, "avatars from HeyGen");
+
+      // ── Format tabs ────────────────────────────────────────────
+      var tabsEl = document.createElement("div");
+      tabsEl.className = "cf-fmt-tabs";
+
+      var FMT_TABS = [
+        { val: "vertical",  label: "Vertical",  ratio: "9:16" },
+        { val: "square",    label: "Square",    ratio: "1:1"  },
+        { val: "landscape", label: "Landscape", ratio: "16:9" },
+      ];
+      FMT_TABS.forEach(function(fmt){
+        var btn = document.createElement("button");
+        btn.type      = "button";
+        btn.className = "cf-fmt-tab" + (fmt.val === "vertical" ? " cf-fmt-tab-active" : "");
+        btn.dataset.fmt = fmt.val;
+        btn.innerHTML = '<span class="cf-fmt-ratio">' + fmt.ratio + '</span>'
+                      + '<span class="cf-fmt-label">' + fmt.label + '</span>';
+        btn.onclick = function(){
+          _cfActiveFmt = fmt.val;
+          tabsEl.querySelectorAll(".cf-fmt-tab").forEach(function(t){
+            t.classList.toggle("cf-fmt-tab-active", t.dataset.fmt === fmt.val);
+          });
+          _applyFmtFilter(grid);
+        };
+        tabsEl.appendChild(btn);
+      });
+      opts.appendChild(tabsEl);
+
+      // ── Avatar grid ────────────────────────────────────────────
+      var grid    = document.createElement("div");
+      grid.className = "cf-avatar-grid";
+      opts.appendChild(grid);
+
+      var cardMap = {};
 
       avatars.forEach(function(avatar){
         var gender    = (avatar.gender || "").toLowerCase();
@@ -657,8 +724,9 @@ function _cfRenderOptions(step){
         var videoUrl  = avatar.preview_video_url  || "";
 
         var card = document.createElement("button");
-        card.type      = "button";
-        card.className = "cf-avatar-card";
+        card.type         = "button";
+        card.className    = "cf-avatar-card";
+        card.dataset.ratio = "all";  // classified async; all tabs show it until detected
 
         var thumbHtml = thumb
           ? '<img src="' + _cfEsc(thumb) + '" class="cf-avatar-thumb" loading="lazy" />'
@@ -668,20 +736,16 @@ function _cfRenderOptions(step){
           + (videoUrl ? '<div class="cf-avatar-play-hint"></div>' : '')
           + '<span class="cf-avatar-name">' + _cfEsc(name) + '</span>';
 
-        // ── Video hover preview ─────────────────────────────────
+        // ── Video hover preview ───────────────────────────────
         if(videoUrl && thumb){
           card.addEventListener("mouseenter", function(){
-            var existing = card.querySelector("video.cf-avatar-thumb");
-            if(existing) return;
+            if(card.querySelector("video.cf-avatar-thumb")) return;
             var img = card.querySelector("img.cf-avatar-thumb");
             if(!img) return;
             var vid = document.createElement("video");
-            vid.src         = videoUrl;
-            vid.className   = "cf-avatar-thumb";
-            vid.autoplay    = true;
-            vid.muted       = true;
-            vid.loop        = true;
-            vid.playsInline = true;
+            vid.src = videoUrl; vid.className = "cf-avatar-thumb";
+            vid.autoplay = true; vid.muted = true;
+            vid.loop = true; vid.playsInline = true;
             card.replaceChild(vid, img);
             vid.play().catch(function(){});
           });
@@ -689,37 +753,37 @@ function _cfRenderOptions(step){
             var vid = card.querySelector("video.cf-avatar-thumb");
             if(!vid) return;
             var img = document.createElement("img");
-            img.src       = thumb;
-            img.className = "cf-avatar-thumb";
-            img.loading   = "lazy";
+            img.src = thumb; img.className = "cf-avatar-thumb"; img.loading = "lazy";
             card.replaceChild(img, vid);
           });
         }
 
         card.onclick = function(){
-          document.querySelectorAll(".cf-avatar-card").forEach(function(c){
-            c.classList.remove("cf-avatar-selected");
-            c.disabled = true;
+          grid.querySelectorAll(".cf-avatar-card").forEach(function(c){
+            c.classList.remove("cf-avatar-selected"); c.disabled = true;
           });
-          card.classList.add("cf-avatar-selected");
-          card.disabled = false;
+          card.classList.add("cf-avatar-selected"); card.disabled = false;
           _cfAnswers[capturedStep.key] = {
             val:     avatar.avatar_id,
             label:   name,
             voiceId: voiceId,
             gender:  gender,
+            format:  _cfActiveFmt,
           };
-          console.log("[UGC] Avatar selected:", avatar.avatar_id, "| voice:", voiceId, "| has video:", !!videoUrl);
+          console.log("[UGC] Avatar selected:", avatar.avatar_id,
+            "| format:", _cfActiveFmt, "| voice:", voiceId);
           setTimeout(function(){ _cfAdvance(capturedStep, name); }, 340);
         };
 
-        opts.appendChild(card);
+        cardMap[avatar.avatar_id] = card;
+        grid.appendChild(card);
       });
 
-      // ── "Create Your Creator" card — premium feature entry ────
+      // ── "Create Your Creator" stub ────────────────────────────
       var createCard = document.createElement("button");
-      createCard.type      = "button";
-      createCard.className = "cf-avatar-card cf-avatar-create";
+      createCard.type          = "button";
+      createCard.className     = "cf-avatar-card cf-avatar-create";
+      createCard.dataset.ratio = "all";
       createCard.innerHTML =
         '<div class="cf-avatar-thumb cf-avatar-create-thumb">'
         + '<svg viewBox="0 0 24 24" width="26" height="26" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><circle cx="12" cy="12" r="10"/><path d="M12 8v8M8 12h8"/></svg>'
@@ -728,7 +792,11 @@ function _cfRenderOptions(step){
       createCard.onclick = function(){
         if(typeof toast === "function") toast("Custom creator upload — coming soon", "info");
       };
-      opts.appendChild(createCard);
+      grid.appendChild(createCard);
+
+      // ── Async ratio detection — runs in background ────────────
+      // Detects video native aspect ratio, updates data-ratio, re-filters
+      _detectRatios(avatars, cardMap, grid);
 
     }).catch(function(err){
       opts.innerHTML = '<p class="cf-avatar-err">Could not load creators: ' + _cfEsc(err.message) + '</p>';
@@ -1060,7 +1128,7 @@ function _cfDispatchUGC(){
   var a = _cfAnswers;
 
   _ucScriptMode  = (a.ucScriptMode && a.ucScriptMode.val) || "ai";
-  _ucVideoFormat = (a.ucFormat     && a.ucFormat.val)     || "vertical";
+  _ucVideoFormat = (a.ucAvatar     && a.ucAvatar.format)   || "vertical";
   _ucAdFeeling   = (a.ucAdFeeling  && a.ucAdFeeling.val)  || "viral";
 
   // Avatar is now directly selected by the user from real HeyGen data

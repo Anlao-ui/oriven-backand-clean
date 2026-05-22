@@ -1740,6 +1740,7 @@ app.post('/api/generate-ugc', async (req, res) => {
 
   const formatDimensions = {
     vertical:  { width: 1080, height: 1920 },
+    square:    { width: 1080, height: 1080 },
     landscape: { width: 1920, height: 1080 },
   };
   const dimension = formatDimensions[format] || formatDimensions.vertical;
@@ -1905,6 +1906,7 @@ Script rules:
     // Landscape: normal wide framing, no scaling needed.
     const compositionProfiles = {
       vertical:  { avatar_style: 'closeUp', scale: 1.5, offset: { x: 0, y: 0.05 } },
+      square:    { avatar_style: 'closeUp', scale: 1.2, offset: { x: 0, y: 0    } },
       landscape: { avatar_style: 'normal',  scale: 1.0, offset: { x: 0, y: 0    } },
     };
     const composition = compositionProfiles[format] || compositionProfiles.vertical;
