@@ -1739,11 +1739,12 @@ app.post('/api/generate-ugc', async (req, res) => {
           background, customScript, format } = req.body || {};
 
   const formatDimensions = {
-    vertical:  { width: 720,  height: 1280 },
-    square:    { width: 1080, height: 1080 },
-    landscape: { width: 1280, height: 720  },
+    vertical:  { width: 1080, height: 1920 },
+    landscape: { width: 1920, height: 1080 },
   };
   const dimension = formatDimensions[format] || formatDimensions.vertical;
+  console.log('UGC FORMAT', format || 'vertical');
+  console.log('HEYGEN DIMENSIONS', dimension.width, 'x', dimension.height);
   if (!avatarId) return res.status(400).json({ error: 'Avatar ID is required' });
   if (!voiceId)  return res.status(400).json({ error: 'Voice ID is required' });
 
