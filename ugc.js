@@ -472,8 +472,14 @@ async function ucGenerateFromFlow(answers) {
   _ucSetStatus(_ucSpinRow(statusMsg));
 
   try {
-    var brandName = (typeof S !== 'undefined' && S && S.brandCore && S.brandCore.name) || '';
-    var brandDesc = (typeof S !== 'undefined' && S && S.brandCore && (S.brandCore.desc || S.brandCore.positioning)) || '';
+    var bc            = (typeof S !== 'undefined' && S && S.brandCore) || {};
+    var brandName     = bc.name     || '';
+    var brandDesc     = bc.desc     || bc.positioning || '';
+    var brandTone     = Array.isArray(bc.tone) ? bc.tone.join(', ') : (bc.tone || '');
+    var brandAudience = bc.audience || bc.aud || '';
+    var brandPromise  = bc.promise  || '';
+    var brandDiff     = bc.diff     || '';
+    var brandWords    = Array.isArray(bc.wordsUse) ? bc.wordsUse.join(', ') : '';
 
     var s = await SB.auth.getSession();
     var token = s.data && s.data.session && s.data.session.access_token;
@@ -496,6 +502,7 @@ async function ucGenerateFromFlow(answers) {
 
     console.log('[UGC] Sending → adFeeling:', adFeeling,
       '| adGoal:', adGoal,
+      '| brand:', brandName || '(none)',
       '| avatarId:', _ucSelectedCreator.avatarId,
       '| voiceId:', _ucSelectedCreator.voiceId,
       '| format:', _ucVideoFormat);
@@ -504,15 +511,20 @@ async function ucGenerateFromFlow(answers) {
       method:  'POST',
       headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + token },
       body:    JSON.stringify({
-        adFeeling:    adFeeling,
-        adGoal:       adGoal,
-        adContext:    adContext,
-        format:       _ucVideoFormat  || 'vertical',
-        customScript: customScript,
-        avatarId:     _ucSelectedCreator.avatarId,
-        voiceId:      _ucSelectedCreator.voiceId,
-        brandName:    brandName,
-        brandDesc:    brandDesc,
+        adFeeling:     adFeeling,
+        adGoal:        adGoal,
+        adContext:     adContext,
+        format:        _ucVideoFormat  || 'vertical',
+        customScript:  customScript,
+        avatarId:      _ucSelectedCreator.avatarId,
+        voiceId:       _ucSelectedCreator.voiceId,
+        brandName:     brandName,
+        brandDesc:     brandDesc,
+        brandTone:     brandTone,
+        brandAudience: brandAudience,
+        brandPromise:  brandPromise,
+        brandDiff:     brandDiff,
+        brandWords:    brandWords,
       })
     });
 

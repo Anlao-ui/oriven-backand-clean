@@ -1594,7 +1594,8 @@ const HEYGEN_FALLBACK_VOICES = [
 ];
 
 // ── GET /api/ugc-avatars ─────────────────────────────────────────
-// Tries v2 (user-created), then v1 (full stock library), then talking_photo.
+// Fetches both v2 (user-created studio) + v1 (full stock library),
+// merges and deduplicates, quality-sorts, returns all.
 // Falls back to HEYGEN_FALLBACK_AVATARS when no API key is configured.
 app.get('/api/ugc-avatars', async (req, res) => {
   const user = await getUserFromToken(req);
@@ -1602,64 +1603,69 @@ app.get('/api/ugc-avatars', async (req, res) => {
 
   const apiKey = process.env.HEYGEN_API_KEY;
   if (!apiKey) {
-    console.error('[UGC/Avatars] HEYGEN_API_KEY is not set — returning static fallback avatars');
+    console.error('[UGC/Avatars] HEYGEN_API_KEY not set — returning static fallback');
     return res.json({ avatars: HEYGEN_FALLBACK_AVATARS, fallback: true });
   }
 
   try {
-    // ── v2: user-created / studio avatars ───────────────────────
-    console.log('[UGC/Avatars] Fetching v2/avatars…');
-    const v2Res  = await fetch(`${HEYGEN_BASE}/v2/avatars`, { headers: { 'X-Api-Key': apiKey } });
-    const v2Body = await v2Res.text();
-    console.log('[UGC/Avatars] v2 HTTP', v2Res.status);
-    console.log('[UGC/Avatars] v2 body:', v2Body.slice(0, 600));
+    // Fetch v2 (user-created) and v1 (stock library) in parallel
+    const [v2Res, v1Res] = await Promise.all([
+      fetch(`${HEYGEN_BASE}/v2/avatars`,    { headers: { 'X-Api-Key': apiKey } }),
+      fetch(`${HEYGEN_BASE}/v1/avatar.list`, { headers: { 'X-Api-Key': apiKey } }),
+    ]);
 
-    let v2Data;
+    const [v2Body, v1Body] = await Promise.all([v2Res.text(), v1Res.text()]);
+    console.log('[UGC/Avatars] v2 HTTP', v2Res.status, '| v1 HTTP', v1Res.status);
+    console.log('[UGC/Avatars] v2 sample:', v2Body.slice(0, 400));
+    console.log('[UGC/Avatars] v1 sample:', v1Body.slice(0, 400));
+
+    let v2Data, v1Data;
     try { v2Data = JSON.parse(v2Body); } catch (_) { v2Data = null; }
+    try { v1Data = JSON.parse(v1Body); } catch (_) { v1Data = null; }
 
-    let avatars = _heygenExtract(v2Data, 'avatars');
-    console.log('[UGC/Avatars] v2 avatars found:', avatars.length);
+    // v2 returns user-created avatars; v1 returns the full stock library
+    const v2Avatars = _heygenExtract(v2Data, 'avatars');
+    let   v1Avatars = _heygenExtract(v1Data, 'avatars');
 
-    // ── v1 fallback: full public stock library ───────────────────
-    if (!avatars.length) {
-      console.log('[UGC/Avatars] v2 empty — trying v1/avatar.list…');
-      const v1Res  = await fetch(`${HEYGEN_BASE}/v1/avatar.list`, { headers: { 'X-Api-Key': apiKey } });
-      const v1Body = await v1Res.text();
-      console.log('[UGC/Avatars] v1 HTTP', v1Res.status);
-      console.log('[UGC/Avatars] v1 body:', v1Body.slice(0, 600));
-
-      let v1Data;
-      try { v1Data = JSON.parse(v1Body); } catch (_) { v1Data = null; }
-
-      avatars = _heygenExtract(v1Data, 'avatars');
-      console.log('[UGC/Avatars] v1 avatars found:', avatars.length);
-
-      // ── talking_photo fallback ───────────────────────────────
-      if (!avatars.length) {
-        const photos = _heygenExtract(v1Data, 'talking_photo');
-        console.log('[UGC/Avatars] v1 talking_photo found:', photos.length);
-        if (photos.length) {
-          avatars = photos.map(p => ({
-            avatar_id:   p.talking_photo_id || p.id,
-            avatar_name: p.talking_photo_name || p.name || 'Photo Avatar',
-            gender: '',
-          }));
-        }
+    // If v1 returned 0 avatars, try talking_photo (for photo-based accounts)
+    if (!v1Avatars.length) {
+      const photos = _heygenExtract(v1Data, 'talking_photo');
+      if (photos.length) {
+        v1Avatars = photos.map(p => ({
+          avatar_id:         p.talking_photo_id || p.id,
+          avatar_name:       p.talking_photo_name || p.name || 'Photo Creator',
+          gender:            '',
+          preview_image_url: p.preview_image_url || '',
+          preview_video_url: p.preview_video_url || '',
+        }));
       }
     }
 
-    // ── static fallback: last resort ────────────────────────────
-    if (!avatars.length) {
-      console.warn('[UGC/Avatars] All endpoints returned 0 avatars — using static fallback');
+    console.log('[UGC/Avatars] v2 count:', v2Avatars.length, '| v1 count:', v1Avatars.length);
+
+    // Merge: v2 (user's own) first, then v1 stock — deduplicate by avatar_id
+    const seen = new Set();
+    const merged = [...v2Avatars, ...v1Avatars].filter(a => {
+      if (!a.avatar_id || seen.has(a.avatar_id)) return false;
+      seen.add(a.avatar_id);
+      return true;
+    });
+
+    if (!merged.length) {
+      console.warn('[UGC/Avatars] No avatars found in either endpoint — using static fallback');
       return res.json({ avatars: HEYGEN_FALLBACK_AVATARS, fallback: true });
     }
 
-    console.log('[UGC/Avatars] Returning', Math.min(avatars.length, 40), 'avatars');
-    return res.json({ avatars: avatars.slice(0, 40) });
+    // Quality sort: avatars with both preview_video_url + preview_image_url first,
+    // then image-only, then plain. This surfaces cinematic/premium avatars to the top.
+    const score = a => (a.preview_video_url ? 2 : 0) + (a.preview_image_url ? 1 : 0);
+    merged.sort((a, b) => score(b) - score(a));
+
+    console.log('[UGC/Avatars] Returning', merged.length, 'avatars (quality-sorted)');
+    return res.json({ avatars: merged });
 
   } catch (err) {
     console.error('[UGC/Avatars] Fetch error:', err.message);
-    console.warn('[UGC/Avatars] Using static fallback due to error');
     return res.json({ avatars: HEYGEN_FALLBACK_AVATARS, fallback: true });
   }
 });
@@ -1728,7 +1734,9 @@ app.post('/api/generate-ugc', async (req, res) => {
   console.log("UGC ROUTE HIT");
   console.log("UGC BODY", JSON.stringify(req.body));
 
-  const { adFeeling, adGoal, adContext, avatarId, voiceId, avatarStyle, brandName, brandDesc, background, customScript, format } = req.body || {};
+  const { adFeeling, adGoal, adContext, avatarId, voiceId, avatarStyle,
+          brandName, brandDesc, brandTone, brandAudience, brandPromise, brandDiff, brandWords,
+          background, customScript, format } = req.body || {};
 
   const formatDimensions = {
     vertical:  { width: 720,  height: 1280 },
@@ -1844,13 +1852,25 @@ app.post('/api/generate-ugc', async (req, res) => {
         launch:    'GOAL: Announce a new launch. Create FOMO and excitement for something that just dropped. CTA should signal scarcity or newness: "just launched", "early access", "be first".',
       }[adGoal] || '';
 
-      const system = `You are an expert UGC ad scriptwriter and creative director for TikTok, Instagram Reels, and YouTube Shorts.
+      // Build brand context block for the system prompt
+      const brandLines = [
+        brandName     ? `Brand name: ${brandName}` : '',
+        brandDesc     ? `What it is: ${brandDesc}` : '',
+        brandTone     ? `Tone of voice: ${brandTone}` : '',
+        brandAudience ? `Target audience: ${brandAudience}` : '',
+        brandPromise  ? `Brand promise: ${brandPromise}` : '',
+        brandDiff     ? `What makes it unique: ${brandDiff}` : '',
+        brandWords    ? `Key vocabulary to use naturally: ${brandWords}` : '',
+      ].filter(Boolean);
 
+      const system = `You are an expert UGC ad scriptwriter and creative director for TikTok, Instagram Reels, and YouTube Shorts.
+${brandLines.length ? '\nBRAND CONTEXT — write as if you live inside this brand:\n' + brandLines.map(l => '- ' + l).join('\n') : ''}
 AD FEELING — apply this to every sentence (HIGHEST PRIORITY): ${feelingInstruction}
-${goalInstruction ? `\nAD GOAL — shape your hook angle and CTA around this: ${goalInstruction}` : ''}
+${goalInstruction ? '\nAD GOAL — shape your hook angle and CTA around this: ' + goalInstruction : ''}
 Script rules:
 - Open with a strong attention-grabbing hook that stops the scroll in the first 3 seconds
-- Speak in a genuine first-person voice as an authentic creator
+- Speak in a genuine first-person voice as an authentic creator living in this brand's world
+- Weave in the brand's vocabulary and tone naturally — not as a checklist, as character
 - End with a clear, natural call-to-action aligned with the goal above
 - First person only — no "you should" constructions at the start
 - No stage directions, brackets, parenthetical actions, or scene descriptions
@@ -1859,11 +1879,9 @@ Script rules:
 
       const userMsg = [
         'Write a UGC ad script.',
-        brandName   ? `Brand: ${brandName}` : '',
-        brandDesc   ? `About the brand: ${brandDesc}` : '',
-        adContext   ? `Additional context: ${adContext}` : '',
+        adContext ? `Additional context: ${adContext}` : '',
         `Ad feeling: ${adFeeling || 'viral'}`,
-        adGoal      ? `Ad goal: ${adGoal}` : '',
+        adGoal    ? `Ad goal: ${adGoal}` : '',
         '',
         'Output ONLY the spoken script.',
       ].filter(Boolean).join('\n');

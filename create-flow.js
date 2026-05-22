@@ -609,12 +609,12 @@ function _cfRenderOptions(step){
   var free = document.getElementById("cfFreeInput");
   if(!opts) return;
 
-  // ── Avatar picker — fetches real HeyGen thumbnails ────────
+  // ── Avatar picker — fetches real HeyGen thumbnails with video preview ──
   if(step.type === "avatar-picker"){
     if(free) free.style.display = "none";
     opts.className = "cf-options cf-avatar-grid-wrap";
     opts.innerHTML = '<div class="cf-avatar-loading">'
-      + '<div class="spin" style="width:16px;height:16px;border-width:2px;margin:0 auto 10px;display:block"></div>'
+      + '<div class="spin" style="width:18px;height:18px;border-width:2px;margin:0 auto 12px;display:block"></div>'
       + '<span>Loading creators…</span></div>';
     opts.style.opacity   = "1";
     opts.style.transform = "none";
@@ -637,7 +637,7 @@ function _cfRenderOptions(step){
       var defaultVoice = femaleVoice || maleVoice || voices[0] || {};
 
       if(!avatars.length){
-        opts.innerHTML = "<p class=\"cf-avatar-err\">No avatars found in your HeyGen account.</p>";
+        opts.innerHTML = "<p class=\"cf-avatar-err\">No creators found. Check your HeyGen API key.</p>";
         return;
       }
 
@@ -647,21 +647,54 @@ function _cfRenderOptions(step){
       console.log("[UGC] Fetched", avatars.length, "avatars from HeyGen");
 
       avatars.forEach(function(avatar){
-        var gender   = (avatar.gender || "").toLowerCase();
-        var voiceObj = gender === "female" ? (femaleVoice || defaultVoice)
-                     : gender === "male"   ? (maleVoice   || defaultVoice)
-                     : defaultVoice;
-        var voiceId  = voiceObj.voice_id || "";
-        var name     = avatar.avatar_name || avatar.avatar_id;
-        var thumb    = avatar.preview_image_url || "";
+        var gender    = (avatar.gender || "").toLowerCase();
+        var voiceObj  = gender === "female" ? (femaleVoice || defaultVoice)
+                      : gender === "male"   ? (maleVoice   || defaultVoice)
+                      : defaultVoice;
+        var voiceId   = voiceObj.voice_id || "";
+        var name      = avatar.avatar_name || avatar.avatar_id;
+        var thumb     = avatar.preview_image_url || "";
+        var videoUrl  = avatar.preview_video_url  || "";
 
         var card = document.createElement("button");
         card.type      = "button";
         card.className = "cf-avatar-card";
-        card.innerHTML = (thumb
+
+        var thumbHtml = thumb
           ? '<img src="' + _cfEsc(thumb) + '" class="cf-avatar-thumb" loading="lazy" />'
-          : '<div class="cf-avatar-thumb cf-avatar-nothumb"></div>')
+          : '<div class="cf-avatar-thumb cf-avatar-nothumb"><svg viewBox="0 0 24 24" width="28" height="28" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="12" cy="8" r="4"/><path d="M4 20c0-4 3.6-7 8-7s8 3 8 7"/></svg></div>';
+
+        card.innerHTML = thumbHtml
+          + (videoUrl ? '<div class="cf-avatar-play-hint"></div>' : '')
           + '<span class="cf-avatar-name">' + _cfEsc(name) + '</span>';
+
+        // ── Video hover preview ─────────────────────────────────
+        if(videoUrl && thumb){
+          card.addEventListener("mouseenter", function(){
+            var existing = card.querySelector("video.cf-avatar-thumb");
+            if(existing) return;
+            var img = card.querySelector("img.cf-avatar-thumb");
+            if(!img) return;
+            var vid = document.createElement("video");
+            vid.src         = videoUrl;
+            vid.className   = "cf-avatar-thumb";
+            vid.autoplay    = true;
+            vid.muted       = true;
+            vid.loop        = true;
+            vid.playsInline = true;
+            card.replaceChild(vid, img);
+            vid.play().catch(function(){});
+          });
+          card.addEventListener("mouseleave", function(){
+            var vid = card.querySelector("video.cf-avatar-thumb");
+            if(!vid) return;
+            var img = document.createElement("img");
+            img.src       = thumb;
+            img.className = "cf-avatar-thumb";
+            img.loading   = "lazy";
+            card.replaceChild(img, vid);
+          });
+        }
 
         card.onclick = function(){
           document.querySelectorAll(".cf-avatar-card").forEach(function(c){
@@ -676,12 +709,27 @@ function _cfRenderOptions(step){
             voiceId: voiceId,
             gender:  gender,
           };
-          console.log("[UGC] Avatar selected:", avatar.avatar_id, "| voice:", voiceId);
+          console.log("[UGC] Avatar selected:", avatar.avatar_id, "| voice:", voiceId, "| has video:", !!videoUrl);
           setTimeout(function(){ _cfAdvance(capturedStep, name); }, 340);
         };
 
         opts.appendChild(card);
       });
+
+      // ── "Create Your Creator" card — premium feature entry ────
+      var createCard = document.createElement("button");
+      createCard.type      = "button";
+      createCard.className = "cf-avatar-card cf-avatar-create";
+      createCard.innerHTML =
+        '<div class="cf-avatar-thumb cf-avatar-create-thumb">'
+        + '<svg viewBox="0 0 24 24" width="26" height="26" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><circle cx="12" cy="12" r="10"/><path d="M12 8v8M8 12h8"/></svg>'
+        + '</div>'
+        + '<span class="cf-avatar-name">Create Creator</span>';
+      createCard.onclick = function(){
+        if(typeof toast === "function") toast("Custom creator upload — coming soon", "info");
+      };
+      opts.appendChild(createCard);
+
     }).catch(function(err){
       opts.innerHTML = '<p class="cf-avatar-err">Could not load creators: ' + _cfEsc(err.message) + '</p>';
     });
