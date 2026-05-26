@@ -464,79 +464,290 @@ document.querySelectorAll(".mbk").forEach(function(b){
 // DASHBOARD
 // ═══════════════════════════════════════════════════════════════
 function refreshDash(){
-  var bc=S.brandCore;
+  var intel = _dashComputeIntel();
 
-  // ── Brand identity badge (hero row) ──────────────────────────
-  var badgeEl=document.getElementById("dashBrandBadge");
-  if(badgeEl){
-    if(bc){
-      // Color swatches (up to 4)
-      var swatchHTML="";
-      if(bc.colors&&bc.colors.length){
-        bc.colors.slice(0,4).forEach(function(c){
-          swatchHTML+='<span class="dash-badge-swatch" style="background:'+c.hex+'"></span>';
-        });
-      }
-      // Tone pill
-      var tone=(bc.tone&&bc.tone[0])||"";
-      var toneHTML=tone?'<span class="dash-badge-tone">'+tone+'</span>':"";
-      // Colors row
-      var colorsHTML=swatchHTML?'<span class="dash-badge-colors">'+swatchHTML+'</span>':"";
-      badgeEl.innerHTML=
-        '<span class="dash-badge-name"><span class="dash-badge-dot"></span>'+bc.name+'</span>'+
-        toneHTML+colorsHTML;
+  // ── Ring ─────────────────────────────────────────────────────
+  var arc = document.getElementById("dashRingArc");
+  if(arc){
+    var circ = 263.9;
+    arc.style.strokeDashoffset = circ * (1 - intel.pct / 100);
+  }
+  var pctEl = document.getElementById("dashRingPct");
+  if(pctEl) pctEl.textContent = intel.pct + "%";
+
+  // ── Eyebrow dot ───────────────────────────────────────────────
+  var dot = document.getElementById("dashEyebrowDot");
+  if(dot) dot.className = "dash-eyebrow-dot" + (S.brandCore ? " active" : "");
+
+  // ── Status message ────────────────────────────────────────────
+  var msgEl = document.getElementById("dashStatusMsg");
+  if(msgEl) msgEl.textContent = intel.msg;
+
+  // ── Brand active pill ─────────────────────────────────────────
+  var pill = document.getElementById("dashBrandPill");
+  var pillName = document.getElementById("dashBrandPillName");
+  if(pill && pillName){
+    if(S.brandCore){
+      pillName.textContent = S.brandCore.name || "";
+      pill.style.display = "";
     } else {
-      badgeEl.innerHTML='<button class="dash-badge-setup" onclick="navigate(\'studio\');setTimeout(function(){switchStudioTab(\'brandcore\')},100)">'+t("setUpBrandCore")+'</button>';
+      pill.style.display = "none";
     }
   }
 
-  // ── Brand snapshot card (below actions) ──────────────────────
-  var snapEl=document.getElementById("dashSnapshot");
-  if(snapEl){
-    if(bc){
-      // Swatches — up to 5 colors
-      var snapSwatches="";
-      if(bc.colors&&bc.colors.length){
-        bc.colors.slice(0,5).forEach(function(c){
-          snapSwatches+='<span class="dash-snap-swatch" style="background:'+c.hex+'" title="'+c.hex+'"></span>';
-        });
-      }
-      // Meta: tone + industry (short)
-      var snapMeta=[];
-      if(bc.tone&&bc.tone[0]) snapMeta.push(bc.tone[0]);
-      if(bc.industry) snapMeta.push(bc.industry);
-      snapEl.innerHTML=
-        '<div class="dash-snapshot">'+
-          '<div class="dash-snap-ico">'+
-            '<svg viewBox="0 0 20 20" fill="none" stroke="#fff" stroke-width="1.4">'+
-              '<path d="M10 2l2.2 5.5H18l-4.5 3.3 1.7 5.5L10 13.3l-5.2 3 1.7-5.5L2 7.5h5.8Z"/>'+
-            '</svg>'+
-          '</div>'+
-          '<div class="dash-snap-body">'+
-            '<div class="dash-snap-label">'+t("brandCore")+'</div>'+
-            '<div class="dash-snap-name">'+bc.name+'</div>'+
-            (snapMeta.length?'<div class="dash-snap-meta">'+snapMeta.join(' · ')+'</div>':'')+
-            (snapSwatches?'<div class="dash-snap-colors">'+snapSwatches+'</div>':'')+
-          '</div>'+
-          '<button class="dash-snap-edit" onclick="navigate(\'studio\');setTimeout(function(){switchStudioTab(\'brandcore\')},100)">'+t("edit")+'</button>'+
-        '</div>';
-    } else {
-      snapEl.innerHTML=
-        '<div class="dash-snapshot">'+
-          '<div class="dash-snap-ico">'+
-            '<svg viewBox="0 0 20 20" fill="none" stroke="rgba(255,255,255,.5)" stroke-width="1.4">'+
-              '<path d="M10 2l2.2 5.5H18l-4.5 3.3 1.7 5.5L10 13.3l-5.2 3 1.7-5.5L2 7.5h5.8Z"/>'+
-            '</svg>'+
-          '</div>'+
-          '<div class="dash-snap-body">'+
-            '<div class="dash-snap-label">'+t("brandCore")+'</div>'+
-            '<div class="dash-snap-name" style="color:var(--muted);font-weight:500">'+t("notConfigured")+'</div>'+
-            '<div class="dash-snap-empty-txt">'+t("buildBrandIdentity")+'</div>'+
-          '</div>'+
-          '<button class="dash-snap-setup" onclick="navigate(\'studio\');setTimeout(function(){switchStudioTab(\'brandcore\')},100)">'+t("setUp")+'</button>'+
-        '</div>';
-    }
+  // ── Meters ────────────────────────────────────────────────────
+  var cFill = document.getElementById("dashConfidenceFill");
+  var cVal  = document.getElementById("dashConfidenceVal");
+  if(cFill) cFill.style.width = intel.confidencePct + "%";
+  if(cVal)  cVal.textContent  = intel.confidence;
+
+  var mFill = document.getElementById("dashMemoryFill");
+  var mVal  = document.getElementById("dashMemoryVal");
+  if(mFill) mFill.style.width = intel.memoryPct + "%";
+  if(mVal)  mVal.textContent  = intel.memory;
+
+  // ── Sections ──────────────────────────────────────────────────
+  _dashRenderCreateGrid();
+  _dashRenderActivity();
+  _dashRenderEvolution(intel);
+  _dashRenderStats(intel);
+}
+
+function _dashComputeIntel(){
+  var bc = S.brandCore;
+  if(!bc) return {
+    pct:0, confidence:"Inactive", confidencePct:0,
+    memory:"Empty", memoryPct:0,
+    rank:"Brand Seed", rankIdx:0,
+    msg:"Configure your Brand Core to activate ORIVEN Intelligence."
+  };
+
+  var score = 0;
+  if(bc.name)                                              score += 15;
+  if(bc.colors && bc.colors.length >= 2)                   score += 12;
+  if(bc.fonts  && bc.fonts.length)                         score +=  8;
+  if(bc.tone   && bc.tone.length)                          score += 10;
+  if(bc.promise)                                           score += 10;
+  if(bc.audience || bc.aud)                                score += 10;
+  if(bc.diff)                                              score +=  8;
+  if(bc.logos && (bc.logos.primary || bc.logos.secondary || bc.logos.icon)) score += 10;
+  if(bc.wordsUse && bc.wordsUse.length)                    score +=  5;
+
+  var assetCount = (S.assets || []).length;
+  if(assetCount >= 1)  score += 4;
+  if(assetCount >= 5)  score += 4;
+  if(assetCount >= 10) score += 4;
+  if((S.campaigns || []).length >= 1) score += 5;
+
+  score = Math.min(score, 100);
+
+  var rank, rankIdx, confidence, confidencePct, memory, memoryPct, msg;
+
+  if(score < 15){
+    rank="Brand Seed"; rankIdx=0;
+    confidence="Inactive"; confidencePct=0;
+    memory="Empty"; memoryPct=0;
+    msg="Your AI is ready. Complete your Brand Core to begin intelligence.";
+  } else if(score < 36){
+    rank="Brand Identity"; rankIdx=1;
+    confidence="Building"; confidencePct=28;
+    memory="Loading"; memoryPct=22;
+    msg="Brand identity detected. Your AI is beginning to learn your voice.";
+  } else if(score < 61){
+    rank="Brand Intelligence"; rankIdx=2;
+    confidence="Moderate"; confidencePct=55;
+    memory="Active"; memoryPct=52;
+    msg="Brand memory is active. ORIVEN is understanding your creative direction.";
+  } else if(score < 82){
+    rank="Brand Consciousness"; rankIdx=3;
+    confidence="High"; confidencePct=80;
+    memory="Deep"; memoryPct=78;
+    msg="ORIVEN deeply understands your brand. Creative confidence is high.";
+  } else {
+    rank="Brand Mastery"; rankIdx=4;
+    confidence="Peak"; confidencePct=100;
+    memory="Complete"; memoryPct=100;
+    msg="Peak intelligence reached. Your brand is operating at full power.";
   }
+
+  return { pct:score, rank, rankIdx, confidence, confidencePct, memory, memoryPct, msg };
+}
+
+function _dashRenderCreateGrid(){
+  var el = document.getElementById("dashCreateGrid");
+  if(!el) return;
+
+  var items = [
+    {
+      label:"UGC Creator",
+      desc:"AI video ads",
+      icon:'<rect x="2" y="4" width="11" height="10" rx="2"/><path d="M13 8l5-2.5v7L13 10"/>',
+      action:"openAIFlow('ugc')"
+    },
+    {
+      label:"Visuals",
+      desc:"On-brand images",
+      icon:'<rect x="1" y="2" width="14" height="13" rx="2"/><path d="M1 11l4-4 3.5 3.5 2.5-2.5L15 12"/>',
+      action:"openAIFlow('image')"
+    },
+    {
+      label:"Text & Copy",
+      desc:"Headlines, captions",
+      icon:'<path d="M2 5h13M2 9h9M2 13h11"/>',
+      action:"openAIFlow('text')"
+    },
+    {
+      label:"Campaign",
+      desc:"Multi-channel builds",
+      icon:'<path d="M2 13l3-7 3.5 5.5 2.5-3.5 4 5"/><circle cx="5" cy="6" r="1.2" fill="#B7FF2A" stroke="none"/>',
+      action:"openAIFlow('campaign')"
+    },
+    {
+      label:"Web",
+      desc:"Pages & assets",
+      icon:'<rect x="1" y="2.5" width="15" height="12" rx="2"/><path d="M1 6.5h15"/><path d="M6.5 17h4M8.5 14.5v2.5"/>',
+      action:"openAIFlow('web')"
+    },
+    {
+      label:"Brand AI",
+      desc:"AI guidance",
+      icon:'<path d="M8.5 1.5l2 5.5H16l-4.3 3.2 1.6 5L8.5 12.5l-4.8 2.7 1.6-5L1 7H6.5Z"/>',
+      action:"openFAB()"
+    }
+  ];
+
+  var html = "";
+  items.forEach(function(item){
+    html += '<button class="dash-cblk" onclick="' + item.action + '">'
+      + '<div class="dash-cblk-ico"><svg viewBox="0 0 17 17" fill="none" stroke="currentColor">'
+      + item.icon + '</svg></div>'
+      + '<div class="dash-cblk-label">' + item.label + '</div>'
+      + '<div class="dash-cblk-desc">' + item.desc + '</div>'
+      + '</button>';
+  });
+
+  el.innerHTML = html;
+}
+
+function _dashRenderActivity(){
+  var el = document.getElementById("dashActivity");
+  if(!el) return;
+
+  var items = [];
+
+  if(S.assets && S.assets.length){
+    S.assets.slice(-5).reverse().forEach(function(a){
+      items.push({
+        label: a.name || "Generated Asset",
+        time:  a.createdAt || "Recently",
+        type:  "asset"
+      });
+    });
+  }
+
+  if(S.brandCore && !items.length){
+    items.push({
+      label: "Brand Core configured",
+      time:  "Active",
+      type:  "brand"
+    });
+  }
+
+  if(!items.length){
+    el.innerHTML =
+      '<div class="dash-act-empty">'
+      + '<div class="dash-act-empty-ttl">No activity yet</div>'
+      + '<div class="dash-act-empty-sub">Generate content to see your AI activity here.</div>'
+      + '</div>';
+    return;
+  }
+
+  var assetIco = '<rect x="3" y="1" width="8" height="11" rx="1.5"/><rect x="1" y="3" width="8" height="11" rx="1.5"/>';
+  var brandIco = '<path d="M8 1l1.8 4.8H14l-3.9 2.8 1.5 4.7L8 11l-4.6 2.8 1.5-4.7L1 6.8H5.2Z"/>';
+
+  var html = '<div class="dash-act-list">';
+  items.slice(0, 5).forEach(function(item){
+    var ico = item.type === "brand" ? brandIco : assetIco;
+    html +=
+      '<div class="dash-act-item">'
+      + '<div class="dash-act-ico"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor">'
+      + ico + '</svg></div>'
+      + '<div class="dash-act-body">'
+      + '<div class="dash-act-label">' + item.label + '</div>'
+      + '<div class="dash-act-time">'  + item.time  + '</div>'
+      + '</div></div>';
+  });
+  html += '</div>';
+  el.innerHTML = html;
+}
+
+function _dashRenderEvolution(intel){
+  var el = document.getElementById("dashEvolution");
+  if(!el) return;
+
+  var ranks = [
+    {name:"Brand Seed",          desc:"Configure your brand to begin."},
+    {name:"Brand Identity",      desc:"Your brand identity is forming."},
+    {name:"Brand Intelligence",  desc:"ORIVEN is learning your brand."},
+    {name:"Brand Consciousness", desc:"Deep brand understanding achieved."},
+    {name:"Brand Mastery",       desc:"Peak AI brand mastery reached."}
+  ];
+
+  var current = ranks[intel.rankIdx];
+
+  var html =
+    '<div class="dash-rank-badge">'
+    + '<span class="dash-rank-dot"></span>'
+    + '<span class="dash-rank-name">' + intel.rank + '</span>'
+    + '</div>'
+    + '<div class="dash-rank-desc">' + current.desc + '</div>'
+    + '<div class="dash-rank-track">';
+
+  ranks.forEach(function(r, i){
+    var cls = i < intel.rankIdx ? "dash-rnode done"
+            : i === intel.rankIdx ? "dash-rnode current"
+            : "dash-rnode";
+    html += '<div class="' + cls + '">'
+      + '<div class="dash-rnode-dot"></div>'
+      + '<div class="dash-rnode-lbl">' + r.name + '</div>'
+      + '</div>';
+  });
+
+  html += '</div>'
+    + '<div class="dash-intel-bar-head">'
+    + '<span class="dash-intel-bar-lbl">ORIVEN Intelligence</span>'
+    + '<span class="dash-intel-bar-val">' + intel.pct + '%</span>'
+    + '</div>'
+    + '<div class="dash-intel-bar-track">'
+    + '<div class="dash-intel-bar-fill" style="width:' + intel.pct + '%"></div>'
+    + '</div>';
+
+  el.innerHTML = html;
+}
+
+function _dashRenderStats(intel){
+  var el = document.getElementById("dashStatsRow");
+  if(!el) return;
+
+  var assetCount = (S.assets || []).length;
+  var campCount  = (S.campaigns || []).length;
+
+  var stats = [
+    { val: assetCount,    label: "Assets Generated" },
+    { val: campCount,     label: "Campaigns Built"  },
+    { val: intel.rank,    label: "Brand Rank"       },
+    { val: intel.pct + "%", label: "AI Intelligence" }
+  ];
+
+  var html = "";
+  stats.forEach(function(s){
+    html +=
+      '<div class="dash-stat-card">'
+      + '<div class="dash-stat-val">' + s.val   + '</div>'
+      + '<div class="dash-stat-lbl">' + s.label + '</div>'
+      + '</div>';
+  });
+  el.innerHTML = html;
 }
 
 // ═══════════════════════════════════════════════════════════════
