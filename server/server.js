@@ -229,6 +229,7 @@ app.post('/api/stripe-webhook', express.raw({ type: 'application/json' }), async
   }
 
   // 6. Guard: plan must be a known value
+  console.log("[Checkout Debug] Using creator/professional plan mapping");
   const validPlans = ['starter', 'creator', 'professional'];
   if (!validPlans.includes(plan)) {
     console.error(`[Webhook] ❌ Unknown plan "${plan}" — expected one of: ${validPlans.join(', ')}`);
