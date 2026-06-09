@@ -19,6 +19,10 @@ const PORT = parseInt(process.env.PORT || '5500', 10);
 // the process always starts. Routes call _requireEnv() and get a clean 503
 // if a key is absent rather than a confusing auth error from the SDK.
 const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY || 'missing' });
+console.log(
+  "[Config] Stripe key suffix:",
+  process.env.STRIPE_SECRET_KEY?.slice(-4)
+);
 const stripe    = new Stripe(process.env.STRIPE_SECRET_KEY            || 'missing');
 
 // OpenAI is initialized LAZILY — only on first use — so a missing key or
