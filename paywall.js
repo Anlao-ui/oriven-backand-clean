@@ -9,7 +9,6 @@ function openPaywall(){
 
 function _renderPaywallCards(){
   // Always read the freshest plan — S.currentPlan is set by syncSubscriptionFromDB
-  // Fall back to localStorage settings, then default to "free"
   var plan = "free";
   try {
     if(typeof S !== "undefined" && S && S.currentPlan) plan = S.currentPlan;
@@ -19,24 +18,18 @@ function _renderPaywallCards(){
     }
   } catch(_){}
 
-  var cfg = {
-    starter:  { text: "Get Starter · €19/mo",     cls: "btn btn-g pw-plan-btn" },
-    premium:  { text: "Upgrade to Premium",        cls: "btn btn-p pw-plan-btn" },
-    business: { text: "Upgrade to Business",       cls: "btn btn-g pw-plan-btn" }
-  };
-  ["starter","premium","business"].forEach(function(p){
-    var btn = document.getElementById("paywall-btn-" + p);
+  // Render all cards fresh from the central plan config
+  var grid = document.getElementById("pwPlanGrid");
+  if(grid && typeof renderPWPricingCards === "function") renderPWPricingCards(grid);
+
+  // Mark the user's current plan button as inactive
+  ORIVEN_PAID_PLANS.forEach(function(p){
+    if(plan !== p.id) return;
+    var btn = document.getElementById("paywall-btn-" + p.id);
     if(!btn) return;
-    var isCurrent = (plan === p);
-    if(isCurrent){
-      btn.textContent = "Current Plan";
-      btn.disabled    = true;
-      btn.className   = "btn pw-plan-btn";
-    } else {
-      btn.textContent = cfg[p].text;
-      btn.disabled    = false;
-      btn.className   = cfg[p].cls;
-    }
+    btn.textContent = "Current Plan";
+    btn.disabled    = true;
+    btn.className   = "pw-btn";
   });
 }
 

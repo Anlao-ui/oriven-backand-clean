@@ -16,6 +16,71 @@ var S={
 // ═══════════════════════════════════════════════════════════════
 
 var ID_PANELS = {
+  campaign: {
+    title: "Campaign",
+    color: "#A78BFA",
+    dest:  "campaign",
+    ideas: [
+      { label:"Luxury Launch",        desc:"Build anticipation around a premium product reveal. Teaser → reveal → educate → convert. Cinematic pacing, restrained aesthetic.", useLabel:"Build campaign", bg:"linear-gradient(140deg,#12053A,#0A0A0A)", accent:"#A78BFA", lbl:"LAUNCH",    hl:"Something arrives." },
+      { label:"Cinematic Product Drop",desc:"One hero visual. One product. No noise. Maximum impact, zero distraction. Designed to stop the scroll and command attention.",            useLabel:"Build campaign", bg:"linear-gradient(140deg,#1A1208,#0A0A0A)", accent:"#F59E0B", lbl:"DROP",      hl:"Define the moment." },
+      { label:"Minimal Brand Relaunch",desc:"Strip everything back. Reintroduce the brand with clarity, confidence, and a single strong visual statement.",                          useLabel:"Build campaign", bg:"linear-gradient(140deg,#0F0F0F,#1A1A1A)", accent:"#B7FF2A", lbl:"RELAUNCH",  hl:"Begin again." },
+      { label:"Emotional Storytelling",desc:"Move people before you sell to them. A five-act emotional arc designed to build deep brand connection through content.",               useLabel:"Build campaign", bg:"linear-gradient(140deg,#200A0A,#0A0A0A)", accent:"#F87171", lbl:"STORY",     hl:"Feel first. Then decide." },
+      { label:"Seasonal Reveal",       desc:"Anchor momentum to a cultural moment. Tease before the season, drop hard on the day, and close with urgency.",                        useLabel:"Build campaign", bg:"linear-gradient(140deg,#0A1828,#06091A)", accent:"#60A5FA", lbl:"SEASONAL",  hl:"The moment is now." },
+      { label:"Founder Manifesto",     desc:"The brand told by the person behind it. Raw, direct, personal. Creates trust and conviction that polished ads never can.",             useLabel:"Build campaign", bg:"linear-gradient(140deg,#1A1408,#0A0A0A)", accent:"#FBBF24", lbl:"FOUNDER",   hl:"This is why I built this." },
+      { label:"Social Proof Sprint",   desc:"Let customers lead. Real results, real faces, real words. A campaign built entirely on credibility and authentic voice.",             useLabel:"Build campaign", bg:"linear-gradient(140deg,#081A12,#0A0A0A)", accent:"#34D399", lbl:"PROOF",     hl:"They said it. Not us." },
+      { label:"Community-Led Drop",    desc:"Build hype through your community before you launch. User-generated content, shared tags, and collaborative anticipation.",           useLabel:"Build campaign", bg:"linear-gradient(140deg,#160833,#0A0A0A)", accent:"#C084FC", lbl:"COMMUNITY", hl:"Built together." },
+      { label:"Conversion Funnel",     desc:"Full-funnel campaign from awareness to action. Every touchpoint reduces friction and moves toward one clear outcome.",                useLabel:"Build campaign", bg:"linear-gradient(140deg,#070A1C,#121426)", accent:"#818CF8", lbl:"FUNNEL",    hl:"Every step counts." }
+    ]
+  },
+  visual: {
+    title: "Visual",
+    color: "#3B82F6",
+    dest:  "image",
+    ideas: [
+      { label:"Dark Luxury",           desc:"Near-black surfaces, refined gold or silver accents, editorial silence. Communicates premium without effort or noise.",               useLabel:"Use this style", bg:"linear-gradient(140deg,#100C04,#0A0A0A)", accent:"#C9AA71", lbl:"LUXURY",   hl:"Silence speaks." },
+      { label:"Futuristic Fashion",    desc:"Cool metallics, geometric cuts, cyber-adjacent styling. Feels ahead of its time. Commands attention without noise.",                  useLabel:"Use this style", bg:"linear-gradient(140deg,#040E20,#08101E)", accent:"#22D3EE", lbl:"FUTURE",   hl:"Wear the signal." },
+      { label:"Cinematic Sports",      desc:"Dynamic angles, motion intensity, raw energy visible in a static frame. Designed to feel like movement even when still.",             useLabel:"Use this style", bg:"linear-gradient(140deg,#1A0404,#0A0A0A)", accent:"#EF4444", lbl:"SPORT",    hl:"Pure velocity." },
+      { label:"Minimalist Product",    desc:"One object. Perfect light. Nothing else. The product as the sole hero. Restraint as the loudest design statement.",                   useLabel:"Use this style", bg:"linear-gradient(140deg,#181818,#0A0A0A)", accent:"#D1D5DB", lbl:"PRODUCT",  hl:"Nothing more needed." },
+      { label:"Editorial Warmth",      desc:"Warm tones, authentic textures, genuine moments captured with intention. Real over polished. Connection over perfection.",            useLabel:"Use this style", bg:"linear-gradient(140deg,#241408,#1A100A)", accent:"#F59E0B", lbl:"EDITORIAL",hl:"Made with feeling." },
+      { label:"Organic Botanical",     desc:"Earthy palette, natural textures, hand-finished details. Grounded and honest. Anti-corporate by design and by conviction.",          useLabel:"Use this style", bg:"linear-gradient(140deg,#081408,#0A1208)", accent:"#86EFAC", lbl:"ORGANIC",  hl:"Rooted in nature." },
+      { label:"Geometric Abstraction", desc:"Bold shapes, mathematical precision, confident composition. Strong visual impact with zero photography required.",                    useLabel:"Use this style", bg:"linear-gradient(140deg,#08081C,#0F0F14)", accent:"#B7FF2A", lbl:"ABSTRACT", hl:"Shape your world." },
+      { label:"Neon City",             desc:"Dark urban environments with neon glow and street energy. Bold, alive, and culturally aware. Energy as a visual element.",           useLabel:"Use this style", bg:"linear-gradient(140deg,#12021C,#1A021C)", accent:"#E879F9", lbl:"URBAN",    hl:"The city breathes." },
+      { label:"Pastel Premium",        desc:"Soft, elevated palette with refined typography. Quiet confidence and sophisticated warmth. Deceptively powerful in its subtlety.",    useLabel:"Use this style", bg:"linear-gradient(140deg,#181620,#141218)", accent:"#D8B4FE", lbl:"PASTEL",   hl:"Softly bold." }
+    ]
+  },
+  web: {
+    title: "Web",
+    color: "#22D3EE",
+    dest:  "image",
+    ideas: [
+      { label:"Cinematic Homepage",     desc:"Full-viewport hero, one commanding visual, minimal navigation. Immersive from the first second. Nothing competes for attention.",   useLabel:"Design this", bg:"linear-gradient(140deg,#100C1A,#0A0A14)", accent:"#A78BFA", lbl:"HOMEPAGE",  hl:"Enter the brand." },
+      { label:"Premium Startup Landing",desc:"Clean hierarchy, confident headline, social proof signals, and one conversion CTA. Everything optimized to earn the click.",        useLabel:"Design this", bg:"linear-gradient(140deg,#060E20,#040A18)", accent:"#3B82F6", lbl:"STARTUP",   hl:"Build what matters." },
+      { label:"Futuristic AI Interface",desc:"Dark surfaces, glowing data accents, technical precision layout. Designed to make intelligence feel tangible and visible.",          useLabel:"Design this", bg:"linear-gradient(140deg,#040E1C,#060A18)", accent:"#22D3EE", lbl:"INTERFACE", hl:"Intelligence, visible." },
+      { label:"Luxury E-Commerce",      desc:"Product-first grid, editorial photography, refined typography, seamless checkout. Shopping elevated into an experience.",            useLabel:"Design this", bg:"linear-gradient(140deg,#120E06,#0A0A0A)", accent:"#C9AA71", lbl:"E-COM",     hl:"Want it. Own it." },
+      { label:"Minimal Portfolio",      desc:"White space as the design. Work front and center. No distractions, no decoration. The work speaks entirely for itself.",            useLabel:"Design this", bg:"linear-gradient(140deg,#141414,#1A1A1A)", accent:"#D1D5DB", lbl:"PORTFOLIO", hl:"The work speaks." },
+      { label:"Bold SaaS Hero",         desc:"High-contrast headline, product preview, strong value proposition, and instant sign-up CTA. Every pixel designed to convert.",      useLabel:"Design this", bg:"linear-gradient(140deg,#081A08,#0A0A0A)", accent:"#B7FF2A", lbl:"SAAS",      hl:"Ship. Ship again." },
+      { label:"Editorial Magazine",     desc:"Long-form layout, cinematic imagery, intelligent type hierarchy. A content experience that rewards deep, unhurried attention.",      useLabel:"Design this", bg:"linear-gradient(140deg,#1A1206,#0A0A0A)", accent:"#F59E0B", lbl:"MAGAZINE",  hl:"Read every word." },
+      { label:"Clean Mobile-First",     desc:"Optimized for thumb navigation, large touch targets, progressive disclosure, and fast loading on any connection or device.",        useLabel:"Design this", bg:"linear-gradient(140deg,#080818,#10101E)", accent:"#818CF8", lbl:"MOBILE",    hl:"Fits in your hand." },
+      { label:"Immersive Scroll",       desc:"Each section is a full-screen moment. Scroll-triggered reveals create a cinematic, memorable journey through the brand's world.",   useLabel:"Design this", bg:"linear-gradient(140deg,#100518,#14040C)", accent:"#F472B6", lbl:"SCROLL",    hl:"Every scroll reveals." }
+    ]
+  },
+  text: {
+    title: "Text",
+    color: "#B7FF2A",
+    dest:  "text",
+    ideas: [
+      { label:"Emotional Launch Copy",   desc:"Open with a feeling, not a feature. Create desire before describing the product. The emotion earns the attention, then the sale.", useLabel:"Write this", bg:"linear-gradient(140deg,#1C0A1C,#0A0A0A)", accent:"#E879F9", lbl:"EMOTION",   hl:"Feel it first." },
+      { label:"Bold Luxury Slogans",     desc:"Three words or fewer. Confident, unapologetic, unforgettable. Makes the reader feel something before they even begin to think.",   useLabel:"Write this", bg:"linear-gradient(140deg,#1A1206,#0A0A0A)", accent:"#F59E0B", lbl:"SLOGAN",    hl:"Less. But better." },
+      { label:"Cinematic Story Hook",    desc:"Start in the middle of something that matters. Drop the reader into a scene. Pull them through. Hold them to the final word.",     useLabel:"Write this", bg:"linear-gradient(140deg,#080818,#0F0F18)", accent:"#818CF8", lbl:"STORY",     hl:"It starts with one thing." },
+      { label:"Premium Positioning",     desc:"Language that frames your brand above the competition without ever naming them. Confidence without aggression. Category of one.",   useLabel:"Write this", bg:"linear-gradient(140deg,#120E04,#0A0A0A)", accent:"#C9AA71", lbl:"POSITION",  hl:"In a class of one." },
+      { label:"Founder Voice Manifesto", desc:"Direct, personal, conviction-driven. This is why we exist. What we stand for. What we will never compromise — under any pressure.", useLabel:"Write this", bg:"linear-gradient(140deg,#081806,#0A0A0A)", accent:"#34D399", lbl:"MANIFESTO", hl:"We built this because." },
+      { label:"Aspirational Tagline",    desc:"The brand promise compressed to a single line. Should be true, memorable, and emotionally resonant for years — not just the launch.", useLabel:"Write this", bg:"linear-gradient(140deg,#06101C,#080C18)", accent:"#60A5FA", lbl:"TAGLINE",   hl:"One line. Everything." },
+      { label:"Conversion-First Copy",   desc:"Every word earns its place. No fluff, no decoration. Designed to reduce friction and drive one specific action without compromise.", useLabel:"Write this", bg:"linear-gradient(140deg,#081606,#0A0A0A)", accent:"#B7FF2A", lbl:"CONVERT",   hl:"One action. Now." },
+      { label:"Community Tone",          desc:"Warm, inclusive, conversational. Makes the reader feel they already belong before they've committed to a single thing.",            useLabel:"Write this", bg:"linear-gradient(140deg,#1C0810,#0A0A0A)", accent:"#F472B6", lbl:"COMMUNITY", hl:"You belong here." },
+      { label:"Authority Statements",    desc:"Confident, direct declarations of expertise. Earns trust without asking for it. Leadership through language, not credentials.",    useLabel:"Write this", bg:"linear-gradient(140deg,#041818,#0A0A0A)", accent:"#22D3EE", lbl:"AUTHORITY", hl:"We know this field." }
+    ]
+  },
+  /* ── LEGACY PANELS — kept for idShowPanel() back-compat ── */
   content: {
     title: "Content Ideas",
     ideas: [
@@ -284,10 +349,12 @@ function renderInspiration(){
 
 // Maps each Ideas category to its builder flow type
 var ID_DEST = {
-  content:  'text',
-  angles:   'ads',
+  campaign: 'campaign',
   visual:   'image',
-  campaign: 'campaign'
+  web:      'image',
+  text:     'text',
+  content:  'text',
+  angles:   'ads'
 };
 
 function idShowPanel(cat){
@@ -377,6 +444,11 @@ function idShowHub(){
 // NAVIGATION
 // ═══════════════════════════════════════════════════════════════
 function navigate(page){
+  // "assistant" → open Brand Assistant workspace
+  if(page==="assistant"){
+    if(typeof openFAB==="function") openFAB();
+    return;
+  }
   // Plan gate: free users cannot access Inspiration or Brand Assistant
   if(page==="inspiration" || page==="aichat"){
     var _gatePlan = (typeof S!=="undefined" && S && S.currentPlan) ? S.currentPlan : "free";
@@ -388,18 +460,20 @@ function navigate(page){
   }
   document.querySelectorAll(".ni").forEach(function(e){e.classList.remove("active");});
   document.querySelectorAll(".page").forEach(function(e){e.classList.remove("active");});
-  // highlight sidebar item — workspace shares "create" highlight
-  var niPage=page==="create-workspace"?"create":page==="templates"?"inspiration":page;
+  // highlight sidebar item — workspace shares "create" or "assistant" highlight depending on mode
+  var niPage=page==="create-workspace"?(S._cwsType==="assistant"?"assistant":"create"):page==="templates"?"inspiration":page;
   var ni=document.querySelector('[data-page="'+niPage+'"]');
   if(ni) ni.classList.add("active");
   var pg=document.getElementById("page-"+page);
   if(pg) pg.classList.add("active");
+  var mc=document.querySelector(".mc");
+  if(mc) mc.classList.toggle("mc-locked", page==="dashboard"||page==="team");
   if(page==="dashboard")  refreshDash();
   if(page==="brandcore")  refreshBC();
   if(page==="studio")     refreshStudio();
   if(page==="inspiration") renderInspiration();
   if(page==="aichat")     initChat();
-  if(page==="create")     S._cwsHistory=[];
+  if(page==="create")     { S._cwsHistory=[]; if(typeof _createRefreshHero==="function") _createRefreshHero(); }
   if(page==="team")       { if(typeof initTeamPage==="function") initTeamPage(); }
   if(page==="ugc")        { if(typeof ugcInit==="function") ugcInit(); }
 }
@@ -411,7 +485,7 @@ function openBCRegen(){
     if(typeof openPaywall==="function") openPaywall();
     return;
   }
-  if(typeof openModal==="function") openModal("modal-genbrand");
+  openBCWizard();
 }
 document.querySelectorAll(".ni").forEach(function(e){
   e.addEventListener("click",function(){ navigate(e.getAttribute("data-page")); });
@@ -461,19 +535,24 @@ document.querySelectorAll(".mbk").forEach(function(b){
 });
 
 // ═══════════════════════════════════════════════════════════════
+// CREATE
+// ═══════════════════════════════════════════════════════════════
+function _createRefreshHero(){
+  var dot = document.getElementById("crEyebrowDot");
+  if(dot) dot.className = "cr-eyebrow-dot" + (S.brandCore ? " active" : "");
+}
+
+// ═══════════════════════════════════════════════════════════════
 // DASHBOARD
 // ═══════════════════════════════════════════════════════════════
 function refreshDash(){
   var intel = _dashComputeIntel();
 
-  // ── Ring ─────────────────────────────────────────────────────
-  var arc = document.getElementById("dashRingArc");
-  if(arc){
-    var circ = 263.9;
-    arc.style.strokeDashoffset = circ * (1 - intel.pct / 100);
-  }
-  var pctEl = document.getElementById("dashRingPct");
-  if(pctEl) pctEl.textContent = intel.pct + "%";
+  // ── Level display ─────────────────────────────────────────────
+  var levelEl=document.getElementById("dashLevelNum");
+  var levelFill=document.getElementById("dashLevelFill");
+  if(levelEl) levelEl.textContent=intel.pct+"%";
+  if(levelFill) levelFill.style.width=intel.pct+"%";
 
   // ── Eyebrow dot ───────────────────────────────────────────────
   var dot = document.getElementById("dashEyebrowDot");
@@ -495,82 +574,125 @@ function refreshDash(){
     }
   }
 
-  // ── Meters ────────────────────────────────────────────────────
-  var cFill = document.getElementById("dashConfidenceFill");
-  var cVal  = document.getElementById("dashConfidenceVal");
-  if(cFill) cFill.style.width = intel.confidencePct + "%";
-  if(cVal)  cVal.textContent  = intel.confidence;
-
-  var mFill = document.getElementById("dashMemoryFill");
-  var mVal  = document.getElementById("dashMemoryVal");
-  if(mFill) mFill.style.width = intel.memoryPct + "%";
-  if(mVal)  mVal.textContent  = intel.memory;
+  // ── Sidebar level ─────────────────────────────────────────────
+  var rankLine=document.getElementById("sbRankLine");
+  var rankDot =document.getElementById("sbRankDot");
+  var rankName=document.getElementById("sbRankName");
+  if(rankLine&&rankDot&&rankName){
+    if(intel.pct>0){
+      rankDot.style.background="#B7FF2A";
+      rankName.textContent="BrandCore "+intel.pct+"%";
+      rankLine.style.display="";
+    } else {
+      rankLine.style.display="none";
+    }
+  }
 
   // ── Sections ──────────────────────────────────────────────────
-  _dashRenderCreateGrid();
   _dashRenderActivity();
-  _dashRenderEvolution(intel);
+  _dashRenderIntelLevel(intel);
   _dashRenderStats(intel);
 }
 
+// ── BrandCore Context Builder ──────────────────────────────────
+// Extracts all generation-relevant fields from S.brandCore.
+// Returned object is passed as `brandContext` in every AI API call.
+// Server uses it to inject brand intelligence into generation prompts.
+function _buildBrandContext(bc) {
+  if (!bc || !bc.name) return null;
+
+  var pers = Array.isArray(bc.personality) ? bc.personality
+           : (typeof bc.personality === "string" && bc.personality.trim()
+               ? bc.personality.split(/[,;]/).map(function(s){ return s.trim(); }).filter(Boolean)
+               : (bc.tone || []));
+
+  var colors = (bc.colors || []).slice(0, 3).map(function(c){ return c.hex + ' (' + c.name + ')'; }).join(', ');
+  var fonts  = (bc.fonts  || []).slice(0, 2).map(function(f){ return f.family; }).join(' / ');
+
+  return {
+    name:           bc.name            || "",
+    tagline:        bc.tagline         || "",
+    toneOfVoice:    bc.toneOfVoice     || (Array.isArray(bc.tone) ? bc.tone.join(", ") : ""),
+    personality:    pers.join(", "),
+    audience:       bc.audience        || bc.aud             || "",
+    positioning:    bc.positioning     || bc.promise         || bc.diff || "",
+    visualDirection:bc.visualDirection || bc.styleDirection  || "",
+    colors:         colors,
+    fonts:          fonts
+  };
+}
+
+// ── BrandCore Score ────────────────────────────────────────────
+// 8 core pillars = 95% · Logo System = 5% → total 100%
+//
+// A fully AI-generated BrandCore fills all 8 pillars instantly (95%).
+// The Logo System is the final step that completes the score (100%).
+// Weights: Identity 15 · Colors 15 · Typography 12 · Personality 12
+//          Tone 12 · Audience 10 · Positioning 10 · Visual 9 = 95
+//          Logo 5 = 100
 function _dashComputeIntel(){
   var bc = S.brandCore;
   if(!bc) return {
-    pct:0, confidence:"Inactive", confidencePct:0,
-    memory:"Empty", memoryPct:0,
-    rank:"Brand Seed", rankIdx:0,
-    msg:"Configure your Brand Core to activate ORIVEN Intelligence."
+    pct:0, level:1, score:0,
+    msg:"Set up your BrandCore to activate ORIVEN Intelligence.",
+    attrs:[]
   };
 
   var score = 0;
-  if(bc.name)                                              score += 15;
-  if(bc.colors && bc.colors.length >= 2)                   score += 12;
-  if(bc.fonts  && bc.fonts.length)                         score +=  8;
-  if(bc.tone   && bc.tone.length)                          score += 10;
-  if(bc.promise)                                           score += 10;
-  if(bc.audience || bc.aud)                                score += 10;
-  if(bc.diff)                                              score +=  8;
-  if(bc.logos && (bc.logos.primary || bc.logos.secondary || bc.logos.icon)) score += 10;
-  if(bc.wordsUse && bc.wordsUse.length)                    score +=  5;
+  var attrs = [];
 
-  var assetCount = (S.assets || []).length;
-  if(assetCount >= 1)  score += 4;
-  if(assetCount >= 5)  score += 4;
-  if(assetCount >= 10) score += 4;
-  if((S.campaigns || []).length >= 1) score += 5;
+  // Identity — 15%
+  if(bc.name){ score += 15; attrs.push("Identity"); }
 
-  score = Math.min(score, 100);
+  // Color System — 15%
+  if((bc.colors||[]).length >= 1){ score += 15; attrs.push("Color System"); }
 
-  var rank, rankIdx, confidence, confidencePct, memory, memoryPct, msg;
+  // Typography — 12%
+  if((bc.fonts||[]).length >= 2){ score += 12; attrs.push("Typography"); }
+  else if((bc.fonts||[]).length === 1) score += 6;
 
-  if(score < 15){
-    rank="Brand Seed"; rankIdx=0;
-    confidence="Inactive"; confidencePct=0;
-    memory="Empty"; memoryPct=0;
-    msg="Your AI is ready. Complete your Brand Core to begin intelligence.";
-  } else if(score < 36){
-    rank="Brand Identity"; rankIdx=1;
-    confidence="Building"; confidencePct=28;
-    memory="Loading"; memoryPct=22;
-    msg="Brand identity detected. Your AI is beginning to learn your voice.";
-  } else if(score < 61){
-    rank="Brand Intelligence"; rankIdx=2;
-    confidence="Moderate"; confidencePct=55;
-    memory="Active"; memoryPct=52;
-    msg="Brand memory is active. ORIVEN is understanding your creative direction.";
-  } else if(score < 82){
-    rank="Brand Consciousness"; rankIdx=3;
-    confidence="High"; confidencePct=80;
-    memory="Deep"; memoryPct=78;
-    msg="ORIVEN deeply understands your brand. Creative confidence is high.";
-  } else {
-    rank="Brand Mastery"; rankIdx=4;
-    confidence="Peak"; confidencePct=100;
-    memory="Complete"; memoryPct=100;
-    msg="Peak intelligence reached. Your brand is operating at full power.";
+  // Brand Personality — 12%
+  var pers = bc.personality;
+  var persOk = (Array.isArray(pers) && pers.length >= 1) ||
+               (typeof pers === "string" && pers.trim().length > 0) ||
+               (bc.tone && bc.tone.length >= 1);
+  if(persOk){ score += 12; attrs.push("Brand Personality"); }
+
+  // Tone of Voice — 12%
+  if(bc.toneOfVoice || (bc.tone && bc.tone.length)){
+    score += 12; attrs.push("Tone of Voice");
   }
 
-  return { pct:score, rank, rankIdx, confidence, confidencePct, memory, memoryPct, msg };
+  // Target Audience — 10%
+  if(bc.audience || bc.aud){ score += 10; attrs.push("Target Audience"); }
+
+  // Positioning — 10%
+  if(bc.positioning || bc.promise || bc.diff){ score += 10; attrs.push("Positioning"); }
+
+  // Visual Direction — 9%
+  if(bc.visualDirection || bc.styleDirection){ score += 9; attrs.push("Visual Direction"); }
+
+  // Logo System — final 5% to reach 100%
+  var hasLogo = bc.logos && (
+    (bc.logos.primary   && bc.logos.primary.url   && bc.logos.primary.source   !== "placeholder") ||
+    (bc.logos.secondary && bc.logos.secondary.url && bc.logos.secondary.source !== "placeholder") ||
+    (bc.logos.icon      && bc.logos.icon.url      && bc.logos.icon.source      !== "placeholder")
+  );
+  if(hasLogo){ score += 5; attrs.push("Logo System"); }
+
+  score = Math.min(score, 100);
+  var level = Math.max(1, Math.min(10, Math.ceil(score / 10)));
+
+  var msg;
+  if(score === 0)     msg = "Set up your BrandCore to activate ORIVEN Intelligence.";
+  else if(score < 30) msg = "Your BrandCore is getting started.";
+  else if(score < 60) msg = "Your brand identity is taking shape.";
+  else if(score < 85) msg = "Strong BrandCore. AI outputs are increasingly on-brand.";
+  else if(score < 95) msg = "Your BrandCore is nearly complete.";
+  else if(score < 100) msg = "Almost perfect — generate a logo to complete your BrandCore.";
+  else                 msg = "Complete. Your BrandCore is fully activated.";
+
+  return { pct:score, level:level, score:score, msg:msg, attrs:attrs };
 }
 
 function _dashRenderCreateGrid(){
@@ -681,48 +803,29 @@ function _dashRenderActivity(){
   el.innerHTML = html;
 }
 
-function _dashRenderEvolution(intel){
-  var el = document.getElementById("dashEvolution");
+function _dashRenderIntelLevel(intel){
+  var el = document.getElementById("dashIntelLevel");
   if(!el) return;
 
-  var ranks = [
-    {name:"Brand Seed",          desc:"Configure your brand to begin."},
-    {name:"Brand Identity",      desc:"Your brand identity is forming."},
-    {name:"Brand Intelligence",  desc:"ORIVEN is learning your brand."},
-    {name:"Brand Consciousness", desc:"Deep brand understanding achieved."},
-    {name:"Brand Mastery",       desc:"Peak AI brand mastery reached."}
-  ];
+  var attrsHtml = "";
+  if(intel.attrs && intel.attrs.length){
+    intel.attrs.forEach(function(a){
+      attrsHtml += '<span class="dash-il-attr">' + a + '</span>';
+    });
+  } else {
+    attrsHtml = '<span class="dash-il-attr" style="opacity:.45">No brand data yet</span>';
+  }
 
-  var current = ranks[intel.rankIdx];
-
-  var html =
-    '<div class="dash-rank-badge">'
-    + '<span class="dash-rank-dot"></span>'
-    + '<span class="dash-rank-name">' + intel.rank + '</span>'
+  el.innerHTML =
+    '<p class="dash-il-msg">' + intel.msg + '</p>'
+    + '<div class="dash-il-bar-head">'
+    + '<span class="dash-il-bar-lbl">BrandCore Score</span>'
+    + '<span class="dash-il-bar-val">' + intel.pct + '%</span>'
     + '</div>'
-    + '<div class="dash-rank-desc">' + current.desc + '</div>'
-    + '<div class="dash-rank-track">';
-
-  ranks.forEach(function(r, i){
-    var cls = i < intel.rankIdx ? "dash-rnode done"
-            : i === intel.rankIdx ? "dash-rnode current"
-            : "dash-rnode";
-    html += '<div class="' + cls + '">'
-      + '<div class="dash-rnode-dot"></div>'
-      + '<div class="dash-rnode-lbl">' + r.name + '</div>'
-      + '</div>';
-  });
-
-  html += '</div>'
-    + '<div class="dash-intel-bar-head">'
-    + '<span class="dash-intel-bar-lbl">ORIVEN Intelligence</span>'
-    + '<span class="dash-intel-bar-val">' + intel.pct + '%</span>'
+    + '<div class="dash-il-bar-track">'
+    + '<div class="dash-il-bar-fill" style="width:' + intel.pct + '%"></div>'
     + '</div>'
-    + '<div class="dash-intel-bar-track">'
-    + '<div class="dash-intel-bar-fill" style="width:' + intel.pct + '%"></div>'
-    + '</div>';
-
-  el.innerHTML = html;
+    + '<div class="dash-il-attrs">' + attrsHtml + '</div>';
 }
 
 function _dashRenderStats(intel){
@@ -733,10 +836,10 @@ function _dashRenderStats(intel){
   var campCount  = (S.campaigns || []).length;
 
   var stats = [
-    { val: assetCount,    label: "Assets Generated" },
-    { val: campCount,     label: "Campaigns Built"  },
-    { val: intel.rank,    label: "Brand Rank"       },
-    { val: intel.pct + "%", label: "AI Intelligence" }
+    { val: assetCount,            label: "Assets Generated" },
+    { val: campCount,             label: "Campaigns Built"  },
+    { val: intel.pct + "%",        label: "BrandCore Score" },
+    { val: (intel.attrs||[]).length, label: "Pillars Filled" }
   ];
 
   var html = "";
@@ -1176,19 +1279,23 @@ function appendAIMessage(response,feed){
   var inner='<div class="chat-ai-avatar"><svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M10 2L12.5 7.5H18L13.5 11L15 16.5L10 13.5L5 16.5L6.5 11L2 7.5H7.5Z"/></svg></div>';
   inner+='<div class="chat-bubble ai-bubble"><div class="chat-result-label">'+response.label+"</div>";
   inner+=renderResultHTML(response);
-  inner+='<div class="chat-actions"><button class="btn btn-sm btn-g" onclick="saveFromChat(this)">Save to Studio</button></div>';
+  inner+='<div class="chat-actions"><button class="btn btn-sm btn-g" onclick="saveFromChat(this)">Save Asset</button></div>';
   inner+="</div></div>";
   div.innerHTML=inner;
   feed.appendChild(div);
 }
 function saveFromChat(btn){
   S.assets.push({id:Date.now(),type:"chat",name:"AI output #"+(S.assets.length+1),category:"copy",brandColor:getBrandContext().color,brandName:getBrandContext().name,createdAt:new Date().toLocaleTimeString()});
-  toast("Saved to Studio");
+  toast("Asset saved");
   btn.textContent="Saved!";
   btn.disabled=true;
 }
 // Auto-resize textarea
 document.addEventListener("DOMContentLoaded",function(){
+  // Dashboard is active by default — lock mc scroll immediately
+  var mc=document.querySelector(".mc");
+  if(mc) mc.classList.add("mc-locked");
+
   var ci=document.getElementById("chatInput");
   if(ci){
     ci.addEventListener("keydown",function(e){
@@ -1216,8 +1323,9 @@ function refreshBC(){
   var stBCContent=document.getElementById("stBCContent");
   if(stBCEmpty) stBCEmpty.classList.toggle("hidden",!!bc);
   if(stBCContent) stBCContent.classList.toggle("hidden",!bc);
-  // Studio info panel
+  // Studio info panel + new BrandCore profile
   updateStudioBCPanel();
+  if(typeof _studioRefreshMain==="function") _studioRefreshMain();
   if(!bc) return;
   renderColors("colorSwatches");
   renderColors("stColorSwatches");
@@ -1244,7 +1352,9 @@ function updateStudioBCPanel(){
   var swatches=bc.colors.slice(0,4).map(function(col){
     return '<div class="si-swatch" style="background:'+col.hex+'" title="'+col.name+'"></div>';
   }).join("");
-  el.innerHTML='<div class="si-bc-block"><div class="si-bc-name">'+bc.name+'</div><div class="si-bc-meta">'+bc.tone.slice(0,2).join(" · ")+'</div><div class="si-colors">'+swatches+"</div></div>";
+  var persArr=Array.isArray(bc.personality)?bc.personality:(bc.tone||[]);
+  var meta=persArr.slice(0,2).join(" · ")||bc.visualDirection||bc.styleDirection||"";
+  el.innerHTML='<div class="si-bc-block"><div class="si-bc-name">'+bc.name+'</div><div class="si-bc-meta">'+meta+'</div><div class="si-colors">'+swatches+"</div></div>";
 }
 function renderColors(containerId){
   var el=document.getElementById(containerId);
@@ -1321,6 +1431,7 @@ function uploadLogo(category){
       S.brandCore.logos[category]={url:ev.target.result,source:"upload"};
       renderLogos("logoGrid");
       renderLogos("stLogoGrid");
+      if(typeof _bcRenderLogos==="function") _bcRenderLogos();
       if(typeof saveBCToDB==="function") saveBCToDB();
       toast("Logo saved");
     };
@@ -1335,6 +1446,7 @@ function removeLogo(category){
   S.brandCore.logos[category]=null;
   renderLogos("logoGrid");
   renderLogos("stLogoGrid");
+  if(typeof _bcRenderLogos==="function") _bcRenderLogos();
   if(typeof saveBCToDB==="function") saveBCToDB();
   toast("Logo removed");
 }
@@ -1438,15 +1550,22 @@ function renderTone(tagsId,useId,avoidId){
   var te=document.getElementById(tagsId);
   var ue=document.getElementById(useId);
   var ae=document.getElementById(avoidId);
-  if(te) te.innerHTML=bc.tone.map(function(t){return '<span class="tag">'+t+"</span>";}).join("");
-  if(ue) ue.innerHTML=bc.wordsUse.map(function(w){return '<span class="tag">'+w+"</span>";}).join("");
-  if(ae) ae.innerHTML=bc.wordsAvoid.map(function(w){return '<span class="tag tag-r">'+w+"</span>";}).join("");
+  // Use new personality array (4 keywords) as primary tone display
+  var persArr = Array.isArray(bc.personality) ? bc.personality : (bc.tone || []);
+  if(te) te.innerHTML = persArr.map(function(t){ return '<span class="tag">'+t+"</span>"; }).join("");
+  if(ue) ue.innerHTML = (bc.wordsUse||[]).map(function(w){ return '<span class="tag">'+w+"</span>"; }).join("");
+  if(ae) ae.innerHTML = (bc.wordsAvoid||[]).map(function(w){ return '<span class="tag tag-r">'+w+"</span>"; }).join("");
 }
 function renderPos(containerId){
   var el=document.getElementById(containerId);
   if(!el) return;
   var bc=S.brandCore;
-  var items=[{l:"Brand Promise",v:bc.promise},{l:"Target Audience",v:bc.audience},{l:"Differentiator",v:bc.diff}];
+  var items=[
+    {l:"Positioning",    v:bc.positioning||bc.promise},
+    {l:"Target Audience",v:bc.audience||bc.aud},
+    {l:"Tone of Voice",  v:bc.toneOfVoice||(bc.tone&&bc.tone.join(", "))},
+    {l:"Visual Direction",v:bc.visualDirection||bc.styleDirection}
+  ];
   el.innerHTML=items.map(function(x){
     return '<div style="background:var(--bg2);border-radius:var(--rl);padding:16px"><div class="sec-lbl" style="margin-bottom:8px">'+x.l+'</div><div style="font-size:13px;color:var(--charcoal);line-height:1.6">'+(x.v||"—")+"</div></div>";
   }).join("");
@@ -1473,114 +1592,421 @@ function buildBC(name,ind,tone,aud,desc){
     diff:"The leading "+(ind||"brand")+" platform built for scale."
   };
 }
+// ══════════════════════════════════════════════════════════════
+// BRANDCORE AI WIZARD — 8-step guided question flow
+// ══════════════════════════════════════════════════════════════
+
+var _gbAnswers  = {};
+var _bcwStep    = 1;
+var _BCW_TOTAL  = 8;
+
+// Map step numbers to answer keys and input element IDs
+var _BCW_STEPS = [
+  null, // 1-indexed
+  { key:"name",        inputId:"bcwName",     pills:null,           required:true  },
+  { key:"description", inputId:"bcwDesc",     pills:null,           required:false },
+  { key:"industry",    inputId:null,          pills:"bcwIndustryPills", required:false },
+  { key:"audience",    inputId:"bcwAudience", pills:null,           required:false },
+  { key:"brandType",   inputId:null,          pills:"bcwTypePills",  required:false },
+  { key:"visualStyle", inputId:null,          pills:"bcwStylePills", required:false },
+  { key:"colorDir",    inputId:null,          pills:"bcwColorPills", required:false },
+  { key:"feeling",     inputId:null,          pills:"bcwFeelingPills",required:false }
+];
+
+function openBCWizard(){
+  _gbAnswers = {};
+  _bcwStep   = 1;
+  // Reset all steps
+  for(var i=1; i<=_BCW_TOTAL; i++){
+    var s = document.getElementById("bcwS"+i);
+    if(s) s.classList.remove("bcw-step-active");
+    // Clear pills
+    var def = _BCW_STEPS[i];
+    if(def && def.pills){
+      document.querySelectorAll("#"+def.pills+" .bcw-pill").forEach(function(p){
+        p.classList.remove("bcw-pill-sel");
+      });
+    }
+    // Clear inputs
+    if(def && def.inputId){
+      var inp = document.getElementById(def.inputId);
+      if(inp) inp.value = "";
+    }
+  }
+  var wiz = document.getElementById("bcWizard");
+  if(wiz){ wiz.style.display = "flex"; requestAnimationFrame(function(){ wiz.style.opacity="1"; }); }
+  _bcwRenderStep(1);
+}
+
+function closeBCWizard(){
+  var wiz = document.getElementById("bcWizard");
+  if(!wiz) return;
+  wiz.style.opacity = "0";
+  setTimeout(function(){ wiz.style.display = "none"; wiz.style.opacity = ""; }, 280);
+}
+
+function _bcwRenderStep(n){
+  // Hide all steps
+  for(var i=1; i<=_BCW_TOTAL; i++){
+    var s = document.getElementById("bcwS"+i);
+    if(s) s.classList.remove("bcw-step-active");
+  }
+  // Show current
+  var cur = document.getElementById("bcwS"+n);
+  if(cur) cur.classList.add("bcw-step-active");
+
+  // Progress
+  var fill = document.getElementById("bcwProgFill");
+  var lbl  = document.getElementById("bcwProgLbl");
+  if(fill) fill.style.width = (n / _BCW_TOTAL * 100) + "%";
+  if(lbl)  lbl.textContent  = n + " / " + _BCW_TOTAL;
+
+  // Back button
+  var back = document.getElementById("bcwBackBtn");
+  if(back) back.style.visibility = n > 1 ? "visible" : "hidden";
+
+  // Next button
+  var next = document.getElementById("bcwNextBtn");
+  if(next){
+    if(n === _BCW_TOTAL){
+      next.textContent = "Generate BrandCore →";
+      next.className   = "bcw-next-btn bcw-generate";
+    } else {
+      next.textContent = "Next →";
+      next.className   = "bcw-next-btn";
+    }
+  }
+
+  // Focus first input
+  var def = _BCW_STEPS[n];
+  if(def && def.inputId){
+    setTimeout(function(){
+      var inp = document.getElementById(def.inputId);
+      if(inp) inp.focus();
+    }, 80);
+  }
+
+  _bcwStep = n;
+}
+
+function bcwPillSelect(el, groupId){
+  document.querySelectorAll("#"+groupId+" .bcw-pill").forEach(function(p){
+    p.classList.remove("bcw-pill-sel");
+  });
+  el.classList.add("bcw-pill-sel");
+}
+
+function _bcwCollectStep(n){
+  var def = _BCW_STEPS[n];
+  if(!def) return true;
+
+  if(def.inputId){
+    var inp = document.getElementById(def.inputId);
+    var val = inp ? inp.value.trim() : "";
+    if(def.required && !val){
+      if(inp){ inp.style.borderColor="rgba(239,68,68,.45)"; inp.focus(); }
+      toast("Please fill this in before continuing","warn");
+      return false;
+    }
+    if(inp) inp.style.borderColor = "";
+    _gbAnswers[def.key] = val;
+  } else if(def.pills){
+    var sel = document.querySelector("#"+def.pills+" .bcw-pill-sel");
+    _gbAnswers[def.key] = sel ? sel.textContent.trim() : "";
+  }
+  return true;
+}
+
+function bcwNext(){
+  if(!_bcwCollectStep(_bcwStep)) return;
+  if(_bcwStep === _BCW_TOTAL){
+    bcwFinish(); return;
+  }
+  _bcwRenderStep(_bcwStep + 1);
+}
+
+function bcwBack(){
+  if(_bcwStep > 1) _bcwRenderStep(_bcwStep - 1);
+}
+
+function bcwFinish(){
+  // Collect any remaining step data
+  for(var i=1; i<=_BCW_TOTAL; i++) _bcwCollectStep(i);
+  closeBCWizard();
+  runGenBrand();
+}
+
+// Override openModal for modal-genbrand to open the wizard instead
+var _origOpenModal = typeof openModal === "function" ? openModal : null;
+
+// ── _gbAnswers: populated step by step through the AI wizard ──
+
 function runGenBrand(){
-  var name=document.getElementById("gbName").value.trim();
-  if(!name){toast("Enter a brand name","warn");return;}
-  var gbType=document.getElementById("gbType");
-  var gbInd=document.getElementById("gbInd");
-  var gbDesc=document.getElementById("gbDesc");
-  var gbAud=document.getElementById("gbAud");
-  var gbColorMood=document.getElementById("gbColorMood");
-  var gbBrandStyle=document.getElementById("gbBrandStyle");
-  var tags=[].slice.call(document.querySelectorAll("#gbTags .fb.active")).map(function(e){return e.textContent;});
-  var payload={
-    brandName:name,
-    type:gbType?gbType.value:"",
-    industry:gbInd?gbInd.value:"",
-    description:gbDesc?gbDesc.value:"",
-    targetAudience:gbAud?gbAud.value:"",
-    colorMood:gbColorMood?gbColorMood.value:"",
-    brandStyle:gbBrandStyle?gbBrandStyle.value:"",
-    personality:tags.join(", ")
+  // Read from wizard answers (populated by bcWizFinish) or fallback to old DOM IDs
+  var a = _gbAnswers;
+  var name = (a.name || "").trim() || (document.getElementById("gbName") ? document.getElementById("gbName").value.trim() : "");
+  if(!name){ toast("Enter a brand name","warn"); return; }
+
+  var payload = {
+    brandName:     name,
+    description:   a.description || "",
+    industry:      a.industry    || "",
+    targetAudience:a.audience    || "",
+    brandType:     a.brandType   || "",
+    visualStyle:   a.visualStyle || "",
+    colorMood:     a.colorDir    || "",
+    brandFeeling:  a.feeling     || "",
+    personality:   a.brandType   || ""
   };
+
+  // Close wizard + show generation overlay
+  var wiz = document.getElementById("bcWizard");
+  if(wiz) { wiz.style.opacity="0"; setTimeout(function(){ wiz.style.display="none"; wiz.style.opacity=""; },300); }
   closeModal("modal-genbrand");
-  var glov=document.getElementById("glov");
-  glov.classList.add("open");
-  var msgs=["Analyzing personality inputs...","Generating color palette...","Selecting typography...","Building tone of voice...","Finalizing Brand Brain..."];
-  var mi=0;
-  var iv=setInterval(function(){
-    if(mi<msgs.length) document.getElementById("glovStatus").textContent=msgs[mi++];
-  },900);
-  fetch(API_BASE_URL+"/api/generate-brandcore",{
-    method:"POST",
-    headers:{"Content-Type":"application/json"},
-    body:JSON.stringify(payload)
+
+  var glov = document.getElementById("glov");
+  if(glov) glov.classList.add("open");
+
+  var msgs = [
+    "Understanding your brand…",
+    "Building your color system…",
+    "Selecting typography…",
+    "Crafting brand voice…",
+    "Defining positioning…",
+    "Finalizing BrandCore…"
+  ];
+  var mi = 0;
+  var iv = setInterval(function(){
+    var el = document.getElementById("glovStatus");
+    if(el && mi < msgs.length) el.textContent = msgs[mi++];
+  }, 900);
+
+  fetch(API_BASE_URL + "/api/generate-brandcore", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload)
   })
-  .then(function(res){return res.json();})
+  .then(function(res){ return res.json(); })
   .then(function(data){
     clearInterval(iv);
-    glov.classList.remove("open");
-    if(data.error){toast(data.error,"warn");return;}
-    var vi=data.visualIdentity||{};
-    var bc_=data.brandCore||{};
-    var bs=data.brandStrategy||{};
-    var lc=data.logoConcept||{};
-    var toneArr=(bs.toneOfVoice||"Strategic, Premium").split(/[,;\/]/).map(function(s){return s.trim();}).filter(Boolean);
-    var prevLogos=(S.brandCore&&S.brandCore.logos)||{};
-    S.brandCore={
-      name:data.brandName||name,
-      ind:payload.industry,
-      tone:toneArr,
-      aud:bs.targetAudience||payload.targetAudience,
-      desc:payload.description,
-      logos:prevLogos,
-      colors:[
-        {hex:vi.primaryColor||"#B7FF2A",name:"Primary",role:"Primary"},
-        {hex:vi.secondaryColor||"#9FE81F",name:"Secondary",role:"Accent"},
-        {hex:vi.accentColor||"#BFA07A",name:"Accent",role:"Support"},
-        {hex:"#F6F3EE",name:"Background",role:"Background"},
-        {hex:"#18181A",name:"Text",role:"Text"}
+    if(glov) glov.classList.remove("open");
+    if(data.error){ toast(data.error,"warn"); return; }
+
+    // ── Parse new structured response ────────────────────────────
+    var cs  = data.colorSystem    || {};
+    var typo= data.typography     || {};
+    var bs  = data.brandStrategy  || {};
+    var bc_ = data.brandCore      || {};
+    var lc  = data.logoConcept    || {};
+
+    // Helper: safely get color object from new schema or fall back
+    function _color(slot, fallbackHex, fallbackName, fallbackRole, fallbackExp){
+      var obj = cs[slot] || {};
+      return {
+        hex:         obj.hex         || fallbackHex,
+        name:        obj.name        || fallbackName,
+        role:        fallbackRole,
+        explanation: obj.reason      || fallbackExp
+      };
+    }
+
+    // Personality — must be exactly 4 keywords (array)
+    var persRaw = bs.personality || bs.brandPersonality || payload.brandType || "";
+    var persArray = Array.isArray(persRaw)
+      ? persRaw.slice(0,4)
+      : String(persRaw).split(/[,;\/]/).map(function(s){ return s.trim(); }).filter(Boolean).slice(0,4);
+
+    // Tone of Voice — one sentence
+    var toneOfVoice = (bs.toneOfVoice || "").trim();
+
+    var prevLogos = (S.brandCore && S.brandCore.logos) || {};
+
+    S.brandCore = {
+      // ── Identity ─────────────────────────────────────────────
+      name:    data.brandName || name,
+      tagline: data.tagline   || "",
+
+      // ── Personality & Voice ───────────────────────────────────
+      personality:  persArray,
+      toneOfVoice:  toneOfVoice,
+      tone:         persArray,   // backward compat
+
+      // ── Audience & Positioning ────────────────────────────────
+      audience:    bs.targetAudience || payload.targetAudience || "",
+      aud:         bs.targetAudience || payload.targetAudience || "",
+      positioning: bs.positioning    || bc_.brandPromise       || "",
+      promise:     bc_.brandPromise  || bs.positioning         || "",
+      diff:        bs.positioning    || "",
+
+      // ── Color System (6 colors, each with explanation) ─────────
+      colors: [
+        _color("primary",   "#B7FF2A", "Primary",   "Primary",   "Core brand color — used for recognition and brand visibility."),
+        _color("secondary", "#0A0A0A", "Secondary", "Secondary", "Supports the primary in layouts and background surfaces."),
+        _color("accent",    "#BFA07A", "Accent",    "Accent",    "Draws attention to key interactive elements and highlights."),
+        _color("text",      "#18181A", "Text",      "Text",      "Ensures readability across all surfaces and content areas."),
+        _color("support1",  "#F6F3EE", "Support 1", "Support",   "Neutral surface for content areas and secondary backgrounds."),
+        _color("support2",  "#E5DED4", "Support 2", "Support",   "Secondary surfaces, dividers, and subtle backgrounds.")
       ],
-      fonts:[
-        {role:"Display / Headings",family:vi.headingFont||"Instrument Serif",usage:"Hero text, titles, brand voice"},
-        {role:"Body / Interface",family:vi.bodyFont||"Inter",usage:"Body copy, UI labels, navigation"}
+
+      // ── Typography ────────────────────────────────────────────
+      fonts: [
+        {
+          role:        "Heading",
+          family:      (typo.heading && typo.heading.family) || "Instrument Serif",
+          explanation: (typo.heading && typo.heading.reason) || "Primary display typeface for headers and brand voice.",
+          usage:       "Hero text, titles, brand voice"
+        },
+        {
+          role:        "Body",
+          family:      (typo.body && typo.body.family) || "Geist",
+          explanation: (typo.body && typo.body.reason)   || "Interface and body copy typeface for clarity and readability.",
+          usage:       "Body copy, UI labels, navigation"
+        }
       ],
-      wordsUse:Array.isArray(bc_.values)&&bc_.values.length?bc_.values:["clarity","impact"],
-      wordsAvoid:["generic","average","mediocre"],
-      promise:bc_.brandPromise||name+" helps you build and grow.",
-      audience:bs.targetAudience||payload.targetAudience||"Your target audience",
-      diff:bs.positioning||"Unique in your space.",
-      mission:bc_.mission||"",
-      vision:bc_.vision||"",
-      personality:bs.brandPersonality||"",
-      styleDirection:vi.styleDirection||"",
-      colorMood:vi.colorMood||"",
-      logoConcept:lc
+
+      // ── Visual ────────────────────────────────────────────────
+      visualDirection:  data.visualDirection  || payload.visualStyle || "",
+      styleDirection:   data.visualDirection  || "",
+      colorMood:        (cs.primary && cs.primary.reason) || "",
+
+      // ── Visual References ─────────────────────────────────────
+      visualReferences: [],
+
+      // ── Logos ─────────────────────────────────────────────────
+      logos: prevLogos,
+
+      // ── Brand Core values ─────────────────────────────────────
+      wordsUse:   Array.isArray(bc_.values) && bc_.values.length ? bc_.values : persArray,
+      wordsAvoid: ["generic","average","mediocre"],
+
+      // ── Metadata ──────────────────────────────────────────────
+      ind:         payload.industry,
+      desc:        payload.description,
+      mission:     bc_.mission || "",
+      vision:      bc_.vision  || "",
+      logoConcept: lc
     };
+
+    _gbAnswers = {};
     refreshBC();
-    toast("Brand Core created!");
+    toast("BrandCore generated!");
     saveBCToDB();
-    if(typeof maybeShowPaywall==="function") maybeShowPaywall();
-    // Guide tour: advance from step 1 → 2 when BrandCore is first created
-    if(typeof gtAdvance==="function") gtAdvance(1);
+    if(typeof maybeShowPaywall === "function") maybeShowPaywall();
+    if(typeof gtAdvance === "function") gtAdvance(1);
   })
   .catch(function(err){
     clearInterval(iv);
-    glov.classList.remove("open");
-    console.error("[BrandCore] Error:",err);
+    if(glov) glov.classList.remove("open");
+    console.error("[BrandCore] Error:", err);
     toast("Could not connect to ORIVEN services. Please try again.","warn");
   });
 }
 function saveBCManual(){
-  var name=document.getElementById("bcsName").value.trim();
-  if(!name){toast("Enter a brand name","warn");return;}
-  var prevLogos=(S.brandCore&&S.brandCore.logos)||{};
-  S.brandCore={
-    name:name,tone:["Strategic","Premium"],
-    logos:prevLogos,
-    colors:[{hex:document.getElementById("bcsPrimary").value||"#B7FF2A",name:"Primary",role:"Primary"}],
-    fonts:[
-      {role:"Heading",family:document.getElementById("bcsHead").value||"Instrument Serif",usage:"Headlines"},
-      {role:"Body",family:document.getElementById("bcsBody").value||"Geist",usage:"Body text"}
+  var name = (document.getElementById("bcsName")    && document.getElementById("bcsName").value.trim())    || "";
+  if(!name){ toast("Enter a brand name","warn"); return; }
+
+  var tagline      = _bcsVal("bcsTagline");
+  var primaryColor = _bcsVal("bcsPrimary")   || "#B7FF2A";
+  var secondary    = _bcsVal("bcsSecondary");
+  var accent       = _bcsVal("bcsAccent");
+  var textColor    = _bcsVal("bcsText");
+  var support1     = _bcsVal("bcsSupport1");
+  var support2     = _bcsVal("bcsSupport2");
+  var headFont     = _bcsVal("bcsHead")      || "Instrument Serif";
+  var bodyFont     = _bcsVal("bcsBody")      || "Geist";
+  var persRaw      = _bcsVal("bcsPersonality");
+  var toneOfVoice  = _bcsVal("bcsTone");
+  var audience     = _bcsVal("bcsAudience");
+  var positioning  = _bcsVal("bcsPositioning");
+  var visualDir    = _bcsVal("bcsVisualDir");
+  var logoDesc     = _bcsVal("bcsLogoDesc");
+
+  // Build personality array (up to 4 keywords from comma-separated input)
+  var persArray = persRaw
+    ? persRaw.split(/[,;]/).map(function(s){ return s.trim(); }).filter(Boolean).slice(0,4)
+    : [];
+
+  // Build colors array from provided hex values
+  var colorDefs = [
+    { hex: primaryColor, name:"Primary",   role:"Primary",   explanation:"Core brand color — used for recognition and brand visibility." },
+    { hex: secondary,    name:"Secondary", role:"Secondary", explanation:"Supports the primary in layouts and background surfaces." },
+    { hex: accent,       name:"Accent",    role:"Accent",    explanation:"Draws attention to key interactive elements and highlights." },
+    { hex: textColor,    name:"Text",      role:"Text",      explanation:"Ensures readability across all surfaces." },
+    { hex: support1,     name:"Support 1", role:"Support",   explanation:"Neutral surface for content areas." },
+    { hex: support2,     name:"Support 2", role:"Support",   explanation:"Secondary surfaces and dividers." }
+  ];
+  var colors = colorDefs.filter(function(c){ return c.hex && /^#[0-9A-Fa-f]{6}$/.test(c.hex); });
+  if(!colors.length) colors = [{ hex: primaryColor, name:"Primary", role:"Primary", explanation:"" }];
+
+  var prevLogos = (S.brandCore && S.brandCore.logos) || {};
+
+  S.brandCore = {
+    name: name,
+    tagline: tagline,
+    personality: persArray,
+    toneOfVoice: toneOfVoice,
+    tone:        persArray,  // backward compat
+    audience:    audience,
+    aud:         audience,
+    positioning: positioning,
+    promise:     positioning,
+    diff:        positioning,
+    visualDirection: visualDir,
+    styleDirection:  visualDir,
+    visualReferences: [],
+    logos: Object.assign({}, prevLogos, logoDesc ? { description: logoDesc } : {}),
+    colors: colors,
+    fonts: [
+      { role:"Heading", family: headFont, explanation:"Primary display typeface for headers and brand voice.",    usage:"Headlines, titles" },
+      { role:"Body",    family: bodyFont, explanation:"Interface and body copy typeface optimised for clarity.", usage:"Body copy, UI labels" }
     ],
-    wordsUse:["clarity","impact"],wordsAvoid:["synergy"],
-    promise:document.getElementById("bcsPromise").value||name+" helps you build and grow.",
-    audience:"Your target audience",diff:"Unique in your space."
+    wordsUse:  ["clarity","impact"],
+    wordsAvoid:["generic","average"],
+    colorMood: ""
   };
-  closeModal("modal-bcsetup"); refreshBC();
-  toast("Brand Core saved!");
+
+  closeModal("modal-bcsetup");
+  refreshBC();
+  toast("BrandCore saved!");
   saveBCToDB();
-  if(typeof maybeShowPaywall==="function") maybeShowPaywall();
+  if(typeof maybeShowPaywall === "function") maybeShowPaywall();
+}
+
+function _bcsVal(id){
+  var el = document.getElementById(id);
+  return el ? el.value.trim() : "";
+}
+function bcsPrev(inputId, swatchId){
+  var v = _bcsVal(inputId);
+  var sw = document.getElementById(swatchId);
+  if(sw) sw.style.background = /^#[0-9A-Fa-f]{6}$/.test(v) ? v : "transparent";
+}
+
+// ── Visual References / Moodboard ─────────────────────────────
+function bcAddVisualRef(){
+  var inp = document.getElementById("bcMoodInput");
+  if(inp) inp.click();
+}
+function bcHandleMoodUpload(input){
+  if(!input.files||!S.brandCore) return;
+  if(!S.brandCore.visualReferences) S.brandCore.visualReferences=[];
+  Array.from(input.files).forEach(function(file){
+    if(file.size>5*1024*1024){ toast("Image must be under 5 MB","warn"); return; }
+    var reader=new FileReader();
+    reader.onload=function(e){
+      S.brandCore.visualReferences.push({url:e.target.result,type:"upload"});
+      if(typeof _studioRefreshMain==="function") _studioRefreshMain();
+      if(typeof saveBCToDB==="function") saveBCToDB();
+    };
+    reader.readAsDataURL(file);
+  });
+  input.value="";
+}
+function bcRemoveVisualRef(index){
+  if(!S.brandCore||!S.brandCore.visualReferences) return;
+  S.brandCore.visualReferences.splice(index,1);
+  if(typeof _studioRefreshMain==="function") _studioRefreshMain();
+  if(typeof saveBCToDB==="function") saveBCToDB();
 }
 function openAddColorModal(){
   document.getElementById("colorModalTtl").textContent="Add Brand Color";
@@ -1589,13 +2015,22 @@ function openAddColorModal(){
   document.getElementById("colorPrev").style.background="#B7FF2A";
   S._editCI=null; openModal("modal-addcolor");
 }
-function editColor(i){
+// bcpEditColor — BrandCore profile color edit (edit-only, no new colors)
+function bcpEditColor(i){
+  if(!S.brandCore||!S.brandCore.colors[i]) return;
   var col=S.brandCore.colors[i];
-  document.getElementById("colorModalTtl").textContent="Edit Color";
+  document.getElementById("colorModalTtl").textContent="Edit Color — "+col.name;
   document.getElementById("colorHex").value=col.hex;
   document.getElementById("colorName").value=col.name;
   document.getElementById("colorPrev").style.background=col.hex;
-  S._editCI=i; openModal("modal-addcolor");
+  // Pre-select matching role
+  var roleEl=document.getElementById("colorRole");
+  if(roleEl) roleEl.value=col.role||"Primary";
+  S._editCI=i;
+  openModal("modal-addcolor");
+}
+function editColor(i){
+  bcpEditColor(i);
 }
 function updateColorPrev(v){if(/^#[0-9A-Fa-f]{6}$/.test(v)) document.getElementById("colorPrev").style.background=v;}
 function saveColor(){
@@ -1604,13 +2039,18 @@ function saveColor(){
   var role=document.getElementById("colorRole").value;
   if(!/^#[0-9A-Fa-f]{6}$/.test(hex)){toast("Enter a valid hex color","warn");return;}
   if(!name){toast("Enter a color name","warn");return;}
-  if(S._editCI!==null&&S._editCI!==undefined) S.brandCore.colors[S._editCI]={hex:hex,name:name,role:role};
-  else S.brandCore.colors.push({hex:hex,name:name,role:role});
+  // Edit existing color only — no new color creation from BrandCore profile
+  if(S._editCI!==null&&S._editCI!==undefined){
+    var existing=S.brandCore.colors[S._editCI]||{};
+    S.brandCore.colors[S._editCI]={hex:hex,name:name,role:role,explanation:existing.explanation||""};
+  }
   closeModal("modal-addcolor");
   renderColors("colorSwatches");
   renderColors("stColorSwatches");
+  if(typeof _bcRenderColors==="function") _bcRenderColors();
   updateStudioBCPanel();
-  toast("Color saved!");
+  if(typeof saveBCToDB==="function") saveBCToDB(); // autosave
+  toast("Color updated");
 }
 
 // ═══════════════════════════════════════════════════════════════

@@ -1,0 +1,2441 @@
+﻿<!DOCTYPE html>
+<html lang="en">
+<head>
+  <!-- Google tag (gtag.js) -->
+<script async src="https://www.googletagmanager.com/gtag/js?id=AW-18112493101"></script>
+<script>
+  window.dataLayer = window.dataLayer || [];
+  function gtag(){dataLayer.push(arguments);}
+  gtag('js', new Date());
+
+  gtag('config', 'AW-18112493101');
+</script>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<title>ORIVEN AI </title>
+<link href="https://fonts.googleapis.com/css2?family=Instrument+Serif:ital@0;1&family=Geist:wght@300;400;500;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="styles.css">
+
+
+
+<!-- Supabase JS v2 CDN -->
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+
+</head>
+<body>
+<!-- Apply saved theme instantly to prevent flash of wrong mode -->
+<script>(function(){try{var s=JSON.parse(localStorage.getItem("oriven_settings")||"{}");if(s.theme!=="light")document.body.classList.add("dark-mode");}catch(_){document.body.classList.add("dark-mode");}}());</script>
+
+<!-- AUTH OVERLAY — visible until user is signed in -->
+<div id="authOverlay" style="position:fixed;inset:0;z-index:9999;background:var(--bg);display:flex;align-items:center;justify-content:center;padding:24px">
+  <div style="width:100%;max-width:420px">
+    <div style="text-align:center;margin-bottom:36px">
+      <div style="display:inline-flex;align-items:center;gap:10px;margin-bottom:10px">
+        <div style="width:38px;height:38px;background:#fff;border:1px solid rgba(0,0,0,.1);border-radius:10px;display:flex;align-items:center;justify-content:center;padding:5px;box-shadow:0 1px 6px rgba(0,0,0,.1)">
+          <img src="assets/orivenlogo.png" alt="ORIVEN" style="width:100%;height:100%;object-fit:contain;display:block">
+        </div>
+        <span style="font-size:19px;font-weight:700;color:var(--charcoal,#18181A)">ORIVEN</span>
+      </div>
+      <div style="font-size:13px;color:var(--muted,#888)">Your AI brand intelligence platform</div>
+    </div>
+    <div style="background:var(--bg2,#F6F3EE);border:1px solid rgba(0,0,0,.08);border-radius:16px;padding:28px 28px 24px">
+      <!-- Tabs -->
+      <div style="display:flex;border-bottom:1px solid rgba(0,0,0,.08);margin-bottom:22px">
+        <div id="authTabSignin" onclick="switchAuthTab('signin')" style="flex:1;text-align:center;padding:7px 0;font-size:13px;font-weight:600;cursor:pointer;color:var(--gm,#1A4229);border-bottom:2px solid var(--gm,#1A4229);margin-bottom:-1px">Sign In</div>
+        <div id="authTabSignup" onclick="switchAuthTab('signup')" style="flex:1;text-align:center;padding:7px 0;font-size:13px;font-weight:500;cursor:pointer;color:var(--muted,#888)">Sign Up</div>
+      </div>
+      <!-- Sign In -->
+      <div id="authSigninForm">
+        <div class="fg"><label class="lbl">Email</label><input class="inp" id="siEmail" type="email" placeholder="you@example.com" autocomplete="email" onkeydown="if(event.key==='Enter')handleSignIn()"></div>
+        <div class="fg"><label class="lbl">Password</label><input class="inp" id="siPass" type="password" placeholder="Your password" autocomplete="current-password" onkeydown="if(event.key==='Enter')handleSignIn()"></div>
+        <div id="authErrorSi" style="font-size:12px;color:#EF4444;margin-bottom:12px;padding:8px 10px;background:rgba(239,68,68,.08);border-radius:8px;display:none"></div>
+        <button id="authSigninBtn" class="btn btn-p" style="width:100%;justify-content:center" onclick="handleSignIn()">Sign In</button>
+      </div>
+      <!-- Sign Up -->
+      <div id="authSignupForm" style="display:none">
+        <div class="fg"><div style="display:grid;grid-template-columns:1fr 1fr;gap:10px"><div><label class="lbl">First name *</label><input class="inp" id="suFirst" placeholder="Jane" autocomplete="given-name"></div><div><label class="lbl">Last name</label><input class="inp" id="suLast" placeholder="Smith" autocomplete="family-name"></div></div></div>
+        <div class="fg"><label class="lbl">Email *</label><input class="inp" id="suEmail" type="email" placeholder="you@example.com" autocomplete="email"></div>
+        <div class="fg"><label class="lbl">Password *</label><input class="inp" id="suPass" type="password" placeholder="Min. 6 characters" autocomplete="new-password" onkeydown="if(event.key==='Enter')handleSignUp()"></div>
+        <div class="fg"><label class="lbl">Phone <span style="font-weight:400;color:var(--muted,#888)">(optional)</span></label><input class="inp" id="suPhone" type="tel" placeholder="+1 234 567 8900" autocomplete="tel"></div>
+        <div id="authErrorSu" style="font-size:12px;color:#EF4444;margin-bottom:12px;padding:8px 10px;background:rgba(239,68,68,.08);border-radius:8px;display:none"></div>
+        <button id="authSignupBtn" class="btn btn-p" style="width:100%;justify-content:center" onclick="handleSignUp()">Create Account</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+
+<!-- AI Corner Orb — appears at step 4 of intro, reused by guide tour -->
+<div id="obCornerOrb">
+  <div style="width:30px;height:30px;background:#fff;border-radius:7px;display:flex;align-items:center;justify-content:center;padding:3px">
+    <img src="assets/orivenlogo.png" alt="ORIVEN" style="width:100%;height:100%;object-fit:contain;display:block">
+  </div>
+</div>
+
+<!-- Guide Tour: orb message bubble (appears above corner orb) -->
+<div id="gtOrbMsg">
+  <span class="gt-orb-dot"></span>
+  <span id="gtOrbMsgText"></span>
+</div>
+
+<!-- Guide Tour: full-screen backdrop (used for centered final step) -->
+<div id="gtBd"></div>
+
+<!-- Guide Tour: spotlight (transparent box with dark shadow around it) -->
+<div id="gtSpot"></div>
+
+<!-- Guide Tour: tooltip card -->
+<div id="gtTip">
+  <div class="gt-tip-head">
+    <div class="gt-tip-icon">
+      <img src="assets/orivenlogo.png" alt="ORIVEN" style="width:100%;height:100%;object-fit:contain;display:block">
+    </div>
+    <span id="gtTipStep" class="gt-tip-step">1 / 6</span>
+    <button class="gt-tip-close" onclick="gtSkipAll()" title="Skip tour">
+      <svg viewBox="0 0 14 14" width="10" height="10" fill="none" stroke="currentColor" stroke-width="2"><path d="M2 2l10 10M12 2L2 12"/></svg>
+    </button>
+  </div>
+  <h3 class="gt-tip-title" id="gtTipTitle"></h3>
+  <p class="gt-tip-body" id="gtTipBody"></p>
+  <ul class="gt-tip-bullets" id="gtTipBullets" style="display:none"></ul>
+  <button class="gt-tip-btn" id="gtTipBtn" onclick="gtAction()"></button>
+  <button id="gtSkipBtn" onclick="gtSkipAll()">Skip tour</button>
+  <div class="gt-progress-dots" id="gtProgressDots">
+    <div class="gt-pdot"></div>
+    <div class="gt-pdot"></div>
+    <div class="gt-pdot"></div>
+    <div class="gt-pdot"></div>
+    <div class="gt-pdot"></div>
+    <div class="gt-pdot"></div>
+  </div>
+</div>
+
+<!-- ── Email verification banner — shown for unverified accounts ── -->
+<div class="verify-banner" id="verifyBanner" style="display:none" role="alert">
+  <svg class="verify-banner-icon" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6" width="16" height="16" aria-hidden="true">
+    <circle cx="10" cy="10" r="8.5"/>
+    <path d="M10 5.5v5" stroke-linecap="round"/>
+    <circle cx="10" cy="14" r=".7" fill="currentColor" stroke="none"/>
+  </svg>
+  <span class="verify-banner-text" id="verifyBannerText">Please verify your email to keep your account active.</span>
+  <button class="verify-banner-resend" id="verifyBannerResend" onclick="resendVerificationEmail()">Resend Email</button>
+  <button class="verify-banner-close" onclick="_hideVerifyBanner()" aria-label="Dismiss verification notice">
+    <svg viewBox="0 0 10 10" width="9" height="9" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M1 1l8 8M9 1L1 9"/></svg>
+  </button>
+</div>
+
+<div class="toast" id="toast"></div>
+<div id="sbOverlay" onclick="closeSidebar()"></div>
+<button id="sbToggle" onclick="toggleSidebar()" aria-label="Menu">
+  <svg viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M2 4.5h14M2 9h14M2 13.5h14"/></svg>
+</button>
+
+<div class="app">
+
+  <!-- SIDEBAR -->
+  <aside class="sb" id="sidebar">
+
+    <!-- TOP: logo + main navigation -->
+    <div class="sb-top">
+      <div class="sb-logo">
+        <div class="logo">
+          <div class="logo-mk">
+            <img src="assets/orivenlogo.png" alt="ORIVEN logo">
+          </div>
+          <span class="logo-name"> <span></span></span>
+        </div>
+      </div>
+      <nav class="sb-nav">
+        <div class="ni active" data-page="dashboard">
+          <svg viewBox="0 0 16 16"><rect x="1" y="1" width="6" height="6" rx="1.5"/><rect x="9" y="1" width="6" height="6" rx="1.5"/><rect x="1" y="9" width="6" height="6" rx="1.5"/><rect x="9" y="9" width="6" height="6" rx="1.5"/></svg>
+          <span>Dashboard</span>
+        </div>
+        <div class="ni" data-page="create">
+          <svg viewBox="0 0 16 16"><circle cx="8" cy="8" r="6.5"/><path d="M8 5v6M5 8h6"/></svg>
+          <span>Create</span>
+        </div>
+        <div class="ni" data-page="studio">
+          <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><path d="M8 1.5l5 2.5v5L8 11.5 3 9V4z"/><path d="M8 11.5v3M3 4l5 2.5 5-2.5M8 6.5v5"/></svg>
+          <span>BrandCore</span>
+        </div>
+        <div class="ni" data-page="inspiration">
+          <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M8 1.5a4 4 0 0 1 1.6 7.67V11H6.4V9.17A4 4 0 0 1 8 1.5z"/><path d="M6.4 12.5h3.2M7 14.5h2" stroke-linecap="round"/></svg>
+          <span>Inspiration</span>
+        </div>
+        <div class="ni" data-page="assistant">
+          <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><path d="M2 11V4a2 2 0 0 1 2-2h8a2 2 0 0 1 2 2v5a2 2 0 0 1-2 2H5.5L2 14V11z"/><path d="M5.5 8h5M5.5 5.5h3"/></svg>
+          <span>Brand Assistant</span>
+        </div>
+        <!-- Team nav — only visible for Business plan (shown by usage.js) -->
+        <div class="ni" data-page="team" id="teamNavItem" style="display:none">
+          <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M11 14v-1.5a3 3 0 0 0-3-3H4a3 3 0 0 0-3 3V14"/><circle cx="6" cy="6" r="2.5"/><path d="M15 14v-1.5a3 3 0 0 0-2-2.83"/><path d="M11 4.13a2.5 2.5 0 0 1 0 4.74"/></svg>
+          <span>Team</span>
+        </div>
+      </nav>
+    </div>
+
+    <!-- BOTTOM: settings → plan → identity — always visible, never clipped -->
+    <div class="sb-bottom">
+
+      <!-- 1 · Settings -->
+      <div class="ni" data-page="settings">
+        <svg viewBox="0 0 16 16"><circle cx="8" cy="8" r="2.5"/><path d="M8 1v2M8 13v2M1 8h2M13 8h2M3 3l1.4 1.4M11.6 11.6L13 13M3 13l1.4-1.4M11.6 4.4L13 3"/></svg>
+        <span>Settings</span>
+      </div>
+
+      <!-- 2 · Plan + usage badge -->
+      <div class="sb-usage-wrap">
+        <div class="sb-plan-row">
+          <span class="sb-plan-label sb-plan-free" id="sbPlanLabel">No Subscription</span>
+        </div>
+        <span class="usage-badge usage-badge-ok" id="usageBadge">&nbsp;</span>
+      </div>
+
+      <!-- 3 · Identity (name, workspace, sign out) -->
+      <div class="sb-ft">
+        <!-- Hidden elements kept for JS compatibility (auth.js + app.js write to these) -->
+        <span id="sidebarUserDot" style="display:none">U</span>
+        <span id="wsDot" style="display:none">W</span>
+        <span id="wsNameDisp" style="display:none">My Workspace</span>
+
+        <!-- Authenticated state — hidden until session confirmed -->
+        <div class="sb-identity" id="sbIdentityAuth" style="display:none">
+          <div class="sb-identity-name" id="sidebarUserName">Account</div>
+          <div class="sb-rank-line" id="sbRankLine" style="display:none">
+            <span class="sb-rank-dot" id="sbRankDot"></span>
+            <span class="sb-rank-name" id="sbRankName"></span>
+          </div>
+          <div class="sb-identity-sub">
+            <div class="sb-identity-sub-row"><span data-i18n="brandWorkspace">Brand Workspace</span></div>
+            <div class="sb-identity-sub-row"><a href="https://orivenai.com" class="sb-signout" style="text-decoration:none">Website</a> &middot; <span class="sb-signout" onclick="authSignOut()" data-i18n="signOut">Sign out</span></div>
+          </div>
+        </div>
+
+        <!-- Guest / unauthenticated state — shown by default -->
+        <div class="sb-identity" id="sbIdentityGuest">
+          <div class="sb-identity-name">Oriven AI</div>
+          <div class="sb-identity-sub"><span class="sb-signout" onclick="if(typeof _showGuestGate==='function'){_showGuestGate();setTimeout(function(){_ggShow('login')},30)}">Sign in</span></div>
+        </div>
+      </div>
+
+    </div>
+
+  </aside>
+
+  <!-- MAIN -->
+  <div class="mc">
+
+    <!-- DASHBOARD -->
+    <div class="page active" id="page-dashboard">
+      <div class="dash-outer">
+
+        <!-- S1: AI STATUS HERO -->
+        <div class="dash-hero-band">
+          <div class="dash-hero-left">
+            <div class="dash-eyebrow">
+              <span class="dash-eyebrow-dot" id="dashEyebrowDot"></span>
+              <span class="dash-eyebrow-txt">ORIVEN Intelligence</span>
+            </div>
+            <h1 class="dash-headline" id="dashHeadline">Your brand is <span class="dash-hl-grad" id="dashHeadlineWord">ready.</span></h1>
+            <p class="dash-status-msg" id="dashStatusMsg">Configure your Brand Core to begin your AI journey.</p>
+            <div class="dash-brand-pill" id="dashBrandPill" style="display:none">
+              <span class="dash-brand-pill-dot"></span>
+              <span class="dash-brand-pill-name" id="dashBrandPillName"></span>
+            </div>
+          </div>
+          <div class="dash-hero-right">
+            <div class="dash-level-display">
+              <div class="dash-level-num" id="dashLevelNum">0%</div>
+              <div class="dash-level-lbl">BrandCore Score</div>
+              <div class="dash-level-bar-track">
+                <div class="dash-level-bar-fill" id="dashLevelFill" style="width:0%"></div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- LOWER: activity + evolution -->
+        <div class="dash-lower">
+          <div class="dash-col-item">
+            <div class="dash-section-hd"><span class="dash-s-eyebrow">Recent Activity</span></div>
+            <div id="dashActivity"></div>
+          </div>
+          <div class="dash-col-item">
+            <div class="dash-section-hd"><span class="dash-s-eyebrow">BrandCore Score</span></div>
+            <div id="dashIntelLevel"></div>
+          </div>
+        </div>
+
+        <!-- STATS ROW -->
+        <div class="dash-stats-row" id="dashStatsRow"></div>
+
+        <!-- Legacy compatibility -->
+        <div id="dashBrandBadge" style="display:none"></div>
+        <div id="dashSnapshot" style="display:none"></div>
+
+      </div>
+    </div>
+
+    <!-- CREATE -->
+    <div class="page" id="page-create">
+      <div class="cr-outer">
+
+        <!-- HERO -->
+        <div class="cr-hero">
+          <div class="cr-hero-glow"></div>
+          <div class="cr-eyebrow">
+            <span class="cr-eyebrow-dot" id="crEyebrowDot"></span>
+            <span class="cr-eyebrow-txt">Create System</span>
+          </div>
+          <h1 class="cr-headline">
+            <span data-i18n="createH1Line1">What will you</span><br>
+            <em data-i18n="createH1Line2">create today?</em>
+          </h1>
+          <p class="cr-sub" data-i18n="createSub">Your Brand Core shapes every output.</p>
+        </div>
+
+        <!-- CREATION ECOSYSTEM -->
+        <div class="cr-grid">
+
+          <div class="cr-card cr-card-ugc" onclick="openAIFlow('ugc')">
+            <div class="cr-card-top">
+              <div class="cr-card-ico">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round">
+                  <rect x="2" y="5" width="15" height="14" rx="3"/>
+                  <path d="M17 9.5l5-2.5v10l-5-2.5"/>
+                </svg>
+              </div>
+              <div class="cr-card-top-meta">
+                <span class="cr-card-tag">Video Production</span>
+                <span class="cr-credit-badge" title="Credits are used to generate content. Complex outputs use more credits.">10 Credits</span>
+              </div>
+            </div>
+            <div class="cr-card-body">
+              <div class="cr-card-title">UGC Creator</div>
+              <div class="cr-card-desc">Deploy AI creators for high-converting video ads. Real scripts, brand-aware, ready to launch.</div>
+            </div>
+            <div class="cr-card-foot">
+              <div class="cr-card-chips">
+                <span class="cr-card-chip">AI Scripted</span>
+                <span class="cr-card-chip">Brand Aware</span>
+              </div>
+              <div class="cr-card-arrow"><svg viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M2 6h8M7 3l3 3-3 3"/></svg></div>
+            </div>
+          </div>
+
+          <div class="cr-card cr-card-campaign" onclick="openAIFlow('campaign')">
+            <div class="cr-card-top">
+              <div class="cr-card-ico">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round">
+                  <path d="M3 19l4.5-10 4 7 2.5-4 5 7"/>
+                  <circle cx="7.5" cy="9" r="1.5" fill="currentColor" stroke="none"/>
+                  <path d="M3 23h18"/>
+                </svg>
+              </div>
+              <div class="cr-card-top-meta">
+                <span class="cr-card-tag">Campaign Builder</span>
+                <span class="cr-credit-badge" title="Credits are used to generate content. Complex outputs use more credits.">1 Credit</span>
+              </div>
+            </div>
+            <div class="cr-card-body">
+              <div class="cr-card-title" data-i18n="campaignTitle">Campaign</div>
+              <div class="cr-card-desc" data-i18n="campaignDesc">Launch multi-platform brand campaigns end to end. Visuals, copy, strategy — built together.</div>
+            </div>
+            <div class="cr-card-foot">
+              <div class="cr-card-chips">
+                <span class="cr-card-chip">Multi-Channel</span>
+                <span class="cr-card-chip">AI Built</span>
+              </div>
+              <div class="cr-card-arrow"><svg viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M2 6h8M7 3l3 3-3 3"/></svg></div>
+            </div>
+          </div>
+
+          <div class="cr-card cr-card-image" onclick="openAIFlow('image')">
+            <div class="cr-card-top">
+              <div class="cr-card-ico">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+                  <rect x="3" y="3" width="18" height="18" rx="3.5"/>
+                  <circle cx="8.5" cy="8.5" r="2"/>
+                  <path d="M3 16l5.5-5.5 4 4 3-3 5 5"/>
+                </svg>
+              </div>
+              <div class="cr-card-top-meta">
+                <span class="cr-card-tag">Visual Generation</span>
+                <span class="cr-credit-badge" title="Credits are used to generate content. Complex outputs use more credits.">1 Credit</span>
+              </div>
+            </div>
+            <div class="cr-card-body">
+              <div class="cr-card-title" data-i18n="imageTitle">Visuals</div>
+              <div class="cr-card-desc" data-i18n="imageDesc">On-brand images, ads, and social media designs.</div>
+            </div>
+            <div class="cr-card-foot">
+              <div class="cr-card-chips">
+                <span class="cr-card-chip">On-Brand</span>
+                <span class="cr-card-chip">AI Generated</span>
+              </div>
+              <div class="cr-card-arrow"><svg viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M2 6h8M7 3l3 3-3 3"/></svg></div>
+            </div>
+          </div>
+
+          <div class="cr-card cr-card-text" onclick="openAIFlow('text')">
+            <div class="cr-card-top">
+              <div class="cr-card-ico">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round">
+                  <path d="M4 6h16M4 12h10M4 18h13"/>
+                </svg>
+              </div>
+              <div class="cr-card-top-meta">
+                <span class="cr-card-tag">Brand Copy</span>
+                <span class="cr-credit-badge" title="Credits are used to generate content. Complex outputs use more credits.">1 Credit</span>
+              </div>
+            </div>
+            <div class="cr-card-body">
+              <div class="cr-card-title" data-i18n="textTitle">Text & Copy</div>
+              <div class="cr-card-desc" data-i18n="textDesc">Headlines, captions, and brand voice copy.</div>
+            </div>
+            <div class="cr-card-foot">
+              <div class="cr-card-chips">
+                <span class="cr-card-chip">Brand Voice</span>
+                <span class="cr-card-chip">AI Written</span>
+              </div>
+              <div class="cr-card-arrow"><svg viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M2 6h8M7 3l3 3-3 3"/></svg></div>
+            </div>
+          </div>
+
+          <div class="cr-card cr-card-web" onclick="openAIFlow('web')">
+            <div class="cr-card-top">
+              <div class="cr-card-ico">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+                  <rect x="2" y="3" width="20" height="15" rx="3"/>
+                  <path d="M2 7.5h20"/>
+                  <path d="M9 22h6M12 18v4"/>
+                </svg>
+              </div>
+              <div class="cr-card-top-meta">
+                <span class="cr-card-tag">Web & Pages</span>
+                <span class="cr-credit-badge" title="Credits are used to generate content. Complex outputs use more credits.">3 Credits</span>
+              </div>
+            </div>
+            <div class="cr-card-body">
+              <div class="cr-card-title" data-i18n="webTitle">Web</div>
+              <div class="cr-card-desc" data-i18n="webDesc">Brand-aligned landing pages and web assets.</div>
+            </div>
+            <div class="cr-card-foot">
+              <div class="cr-card-chips">
+                <span class="cr-card-chip">Brand Aligned</span>
+                <span class="cr-card-chip">AI Built</span>
+              </div>
+              <div class="cr-card-arrow"><svg viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M2 6h8M7 3l3 3-3 3"/></svg></div>
+            </div>
+          </div>
+
+          <div class="cr-card cr-card-email" onclick="openAIFlow('email')">
+            <div class="cr-card-top">
+              <div class="cr-card-ico">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round">
+                  <rect x="2" y="4" width="20" height="16" rx="2"/>
+                  <path d="M2 8l10 7 10-7"/>
+                </svg>
+              </div>
+              <div class="cr-card-top-meta">
+                <span class="cr-card-tag">Email Marketing</span>
+                <span class="cr-credit-badge" title="Credits are used to generate content. Complex outputs use more credits.">2 Credits</span>
+              </div>
+            </div>
+            <div class="cr-card-body">
+              <div class="cr-card-title">Email Designer</div>
+              <div class="cr-card-desc">Branded email campaigns — newsletters, launches, and promotions.</div>
+            </div>
+            <div class="cr-card-foot">
+              <div class="cr-card-chips">
+                <span class="cr-card-chip">Brand Aware</span>
+                <span class="cr-card-chip">AI Written</span>
+              </div>
+              <div class="cr-card-arrow"><svg viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M2 6h8M7 3l3 3-3 3"/></svg></div>
+            </div>
+          </div>
+
+          <div class="cr-card cr-card-deck" onclick="openAIFlow('deck')">
+            <div class="cr-card-top">
+              <div class="cr-card-ico">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round">
+                  <rect x="2" y="3" width="20" height="13" rx="2"/>
+                  <path d="M6 8h12M6 12h8"/>
+                  <path d="M9 21h6M12 16v5"/>
+                </svg>
+              </div>
+              <div class="cr-card-top-meta">
+                <span class="cr-card-tag">Presentations</span>
+                <span class="cr-credit-badge" title="Credits are used to generate content. Complex outputs use more credits.">4 Credits</span>
+              </div>
+            </div>
+            <div class="cr-card-body">
+              <div class="cr-card-title">Presentation</div>
+              <div class="cr-card-desc">Pitch decks, investor decks, and brand presentations.</div>
+            </div>
+            <div class="cr-card-foot">
+              <div class="cr-card-chips">
+                <span class="cr-card-chip">Brand Voice</span>
+                <span class="cr-card-chip">AI Built</span>
+              </div>
+              <div class="cr-card-arrow"><svg viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M2 6h8M7 3l3 3-3 3"/></svg></div>
+            </div>
+          </div>
+
+          <div class="cr-card cr-card-poster" onclick="openAIFlow('poster')">
+            <div class="cr-card-top">
+              <div class="cr-card-ico">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round">
+                  <rect x="3" y="2" width="18" height="20" rx="2"/>
+                  <rect x="6" y="5" width="12" height="8" rx="1"/>
+                  <path d="M6 17h12M6 20h8"/>
+                </svg>
+              </div>
+              <div class="cr-card-top-meta">
+                <span class="cr-card-tag">Print & Digital</span>
+                <span class="cr-credit-badge" title="Credits are used to generate content. Complex outputs use more credits.">2 Credits</span>
+              </div>
+            </div>
+            <div class="cr-card-body">
+              <div class="cr-card-title">Poster Generator</div>
+              <div class="cr-card-desc">High-impact branded posters for launches, events, and promotions.</div>
+            </div>
+            <div class="cr-card-foot">
+              <div class="cr-card-chips">
+                <span class="cr-card-chip">Brand Aligned</span>
+                <span class="cr-card-chip">AI Designed</span>
+              </div>
+              <div class="cr-card-arrow"><svg viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M2 6h8M7 3l3 3-3 3"/></svg></div>
+            </div>
+          </div>
+
+          <div class="cr-card cr-card-infographic" onclick="openAIFlow('infographic')">
+            <div class="cr-card-top">
+              <div class="cr-card-ico">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round">
+                  <rect x="2" y="5" width="5" height="16" rx="1.5"/>
+                  <rect x="9.5" y="9" width="5" height="12" rx="1.5"/>
+                  <rect x="17" y="2" width="5" height="19" rx="1.5"/>
+                </svg>
+              </div>
+              <div class="cr-card-top-meta">
+                <span class="cr-card-tag">Data &amp; Visual</span>
+                <span class="cr-credit-badge" title="Credits are used to generate content. Complex outputs use more credits.">2 Credits</span>
+              </div>
+            </div>
+            <div class="cr-card-body">
+              <div class="cr-card-title">Infographic</div>
+              <div class="cr-card-desc">Data-driven visuals for processes, comparisons, and statistics.</div>
+            </div>
+            <div class="cr-card-foot">
+              <div class="cr-card-chips">
+                <span class="cr-card-chip">Brand Aligned</span>
+                <span class="cr-card-chip">AI Designed</span>
+              </div>
+              <div class="cr-card-arrow"><svg viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M2 6h8M7 3l3 3-3 3"/></svg></div>
+            </div>
+          </div>
+
+        </div>
+
+        <!-- HORIZON — Coming Soon -->
+        <div class="cr-horizon">
+          <div class="cr-horizon-hd">On the Horizon</div>
+          <div class="cr-horizon-list">
+
+            <div class="cr-hor-item cr-hor-video">
+              <div class="cr-hor-ico">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+                  <rect x="2" y="5" width="20" height="14" rx="2"/>
+                  <polygon points="10 9 10 15 16 12" fill="currentColor" stroke="none"/>
+                  <path d="M2 9h2M2 12h2M2 15h2M20 9h2M20 12h2M20 15h2"/>
+                </svg>
+              </div>
+              <div class="cr-hor-body">
+                <div class="cr-hor-title">Video Ads</div>
+                <div class="cr-hor-sub">Cinematic brand advertising</div>
+              </div>
+              <span class="cr-hor-badge">Soon</span>
+            </div>
+
+            <div class="cr-hor-item cr-hor-motion">
+              <div class="cr-hor-ico">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+                  <polygon points="5 3 19 12 5 21 5 3"/>
+                  <path d="M19 12h4M19 8V4M19 20v-4"/>
+                </svg>
+              </div>
+              <div class="cr-hor-body">
+                <div class="cr-hor-title">Motion Graphics</div>
+                <div class="cr-hor-sub">Animations & logo motion</div>
+              </div>
+              <span class="cr-hor-badge">Soon</span>
+            </div>
+
+            <div class="cr-hor-item cr-hor-shoots">
+              <div class="cr-hor-ico">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+                  <path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"/>
+                  <circle cx="12" cy="13" r="4"/>
+                </svg>
+              </div>
+              <div class="cr-hor-body">
+                <div class="cr-hor-title">Product Shoots</div>
+                <div class="cr-hor-sub">AI product photography</div>
+              </div>
+              <span class="cr-hor-badge">Soon</span>
+            </div>
+
+          </div>
+        </div>
+
+      </div>
+    </div>
+
+    <!-- CREATE WORKSPACE -->
+    <div class="page" id="page-create-workspace">
+      <div class="cws-header" id="cwsHeader">
+        <div class="cws-back" onclick="navigate('create')">
+          <svg viewBox="0 0 16 16"><path d="M10 3L5 8l5 5"/></svg>
+          <span>Create</span>
+        </div>
+        <div style="width:1px;height:18px;background:var(--border)"></div>
+        <div class="cws-type-badge" id="cwsTypeBadge">
+          <svg viewBox="0 0 16 16" id="cwsTypeIcon" width="14" height="14" fill="none" stroke-width="1.8"></svg>
+          <span id="cwsTypeLabel">Image</span>
+        </div>
+        <div style="font-size:12px;color:var(--muted);margin-left:4px" id="cwsContext"></div>
+      </div>
+      <div class="chat-shell">
+        <div class="chat-feed" id="cwsFeed"></div>
+
+        <!-- ── Image configurator — visible only in image mode ── -->
+        <div class="img-cfg" id="imgCfg" style="display:none">
+          <div class="img-cfg-row">
+            <span class="img-cfg-lbl">Type</span>
+            <div class="img-type-pills" id="imgTypePills">
+              <button class="img-pill active" data-itype="visual" onclick="imgSelectType('visual')">Visuals</button>
+              <button class="img-pill" data-itype="poster" onclick="imgSelectType('poster')">Posters</button>
+              <button class="img-pill" data-itype="social" onclick="imgSelectType('social')">Social Media</button>
+            </div>
+          </div>
+          <div class="img-cfg-row">
+            <span class="img-cfg-lbl">Format</span>
+            <div class="img-format-pills" id="imgFormatPills">
+              <!-- populated by imgSelectType() -->
+            </div>
+          </div>
+        </div>
+
+        <!-- ── Ads configurator — visible only in ads mode ── -->
+        <div class="img-cfg" id="adsCfg" style="display:none">
+          <div class="img-cfg-row">
+            <span class="img-cfg-lbl">Format</span>
+            <div class="img-format-pills" id="adsFormatPills">
+              <button class="img-pill active" data-afmt="meta_feed" onclick="adsSelectFormat('meta_feed')">Meta Feed<span class="img-pill-hint">4:5</span></button>
+              <button class="img-pill" data-afmt="square" onclick="adsSelectFormat('square')">Square<span class="img-pill-hint">1:1</span></button>
+              <button class="img-pill" data-afmt="story" onclick="adsSelectFormat('story')">Story / Reel<span class="img-pill-hint">9:16</span></button>
+              <button class="img-pill" data-afmt="tiktok" onclick="adsSelectFormat('tiktok')">TikTok<span class="img-pill-hint">9:16</span></button>
+              <button class="img-pill" data-afmt="youtube" onclick="adsSelectFormat('youtube')">YouTube<span class="img-pill-hint">16:9</span></button>
+            </div>
+          </div>
+        </div>
+
+        <!-- ── Campaign configurator — visible only in campaign mode ── -->
+        <div class="img-cfg" id="campCfg" style="display:none">
+          <div class="img-cfg-row">
+            <span class="img-cfg-lbl">Pack</span>
+            <div class="img-format-pills" id="campPackPills">
+              <button class="img-pill active" data-cpack="meta" onclick="campaignSelectPack('meta')">Meta Campaign<span class="img-pill-hint">Feed · Story · Square</span></button>
+              <button class="img-pill" data-cpack="social" onclick="campaignSelectPack('social')">Social Launch<span class="img-pill-hint">Story · Post · Thumb</span></button>
+              <button class="img-pill" data-cpack="vertical" onclick="campaignSelectPack('vertical')">Vertical Content<span class="img-pill-hint">Reel · TikTok</span></button>
+              <button class="img-pill" data-cpack="full" onclick="campaignSelectPack('full')">Full Campaign<span class="img-pill-hint">4 formats</span></button>
+            </div>
+          </div>
+        </div>
+
+        <!-- ── Video configurator — visible only in video mode ── -->
+        <div class="img-cfg" id="vidCfg" style="display:none">
+          <div class="img-cfg-row">
+            <span class="img-cfg-lbl">Format</span>
+            <div class="img-format-pills" id="vidFormatPills">
+              <button class="img-pill active" data-vfmt="short_vertical" onclick="videoSelectFormat('short_vertical')">Short Vertical<span class="img-pill-hint">9:16 · 15–30s</span></button>
+              <button class="img-pill" data-vfmt="standard_ad" onclick="videoSelectFormat('standard_ad')">Standard Ad<span class="img-pill-hint">16:9 · 15–30s</span></button>
+              <button class="img-pill" data-vfmt="square_promo" onclick="videoSelectFormat('square_promo')">Square Promo<span class="img-pill-hint">1:1 · 15–30s</span></button>
+              <button class="img-pill" data-vfmt="hook_bumper" onclick="videoSelectFormat('hook_bumper')">Hook / Bumper<span class="img-pill-hint">6s</span></button>
+              <button class="img-pill" data-vfmt="tiktok_reel" onclick="videoSelectFormat('tiktok_reel')">TikTok / Reel<span class="img-pill-hint">9:16 · 15–60s</span></button>
+            </div>
+          </div>
+        </div>
+
+        <!-- ── Text configurator — visible only in text mode ── -->
+        <div class="img-cfg" id="txtCfg" style="display:none">
+          <div class="img-cfg-row">
+            <span class="img-cfg-lbl">Type</span>
+            <div class="img-format-pills" id="txtTypePills">
+              <button class="img-pill active" data-ttype="headlines"    onclick="textSelectType('headlines')">Headlines</button>
+              <button class="img-pill"         data-ttype="body_copy"   onclick="textSelectType('body_copy')">Body Copy</button>
+              <button class="img-pill"         data-ttype="captions"    onclick="textSelectType('captions')">Captions</button>
+              <button class="img-pill"         data-ttype="hooks"       onclick="textSelectType('hooks')">Hooks</button>
+              <button class="img-pill"         data-ttype="product_desc" onclick="textSelectType('product_desc')">Product Descriptions</button>
+              <button class="img-pill"         data-ttype="ad_copy"     onclick="textSelectType('ad_copy')">Ad Copy</button>
+            </div>
+          </div>
+        </div>
+
+        <div class="chat-input-area">
+          <div class="chat-controls" id="cwsControls">
+            <select class="chat-ctrl-sel" id="cwsOutType">
+              <option value="auto">Auto-detect</option>
+              <option value="poster">Poster</option>
+              <option value="instagram">Instagram Post</option>
+              <option value="headline">Headlines</option>
+              <option value="copy">Brand Copy</option>
+              <option value="caption">Caption</option>
+              <option value="ad_copy">Ad Ideas</option>
+              <option value="campaign">Campaign Ideas</option>
+            </select>
+            <select class="chat-ctrl-sel" id="cwsFormat">
+              <option>Square</option><option>Portrait</option>
+              <option>Story</option><option>Landscape</option>
+            </select>
+            <select class="chat-ctrl-sel" id="cwsTone">
+              <option>Premium</option><option>Bold</option>
+              <option>Minimal</option><option>Warm</option><option>Modern</option>
+            </select>
+          </div>
+          <div class="chat-input-box">
+            <textarea id="cwsInput" rows="1" placeholder="Describe what you want to create…"></textarea>
+            <button class="chat-send" onclick="sendCWS()">
+              <svg viewBox="0 0 16 16"><path d="M14 8L2 2l2.5 6L2 14l12-6z"/></svg>
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ASSISTANT (was AI Chat) -->
+    <div class="page" id="page-aichat">
+      <div class="chat-shell">
+        <div class="chat-feed" id="chatFeed"></div>
+        <div class="chat-input-area">
+          <div class="chat-controls">
+            <select class="chat-ctrl-sel" id="chatOutType">
+              <option value="auto">Auto-detect</option>
+              <option value="poster">Poster</option>
+              <option value="instagram">Instagram Post</option>
+              <option value="headline">Headlines</option>
+              <option value="copy">Brand Copy</option>
+              <option value="caption">Caption</option>
+              <option value="ad_copy">Ad Ideas</option>
+              <option value="campaign">Campaign Ideas</option>
+            </select>
+            <select class="chat-ctrl-sel">
+              <option>Square</option><option>Portrait</option>
+              <option>Story</option><option>Landscape</option>
+            </select>
+            <select class="chat-ctrl-sel">
+              <option>Premium</option><option>Bold</option>
+              <option>Minimal</option><option>Warm</option><option>Modern</option>
+            </select>
+          </div>
+          <div class="chat-input-box">
+            <textarea id="chatInput" rows="1" placeholder="Ask your brand assistant anything — refine ideas, get guidance, or ask questions…"></textarea>
+            <button class="chat-send" onclick="sendChat()">
+              <svg viewBox="0 0 16 16"><path d="M14 8L2 2l2.5 6L2 14l12-6z"/></svg>
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- STUDIO -->
+    <div class="page" id="page-studio">
+
+      <!-- ════════════════════════════════════════════════════════
+           BRANDCORE PROFILE — premium living brand system
+           ════════════════════════════════════════════════════════ -->
+      <div class="bcp-scroll" id="studioHubView">
+
+        <!-- ── EMPTY STATE ── -->
+        <div class="bcp-empty" id="stBCEmpty2">
+          <div class="bcp-empty-orb">
+            <svg viewBox="0 0 24 24" fill="none" stroke="#B7FF2A" stroke-width="1.2" stroke-linecap="round"><path d="M12 2l2.5 5.5L20 9l-4 3.9 1 5.6L12 16l-5 2.5 1-5.6L4 9l5.5-1.5L12 2z"/></svg>
+          </div>
+          <div class="bcp-empty-title">Your BrandCore is <em>empty.</em></div>
+          <div class="bcp-empty-sub">Answer a few questions and ORIVEN will build your complete brand identity system — colors, typography, personality, tone, and more.</div>
+          <div class="bcp-empty-actions">
+            <button class="bcp-btn-primary" onclick="openBCWizard()">
+              <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" width="14" height="14"><path d="M8 1l1.5 4H14l-3.8 2.8 1.4 4.3L8 9.8l-3.6 2.3 1.4-4.3L2 5h4.5z"/></svg>
+              Generate with AI
+            </button>
+            <button class="bcp-btn-ghost" onclick="openModal('modal-bcsetup')">Build Manually</button>
+          </div>
+        </div>
+
+        <!-- ── BRAND PROFILE (shown when BC is configured) ── -->
+        <div class="bcp-profile" id="bcProfileContent" style="display:none">
+
+          <!-- SECTION 1: Brand Header -->
+          <div class="bcp-header">
+            <div class="bcp-hdr-left">
+              <div class="bcp-eyebrow">
+                <span class="bcp-eyebrow-dot" id="stEyebrowDot"></span>
+                <span>BrandCore</span>
+              </div>
+              <div class="bcp-brand-name" id="bcProfileName">—</div>
+              <div class="bcp-brand-tagline" id="bcProfileTagline"></div>
+            </div>
+            <div class="bcp-hdr-right">
+              <div class="bcp-score-block">
+                <div class="bcp-score-num" id="stLevelBadge">0%</div>
+                <div class="bcp-score-lbl">BrandCore Score</div>
+                <div class="bcp-score-bar-track">
+                  <div class="bcp-score-bar-fill" id="stIlFill" style="width:0%"></div>
+                </div>
+                <div class="bcp-score-msg" id="stIlMsg"></div>
+              </div>
+              <div class="bcp-hdr-actions">
+                <button class="bcp-action-btn" onclick="switchStudioTab('check')">Brand Check</button>
+                <button class="bcp-action-btn bcp-action-btn-primary" onclick="openModal('modal-bc-regen')">Regenerate</button>
+              </div>
+            </div>
+          </div>
+
+          <!-- SECTION 2: Color System -->
+          <div class="bcp-section">
+            <div class="bcp-section-hd">
+              <div class="bcp-section-label">Color System</div>
+            </div>
+            <div class="bcp-colors" id="bcProfileColors"></div>
+          </div>
+
+          <!-- SECTION 3: Typography -->
+          <div class="bcp-section">
+            <div class="bcp-section-hd">
+              <div class="bcp-section-label">Typography</div>
+            </div>
+            <div class="bcp-typo-grid" id="bcProfileTypo"></div>
+          </div>
+
+          <!-- SECTION 4 + 5: Personality & Tone — side by side -->
+          <div class="bcp-row-2">
+
+            <div class="bcp-section bcp-section-half">
+              <div class="bcp-section-hd">
+                <div class="bcp-section-label">Brand Personality</div>
+              </div>
+              <div class="bcp-personality" id="bcProfilePersonality"></div>
+            </div>
+
+            <div class="bcp-section bcp-section-half">
+              <div class="bcp-section-hd">
+                <div class="bcp-section-label">Tone of Voice</div>
+              </div>
+              <div class="bcp-tone-card" id="bcProfileTone"></div>
+            </div>
+
+          </div>
+
+          <!-- SECTION 6: Positioning -->
+          <div class="bcp-section">
+            <div class="bcp-section-hd">
+              <div class="bcp-section-label">Positioning</div>
+            </div>
+            <div class="bcp-statement-card" id="bcProfilePositioning"></div>
+          </div>
+
+          <!-- SECTION 7: Target Audience -->
+          <div class="bcp-section">
+            <div class="bcp-section-hd">
+              <div class="bcp-section-label">Target Audience</div>
+            </div>
+            <div class="bcp-audience-card" id="bcProfileAudience"></div>
+          </div>
+
+          <!-- SECTION 8: Visual Direction -->
+          <div class="bcp-section">
+            <div class="bcp-section-hd">
+              <div class="bcp-section-label">Visual Direction</div>
+            </div>
+            <div class="bcp-visual-block" id="bcProfileVisual"></div>
+            <!-- Moodboard / Reference Images -->
+            <div class="bcp-moodboard" id="bcProfileMoodboard">
+              <div class="bcp-mood-label">Visual References &amp; Moodboard</div>
+              <div class="bcp-mood-grid" id="bcMoodGrid"></div>
+              <button class="bcp-mood-add" onclick="bcAddVisualRef()">
+                <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" width="13" height="13"><path d="M8 2v12M2 8h12"/></svg>
+                Add Reference Image
+              </button>
+              <input type="file" id="bcMoodInput" accept="image/*" multiple style="display:none" onchange="bcHandleMoodUpload(this)">
+            </div>
+          </div>
+
+          <!-- SECTION 9: Logo System -->
+          <div class="bcp-section">
+            <div class="bcp-section-hd">
+              <div class="bcp-section-label">Logo System</div>
+              <button class="bcp-section-act" onclick="openLogoAIModal()">Generate with AI</button>
+            </div>
+            <div class="bcp-logos" id="bcProfileLogos"></div>
+          </div>
+
+          <!-- stQaAssets kept hidden for JS compat -->
+          <div style="display:none" id="stQaAssets"></div>
+
+        </div><!-- /bcp-profile -->
+
+        <!-- Hidden legacy elements still referenced by studio.js refresh functions -->
+        <div style="display:none">
+          <div id="stIlNum"></div><div id="stIlBarLbl"></div><div id="stIlBarVal"></div>
+          <div id="stIlAttrs"></div><div id="stBCGrid"></div>
+          <div id="stLevelNum"></div>
+        </div>
+
+      </div><!-- /bcp-scroll -->
+
+      <!-- ── Panel overlay (fixed over full app when active) ── -->
+      <div class="sh-panel-view hidden" id="studioPanelView">
+        <div class="sh-panel-header">
+          <button class="sh-back-btn" onclick="showStudioHub()">
+            <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M10 4L6 8l4 4"/></svg>
+            <span data-i18n="studioBackBtn">Back</span>
+          </button>
+          <span class="sh-panel-title" id="studioPanelTitle">BrandCore</span>
+        </div>
+
+          <!-- ── SAVED ── -->
+          <div class="studio-panel active" id="tab-saved">
+            <div class="saved-panel">
+              <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:18px">
+                <div style="font-size:14px;font-weight:600;color:var(--charcoal)" data-i18n="savedAssetsHeader">Saved Assets</div>
+                <span class="badge bg-grey" id="savedCount">0 items</span>
+              </div>
+              <div class="asset-grid" id="assetGrid"></div>
+              <div class="empty" id="assetEmpty">
+                <div class="empty-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="3" y="5" width="18" height="14" rx="2"/><path d="M3 11h18"/></svg></div>
+                <div class="empty-ttl" data-i18n="noItems">No saved assets yet</div>
+                <div class="empty-sub" data-i18n="createContent">Generate content in AI Chat and save it here.</div>
+                <button class="btn btn-p btn-sm" onclick="navigate('aichat')" data-i18n="openAIChatBtn">Open AI Chat</button>
+              </div>
+            </div>
+          </div>
+
+          <!-- ── BRAND CORE ── -->
+          <div class="studio-panel" id="tab-brandcore">
+            <div id="stBCEmpty" style="padding:24px">
+              <div class="empty">
+                <div class="empty-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M12 2l2.5 5.5L20 9l-4 3.9 1 5.6L12 16l-5 2.5 1-5.6L4 9l5.5-1.5L12 2z"/></svg></div>
+                <div class="empty-ttl" data-i18n="noBCConfigured">No Brand Core configured yet</div>
+                <div class="empty-sub" data-i18n="noBCConfiguredSub">Set up your brand identity to unlock AI generation.</div>
+                <div style="display:flex;gap:8px">
+                  <button class="btn btn-g" onclick="openBCWizard()" data-i18n="aiGenerateBtn">AI Generate</button>
+                  <button class="btn btn-p" onclick="openModal('modal-bcsetup')" data-i18n="manualSetupBtn">Manual Setup</button>
+                </div>
+              </div>
+            </div>
+            <div id="stBCContent" class="hidden" style="padding:20px;overflow-y:auto">
+              <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px">
+                <div style="font-size:14px;font-weight:600;color:var(--charcoal)">Brand Core</div>
+                <div style="display:flex;gap:8px">
+                  <button class="btn btn-g btn-sm" onclick="openBCRegen()">Regenerate</button>
+                  <button class="btn btn-p btn-sm" onclick="openAddColorModal()">+ Color</button>
+                </div>
+              </div>
+              <div class="bcs"><div class="bcs-hd"><div class="bcs-ttl">Colors</div><button class="btn btn-g btn-sm" onclick="openAddColorModal()">+ Add</button></div><div class="sw-list" id="stColorSwatches"></div></div>
+              <div class="bcs"><div class="bcs-hd"><div class="bcs-ttl">Typography</div></div><div id="stTypoList"></div></div>
+              <div class="bcs">
+                <div class="bcs-hd">
+                  <div class="bcs-ttl">Logos</div>
+                  <button class="btn btn-g btn-sm" onclick="openLogoAIModal()">Generate with AI</button>
+                </div>
+                <div class="logo-mgmt-grid" id="stLogoGrid"></div>
+              </div>
+              <div class="bcs">
+                <div class="bcs-hd"><div class="bcs-ttl">Tone of Voice</div></div>
+                <div style="margin-bottom:10px"><div class="sec-lbl" style="margin-bottom:6px">Voice Attributes</div><div id="stToneTags"></div></div>
+                <div class="hr"></div>
+                <div class="g2" style="margin-top:10px">
+                  <div><div class="sec-lbl" style="margin-bottom:6px">Use</div><div id="stWordsUse"></div></div>
+                  <div><div class="sec-lbl" style="margin-bottom:6px">Avoid</div><div id="stWordsAvoid"></div></div>
+                </div>
+              </div>
+              <div class="bcs"><div class="bcs-hd"><div class="bcs-ttl">Positioning</div></div><div class="g3" id="stPosGrid"></div></div>
+            </div>
+          </div>
+
+          <!-- ── BRAND CHECK ── -->
+          <div class="studio-panel" id="tab-check">
+            <div class="check-outer">
+
+              <!-- Idle state — shown when no BrandCore or after reset -->
+              <div class="bc-idle" id="ckIdle">
+                <div class="bc-idle-ico">
+                  <svg viewBox="0 0 32 32" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" width="28" height="28"><path d="M16 3l10 5v9c0 6.5-4.5 11-10 13C10.5 28 6 23.5 6 17V8l10-5z"/><path d="M11 16.5l3.5 3.5 7-7"/></svg>
+                </div>
+                <div class="bc-idle-ttl">Brand Health Check</div>
+                <div class="bc-idle-sub">A complete strategic analysis of your BrandCore — strengths, opportunities, and your Brand Score.</div>
+                <button class="btn btn-p" onclick="startBrandCheck(true)" style="gap:8px">
+                  <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" width="13" height="13"><path d="M8 1.5l5 2.5v5L8 11.5 3 9V4z"/><path d="M8 11.5v3M3 4l5 2.5 5-2.5M8 6.5v5"/></svg>
+                  Analyze Brand
+                </button>
+              </div>
+
+              <!-- Analysis animation -->
+              <div class="bc-analyzing hidden" id="ckAnalyzing">
+                <div class="bc-analyze-hd">
+                  <div class="bc-analyze-orb"></div>
+                  <div class="bc-analyze-ttl">Analyzing Brand Intelligence</div>
+                  <div class="bc-analyze-sub" id="ckAnalyzeSub">Running comprehensive audit…</div>
+                </div>
+                <div class="bc-steps" id="ckSteps"></div>
+              </div>
+
+              <!-- Results -->
+              <div class="scd hidden" id="ckScore"></div>
+
+            </div>
+          </div>
+
+      </div><!-- /sh-panel-view -->
+    </div>
+
+    <!-- BRAND CORE -->
+    <div class="page" id="page-brandcore">
+      <div class="ph" style="display:flex;align-items:flex-start;justify-content:space-between">
+        <div><div class="ph-ttl">Brand Core</div><div class="ph-sub">Your living brand identity — the source of truth for all generated content.</div></div>
+        <div style="display:flex;gap:8px"><button class="btn btn-g btn-sm" onclick="openBCWizard()">AI Generate</button><button class="btn btn-p btn-sm" onclick="openModal('modal-bcsetup')">Manual Setup</button></div>
+      </div>
+      <div id="bcEmpty">
+        <div class="empty">
+          <div class="empty-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M12 2l2.5 5.5L20 9l-4 3.9 1 5.6L12 16l-5 2.5 1-5.6L4 9l5.5-1.5L12 2z"/></svg></div>
+          <div class="empty-ttl">No Brand Core configured yet</div>
+          <div class="empty-sub">Set up your brand identity to unlock AI Chat generation, Brand Check, and more.</div>
+          <div style="display:flex;gap:8px"><button class="btn btn-g" onclick="openBCWizard()">AI Generate</button><button class="btn btn-p" onclick="openModal('modal-bcsetup')">Manual Setup</button></div>
+        </div>
+      </div>
+      <div id="bcContent" class="hidden">
+        <div class="bcs"><div class="bcs-hd"><div class="bcs-ttl">Brand Colors</div><button class="btn btn-g btn-sm" onclick="openAddColorModal()">+ Add Color</button></div><div class="sw-list" id="colorSwatches"></div></div>
+        <div class="bcs"><div class="bcs-hd"><div class="bcs-ttl">Typography</div><button class="btn btn-g btn-sm" onclick="toast('Typography editor coming soon','warn')">Edit</button></div><div id="typoList"></div></div>
+        <div class="bcs">
+          <div class="bcs-hd">
+            <div class="bcs-ttl">Logo System</div>
+            <div style="display:flex;gap:8px">
+              <button class="btn btn-g btn-sm" onclick="openLogoAIModal()">Generate with AI</button>
+            </div>
+          </div>
+          <div class="logo-mgmt-grid" id="logoGrid"></div>
+        </div>
+        <div class="bcs"><div class="bcs-hd"><div class="bcs-ttl">Tone of Voice</div><button class="btn btn-g btn-sm" onclick="toast('Tone editor coming soon','warn')">Edit</button></div>
+          <div style="margin-bottom:12px"><div class="sec-lbl" style="margin-bottom:8px">Voice Attributes</div><div id="toneTags"></div></div>
+          <div class="hr"></div>
+          <div class="g2" style="margin-top:12px">
+            <div><div class="sec-lbl" style="margin-bottom:8px">Use these words</div><div id="wordsUse"></div></div>
+            <div><div class="sec-lbl" style="margin-bottom:8px">Avoid these words</div><div id="wordsAvoid"></div></div>
+          </div>
+        </div>
+        <div class="bcs"><div class="bcs-hd"><div class="bcs-ttl">Positioning</div><button class="btn btn-g btn-sm" onclick="toast('Positioning editor coming soon','warn')">Edit</button></div><div class="g3" id="posGrid"></div></div>
+      </div>
+    </div>
+
+    <!-- IDEAS (was: Inspiration) -->
+    <div class="page" id="page-inspiration">
+
+      <!-- Main discovery view -->
+      <div class="id-outer" id="idHubView">
+        <div class="id-cont">
+
+          <!-- Hero -->
+          <div class="id-hero">
+            <div class="id-hero-aura"></div>
+            <div class="id-eyebrow">
+              <span class="id-eyebrow-dot"></span>
+              <span class="id-eyebrow-txt">AI Creative Engine</span>
+            </div>
+            <h1 class="id-headline">Find your<br><em>creative direction.</em></h1>
+            <p class="id-sub">60 curated starting points — click any card to open a pre-filled generator and create instantly.</p>
+          </div>
+
+          <!-- Category filters -->
+          <div class="id-filter-row">
+            <button class="id-filt id-filt-active" onclick="idFilter('campaign',this)">🔥 Campaigns</button>
+            <button class="id-filt" onclick="idFilter('visual',this)">🎨 Visuals</button>
+            <button class="id-filt" onclick="idFilter('ugc',this)">📱 UGC</button>
+            <button class="id-filt" onclick="idFilter('web',this)">🌐 Websites</button>
+            <button class="id-filt" onclick="idFilter('text',this)">✍️ Copy</button>
+          </div>
+
+          <!-- Curation note -->
+          <div class="id-curation-note">
+            <svg viewBox="0 0 14 14" fill="none" stroke="#B7FF2A" stroke-width="1.5"><path d="M7 1l1.5 4H13l-3.5 2.5 1.3 4L7 9.5l-3.8 2 1.3-4L1 5h4.5z"/></svg>
+            <span id="idCurationText">30 curated starting points — pre-filled and ready to generate.</span>
+          </div>
+
+          <!-- Concept grid -->
+          <div class="id-concept-grid" id="idFeed"></div>
+
+        </div>
+      </div>
+
+      <!-- Panel overlay (preserved for settings.js language re-render) -->
+      <div class="id-panel-view hidden" id="idPanelView">
+        <div class="id-panel-header">
+          <button class="id-back-btn" onclick="idShowHub()">
+            <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M10 4L6 8l4 4"/></svg>
+            <span data-i18n="studioBackBtn">Back</span>
+          </button>
+          <span class="id-panel-title" id="idPanelTitle">Ideas</span>
+        </div>
+        <div class="id-panel-content" id="idPanelContent"></div>
+      </div>
+
+    </div>
+
+    <!-- TEAM — Business plan only -->
+    <div class="page" id="page-team">
+      <div class="tm-outer">
+
+        <!-- COMPACT HEADER -->
+        <div class="tm-hdr">
+          <div class="tm-hdr-left">
+            <div class="tm-eyebrow">
+              <div class="tm-eyebrow-dot"></div>
+              <span>Brand Workspace</span>
+            </div>
+            <h1 class="tm-hdr-title">Your team. <em>One intelligence.</em></h1>
+          </div>
+          <div class="tm-hdr-stats">
+            <div class="tm-hdr-stat">
+              <div class="tm-stat-val" id="tmStatMembers">1</div>
+              <div class="tm-stat-lbl">Members</div>
+            </div>
+            <div class="tm-hdr-stat">
+              <div class="tm-stat-val" id="tmStatIntel">—</div>
+              <div class="tm-stat-lbl">Intelligence</div>
+            </div>
+            <div class="tm-hdr-stat">
+              <div class="tm-stat-val tm-stat-status" id="tmStatStatus">Active</div>
+              <div class="tm-stat-lbl">Workspace</div>
+            </div>
+          </div>
+        </div>
+
+        <!-- PROJECTS — primary centerpiece -->
+        <div class="tm-projects-section">
+          <div class="tm-section">
+            <div class="tm-section-hd">
+              <div class="tm-section-title">Active Projects</div>
+            </div>
+            <div class="tm-proj-list" id="tmProjGrid"></div>
+          </div>
+        </div>
+
+        <!-- LOWER: members + activity side by side -->
+        <div class="tm-lower">
+
+          <!-- Members -->
+          <div class="tm-section tm-lower-panel">
+            <div class="tm-section-hd">
+              <div>
+                <div class="tm-section-title">Team Members</div>
+                <div class="tm-section-sub" id="teamMemberCount">1 member</div>
+              </div>
+              <button class="tm-invite-btn" onclick="openInviteModal()">
+                <svg viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M7 1v12M1 7h12"/></svg>
+                Invite
+              </button>
+            </div>
+            <div id="teamMemberList" class="tm-member-list"></div>
+          </div>
+
+          <!-- Activity -->
+          <div class="tm-section tm-lower-panel">
+            <div class="tm-section-hd">
+              <div class="tm-section-title">Recent Activity</div>
+            </div>
+            <div class="tm-activity" id="tmActivity"></div>
+          </div>
+
+        </div>
+
+        <!-- Hidden for JS compat -->
+        <div style="display:none" id="tmAiInsights"></div>
+
+      </div>
+    </div>
+
+    <!-- BUILDER (guided flow) -->
+    <div class="page" id="page-builder">
+      <div class="flow-pg">
+
+        <!-- Topbar -->
+        <div class="flow-topbar">
+          <button class="flow-back-btn" onclick="navigate('create')">&#8592; Back</button>
+          <div class="flow-brand-pill" id="flowBrandPill" style="display:none">
+            <span id="flowBrandName"></span>
+          </div>
+        </div>
+
+        <!-- AI Guide -->
+        <div class="flow-guide" id="flowGuide">
+          <div class="flow-guide-avatar">
+            <img src="assets/orivenlogo.png" alt="ORIVEN" class="flow-guide-logo">
+          </div>
+          <div class="flow-guide-content">
+            <div class="flow-guide-label">ORIVEN</div>
+            <div class="flow-guide-message" id="flowGuideMessage">Let&#39;s create something great.</div>
+          </div>
+        </div>
+
+        <!-- Progress dots -->
+        <div class="flow-progress" id="flowProgress"></div>
+
+        <!-- Previous answers (history strip) -->
+        <div class="flow-history" id="flowHistory"></div>
+
+        <!-- Current question -->
+        <div class="flow-step-wrap">
+          <div class="flow-step" id="flowStep"></div>
+        </div>
+
+        <!-- Navigation: back + continue (shown for text/textarea steps) -->
+        <div class="flow-nav" id="flowNav" style="display:none">
+          <button class="flow-nav-back" id="flowNavBack" onclick="flowBack()">&#8592; Back</button>
+          <button class="btn btn-p flow-nav-continue" id="flowNavContinue" onclick="flowContinue()">Continue</button>
+        </div>
+
+        <!-- Result area (shown after generation) -->
+        <div class="builder-result-wrap" id="builderResultWrap" style="display:none">
+          <div class="builder-result-bar">
+            <span class="builder-result-label" data-i18n="builderResultLabel">Result</span>
+            <div class="builder-result-actions">
+              <button class="btn btn-g btn-sm" onclick="runBuilder()" data-i18n="regenerateBtn">Regenerate</button>
+              <button class="btn btn-p btn-sm" id="builderSaveBtn" onclick="builderSave()" data-i18n="saveToStudioBtn">Save to BrandCore</button>
+            </div>
+          </div>
+          <div class="builder-result-body" id="builderResultBody"></div>
+        </div>
+
+      </div>
+    </div>
+
+    <!-- SETTINGS -->
+    <div class="page" id="page-settings">
+      <div class="se-outer">
+
+        <!-- Hero -->
+        <div class="se-hero">
+          <div class="se-hero-eyebrow">
+            <div class="se-hero-dot"></div>
+            <span>System Configuration</span>
+          </div>
+          <h1 class="se-headline" data-i18n="settingsTitle">Settings</h1>
+          <p class="se-hero-sub" data-i18n="settingsSub">Manage your workspace and preferences.</p>
+        </div>
+
+        <div class="se-layout">
+
+          <!-- Nav -->
+          <div id="sNav" class="se-nav">
+            <div class="se-nav-group">
+              <div class="se-nav-label">Account</div>
+              <div class="snav-item active" data-sp="workspace">Profile</div>
+            </div>
+            <div class="se-nav-group">
+              <div class="se-nav-label">Intelligence</div>
+              <div class="snav-item" data-sp="ai">ORIVEN AI</div>
+            </div>
+            <div class="se-nav-group">
+              <div class="se-nav-label">Experience</div>
+              <div class="snav-item" data-sp="appearance">Appearance</div>
+              <div class="snav-item" data-sp="language">Language</div>
+              <div class="snav-item" data-sp="notifications">Notifications</div>
+            </div>
+            <div class="se-nav-group">
+              <div class="se-nav-label">Subscription</div>
+              <div class="snav-item" data-sp="plan">Your Plan</div>
+            </div>
+            <div class="se-nav-group">
+              <div class="se-nav-label">Workspace</div>
+              <div class="snav-item" data-sp="genhistory">Generation History</div>
+              <div class="snav-item" data-sp="autosave">Auto Save</div>
+              <div class="snav-item" data-sp="defaultview">Default View</div>
+            </div>
+            <div class="se-nav-group" style="margin-top:auto;padding-top:16px;border-top:1px solid rgba(255,255,255,.06)">
+              <a href="https://orivenai.com" class="snav-item snav-item-link" style="display:flex;align-items:center;gap:7px;text-decoration:none;color:inherit">
+                <svg viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" width="12" height="12"><path d="M7 1a6 6 0 1 0 0 12A6 6 0 0 0 7 1z"/><path d="M1 7h12M7 1c-1.5 1.5-2.5 3.6-2.5 6S5.5 11.5 7 13M7 1c1.5 1.5 2.5 3.6 2.5 6S8.5 11.5 7 13"/></svg>
+                Go to Landing Page
+              </a>
+            </div>
+          </div>
+
+          <!-- Panels -->
+          <div class="se-content">
+
+            <!-- Profile -->
+            <div class="spanel active" id="sp-workspace">
+              <div class="se-panel-hd">
+                <div class="se-panel-eyebrow">Account</div>
+                <div class="se-panel-title">Profile</div>
+                <div class="se-panel-sub">Manage your account details and workspace identity.</div>
+              </div>
+              <div class="se-card">
+                <div class="se-card-title">Workspace Name</div>
+                <div class="se-card-help">This is the name of your workspace inside ORIVEN. It appears in your sidebar and throughout the app.</div>
+                <div class="se-input-row">
+                  <input type="text" class="inp" id="wsNameInp" placeholder="My Workspace">
+                  <button class="btn btn-p btn-sm" onclick="saveWsName()">Save</button>
+                </div>
+              </div>
+              <div class="se-card">
+                <div class="se-card-title">Account</div>
+                <div class="se-profile-row">
+                  <div class="se-profile-field">
+                    <div class="se-profile-label">Email</div>
+                    <div class="se-profile-val" id="profileEmailVal">—</div>
+                  </div>
+                  <div class="se-profile-field">
+                    <div class="se-profile-label">Authentication</div>
+                    <div class="se-profile-val" id="profileAuthVal">Email &amp; Password</div>
+                  </div>
+                </div>
+              </div>
+              <div class="se-card">
+                <div class="se-card-title">Security</div>
+                <div class="se-card-help">Send a password reset link to your email address. You will be prompted to choose a new password.</div>
+                <button class="btn btn-g btn-sm" style="margin-top:14px" onclick="sendPasswordReset()">Send Password Reset Email</button>
+              </div>
+              <div class="se-card">
+                <div class="se-card-title">Marketing Site</div>
+                <div class="se-card-help">Return to the ORIVEN website or share it with others.</div>
+                <a href="/" target="_blank" rel="noopener" class="btn btn-g btn-sm" style="margin-top:14px;display:inline-flex;align-items:center;gap:6px;text-decoration:none">Back to Landing Page →</a>
+              </div>
+            </div>
+
+            <!-- ORIVEN AI -->
+            <div class="spanel" id="sp-ai">
+              <div class="se-panel-hd">
+                <div class="se-panel-eyebrow">Intelligence</div>
+                <div class="se-panel-title">ORIVEN AI</div>
+                <div class="se-panel-sub">Control how ORIVEN's intelligence system uses your BrandCore during content generation.</div>
+              </div>
+              <!-- Core system — always active, not clickable -->
+              <div class="se-card se-card-ai-core">
+                <div class="se-ai-core-row">
+                  <div>
+                    <div class="tgl-lbl">ORIVEN AI</div>
+                    <div class="tgl-sub">Use BrandCore automatically in all generations. Every generator injects your Tone of Voice, Brand Personality, Target Audience, Positioning, Visual Direction, Colors, and Typography.</div>
+                  </div>
+                  <div class="tgl-always-active">Always Active</div>
+                </div>
+                <div class="se-ai-inject-list">
+                  <span>Tone of Voice</span><span>Brand Personality</span><span>Target Audience</span>
+                  <span>Positioning</span><span>Visual Direction</span><span>Colors</span><span>Typography</span>
+                </div>
+              </div>
+              <!-- AI Learning -->
+              <div class="se-card">
+                <div class="tgl-row">
+                  <div>
+                    <div class="tgl-lbl">AI Learning</div>
+                    <div class="tgl-sub">Allow ORIVEN to learn from your generations and improve future suggestions. When off, no generation history is used for recommendations.</div>
+                  </div>
+                  <div class="tgl on" id="tglAILearning" onclick="toggleAILearning(this)"></div>
+                </div>
+                <div class="se-tgl-hint" id="hintAILearning">Future personalization active</div>
+              </div>
+              <!-- Brand Consistency Mode -->
+              <div class="se-card">
+                <div class="tgl-row">
+                  <div>
+                    <div class="tgl-lbl">Brand Consistency Mode</div>
+                    <div class="tgl-sub">Force all generations to follow BrandCore strictly. When on, every output stays within your defined brand parameters. When off, generators have more creative freedom.</div>
+                  </div>
+                  <div class="tgl on" id="tglBrandConsistency" onclick="toggleBrandConsistency(this)"></div>
+                </div>
+                <div class="se-tgl-hint" id="hintBrandConsistency">Maximum brand consistency</div>
+              </div>
+            </div>
+
+            <!-- Appearance -->
+            <div class="spanel" id="sp-appearance">
+              <div class="se-panel-hd">
+                <div class="se-panel-eyebrow">Experience</div>
+                <div class="se-panel-title" data-i18n="appearance">Appearance</div>
+                <div class="se-panel-sub" data-i18n="spAppearanceSub">Choose how ORIVEN looks and feels. Your preference is saved and persists across sessions.</div>
+              </div>
+              <div class="se-card">
+                <div class="se-card-title" data-i18n="themeLabel">Theme</div>
+                <div class="se-theme-grid">
+                  <div id="themeLight" class="theme-pick active" onclick="setTheme('light')">
+                    <div class="theme-prev theme-prev-light">
+                      <div class="tp-sidebar"></div>
+                      <div class="tp-content"><div class="tp-card"></div><div class="tp-card"></div></div>
+                    </div>
+                    <div class="theme-pick-label" data-i18n="lightMode">Light Mode</div>
+                  </div>
+                  <div id="themeDark" class="theme-pick" onclick="setTheme('dark')">
+                    <div class="theme-prev theme-prev-dark">
+                      <div class="tp-sidebar tp-sidebar-dark"></div>
+                      <div class="tp-content"><div class="tp-card tp-card-dark"></div><div class="tp-card tp-card-dark"></div></div>
+                    </div>
+                    <div class="theme-pick-label" data-i18n="darkMode">Dark Mode</div>
+                  </div>
+                </div>
+              </div>
+              <div class="se-card">
+                <div class="se-card-title" data-i18n="accentLabel">Accent Color</div>
+                <div class="se-card-help" data-i18n="accentHelp">Choose the highlight color used across buttons, active states, and UI elements.</div>
+                <div class="accent-grid" style="margin-top:14px">
+                  <button class="accent-swatch active" data-accent="green"  onclick="setAccent('green')"  title="Green"  style="background:#265E38"></button>
+                  <button class="accent-swatch"        data-accent="blue"   onclick="setAccent('blue')"   title="Blue"   style="background:#1971C2"></button>
+                  <button class="accent-swatch"        data-accent="purple" onclick="setAccent('purple')" title="Purple" style="background:#7C3AED"></button>
+                  <button class="accent-swatch"        data-accent="red"    onclick="setAccent('red')"    title="Red"    style="background:#DC2626"></button>
+                  <button class="accent-swatch"        data-accent="orange" onclick="setAccent('orange')" title="Orange" style="background:#EA580C"></button>
+                  <button class="accent-swatch"        data-accent="pink"   onclick="setAccent('pink')"   title="Pink"   style="background:#DB2777"></button>
+                </div>
+              </div>
+            </div>
+
+            <!-- Language -->
+            <div class="spanel" id="sp-language">
+              <div class="se-panel-hd">
+                <div class="se-panel-eyebrow">Experience</div>
+                <div class="se-panel-title" data-i18n="language">Language</div>
+                <div class="se-panel-sub" data-i18n="spLanguageSub">Set the display and content generation language for your workspace. Your selection is saved and applied on every session.</div>
+              </div>
+              <div class="se-card">
+                <div class="se-card-title" data-i18n="langDisplayLabel">Display &amp; Generation Language</div>
+                <div class="se-card-help" data-i18n="langDisplayHelp">ORIVEN will use this language for interface labels and when generating content with your BrandCore.</div>
+                <select class="sel" id="langSelect" style="margin-top:14px;max-width:280px" onchange="setLanguage(this.value)">
+                  <option value="en">English (US)</option>
+                  <option value="nl">Dutch</option>
+                  <option value="es">Spanish</option>
+                  <option value="pt">Portuguese</option>
+                  <option value="de">German</option>
+                  <option value="zh">Chinese</option>
+                </select>
+              </div>
+            </div>
+
+            <!-- Your Plan -->
+            <div class="spanel" id="sp-plan">
+              <div class="se-panel-hd">
+                <div class="se-panel-eyebrow">Subscription</div>
+                <div class="se-panel-title">Your Plan</div>
+                <div class="se-panel-sub">Manage your subscription and scale your ORIVEN intelligence system. Changes take effect at the end of your current billing period.</div>
+              </div>
+              <div id="planPanelContent">
+                <div style="padding:32px 0;text-align:center;color:var(--muted);font-size:13px">Loading plan details…</div>
+              </div>
+            </div>
+
+            <!-- Notifications -->
+            <div class="spanel" id="sp-notifications">
+              <div class="se-panel-hd">
+                <div class="se-panel-eyebrow">Experience</div>
+                <div class="se-panel-title">Notifications</div>
+                <div class="se-panel-sub">Control in-app notifications. Changes are saved immediately.</div>
+              </div>
+              <div class="se-card">
+                <div class="tgl-row">
+                  <div>
+                    <div class="tgl-lbl" data-i18n="notifBrandCheckLabel">Brand Check alerts</div>
+                    <div class="tgl-sub" data-i18n="notifBrandCheckSub">Show a notification when your Brand Check score drops below 70%.</div>
+                  </div>
+                  <div class="tgl on" id="tglNotifBrandCheck" onclick="toggleNotif(this,'notifBrandCheck')"></div>
+                </div>
+                <div class="tgl-row">
+                  <div>
+                    <div class="tgl-lbl" data-i18n="notifGenCompleteLabel">Generation complete</div>
+                    <div class="tgl-sub" data-i18n="notifGenCompleteSub">Notify you when AI finishes generating content.</div>
+                  </div>
+                  <div class="tgl on" id="tglNotifGenComplete" onclick="toggleNotif(this,'notifGenComplete')"></div>
+                </div>
+                <div class="tgl-row">
+                  <div>
+                    <div class="tgl-lbl" data-i18n="notifUpdatesLabel">Product updates</div>
+                    <div class="tgl-sub" data-i18n="notifUpdatesSub">Receive in-app announcements about new ORIVEN features and improvements.</div>
+                  </div>
+                  <div class="tgl on" id="tglNotifUpdates" onclick="toggleNotif(this,'notifUpdates')"></div>
+                </div>
+              </div>
+            </div>
+
+            <!-- Generation History -->
+            <div class="spanel" id="sp-genhistory">
+              <div class="se-panel-hd">
+                <div class="se-panel-eyebrow">Workspace</div>
+                <div class="se-panel-title">Generation History</div>
+                <div class="se-panel-sub">Control whether ORIVEN stores your previous generations inside the platform.</div>
+              </div>
+              <div class="se-card">
+                <div class="tgl-row">
+                  <div>
+                    <div class="tgl-lbl">Store Generation History</div>
+                    <div class="tgl-sub">When enabled, every generation is saved to your workspace and accessible from BrandCore. When disabled, generations are not stored and cannot be reviewed later.</div>
+                  </div>
+                  <div class="tgl on" id="tglGenHistory" onclick="toggleGenHistory(this)"></div>
+                </div>
+                <div class="se-tgl-hint" id="hintGenHistory">History is being saved</div>
+              </div>
+            </div>
+
+            <!-- Auto Save -->
+            <div class="spanel" id="sp-autosave">
+              <div class="se-panel-hd">
+                <div class="se-panel-eyebrow">Workspace</div>
+                <div class="se-panel-title">Auto Save</div>
+                <div class="se-panel-sub">Control whether BrandCore changes are saved automatically.</div>
+              </div>
+              <div class="se-card">
+                <div class="tgl-row">
+                  <div>
+                    <div class="tgl-lbl">Auto Save BrandCore Changes</div>
+                    <div class="tgl-sub">When enabled, changes to your BrandCore are saved automatically. When disabled, you must save manually using the Save button.</div>
+                  </div>
+                  <div class="tgl on" id="tglAutoSave" onclick="toggleAutoSave(this)"></div>
+                </div>
+                <div class="se-tgl-hint" id="hintAutoSave">BrandCore changes are saved automatically</div>
+              </div>
+            </div>
+
+            <!-- Default View -->
+            <div class="spanel" id="sp-defaultview">
+              <div class="se-panel-hd">
+                <div class="se-panel-eyebrow">Workspace</div>
+                <div class="se-panel-title">Default View</div>
+                <div class="se-panel-sub">Choose how generators are displayed on the Create page.</div>
+              </div>
+              <div class="se-card">
+                <div class="se-card-title">Generator Layout</div>
+                <div class="se-card-help">Grid shows full-size cards. Compact shows a denser layout for faster navigation.</div>
+                <div class="view-opts" style="margin-top:14px">
+                  <div class="view-opt active" data-view="grid" onclick="setGeneratorView('grid')">
+                    <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" width="14" height="14"><rect x="1" y="1" width="6" height="6" rx="1"/><rect x="9" y="1" width="6" height="6" rx="1"/><rect x="1" y="9" width="6" height="6" rx="1"/><rect x="9" y="9" width="6" height="6" rx="1"/></svg>
+                    Grid
+                  </div>
+                  <div class="view-opt" data-view="compact" onclick="setGeneratorView('compact')">
+                    <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" width="14" height="14"><rect x="1" y="2" width="14" height="3" rx="1"/><rect x="1" y="7" width="14" height="3" rx="1"/><rect x="1" y="12" width="14" height="3" rx="1"/></svg>
+                    Compact
+                  </div>
+                </div>
+              </div>
+            </div>
+
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ── UGC VIDEO TEST ─────────────────────────────────── -->
+    <div class="page" id="page-ugc">
+      <div class="ph">
+        <div class="ph-ttl">AI UGC Video</div>
+        <div class="ph-sub">Generate AI creator-style videos from a script. Powered by HeyGen.</div>
+      </div>
+      <div class="ugc-wrap">
+
+        <div class="ugc-card">
+          <div>
+            <label class="ugc-label">Script</label>
+            <textarea id="ugcScript" class="ugc-textarea" rows="5" placeholder="Hi! I've been using this skincare brand for 3 weeks and my skin has honestly never looked better. The texture is light, it absorbs instantly, and I've noticed a real difference. If you've been looking for something that actually works — this is it."></textarea>
+          </div>
+
+          <div class="ugc-selects">
+            <div class="ugc-field">
+              <label class="ugc-label">Avatar</label>
+              <select id="ugcAvatarSel" class="inp ugc-sel"><option value="">Loading…</option></select>
+            </div>
+            <div class="ugc-field">
+              <label class="ugc-label">Voice</label>
+              <select id="ugcVoiceSel" class="inp ugc-sel"><option value="">Loading…</option></select>
+            </div>
+          </div>
+
+          <button class="btn btn-p" id="ugcGenBtn" onclick="ugcGenerate()" style="width:fit-content">Generate UGC Video</button>
+        </div>
+
+        <div class="ugc-result" id="ugcResult" style="display:none">
+          <div id="ugcStatus"></div>
+          <video id="ugcVideo" controls playsinline style="display:none;width:100%;max-width:360px;border-radius:12px;margin-top:12px"></video>
+        </div>
+
+      </div>
+    </div>
+
+</div><!-- /mc -->
+</div><!-- /app -->
+
+<!-- MODALS -->
+<!-- BrandCore AI Wizard — full-screen stepped experience -->
+<div id="bcWizard" class="bcw-overlay" style="display:none">
+  <div class="bcw-panel">
+
+    <!-- Header -->
+    <div class="bcw-header">
+      <div class="bcw-logo">
+        <img src="assets/orivenlogo.png" alt="ORIVEN" style="width:22px;height:22px;object-fit:contain">
+        <span>BrandCore AI</span>
+      </div>
+      <button class="bcw-close" onclick="closeBCWizard()" title="Cancel">
+        <svg viewBox="0 0 12 12" width="11" height="11" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M1 1l10 10M11 1L1 11"/></svg>
+      </button>
+    </div>
+
+    <!-- Progress -->
+    <div class="bcw-progress">
+      <div class="bcw-prog-track"><div class="bcw-prog-fill" id="bcwProgFill" style="width:12.5%"></div></div>
+      <div class="bcw-prog-lbl" id="bcwProgLbl">1 / 8</div>
+    </div>
+
+    <!-- Steps -->
+    <div class="bcw-content">
+
+      <!-- Step 1: Brand Name -->
+      <div class="bcw-step bcw-step-active" id="bcwS1">
+        <div class="bcw-step-eyebrow">Brand Identity</div>
+        <div class="bcw-step-q">What is your <em>company called?</em></div>
+        <div class="bcw-step-sub">This becomes the foundation of your entire BrandCore.</div>
+        <input type="text" id="bcwName" class="bcw-inp" placeholder="e.g. NOVA, Bloom, Forge Labs" maxlength="60" onkeydown="if(event.key==='Enter')bcwNext()">
+      </div>
+
+      <!-- Step 2: Description -->
+      <div class="bcw-step" id="bcwS2">
+        <div class="bcw-step-eyebrow">Brand Purpose</div>
+        <div class="bcw-step-q">What does your <em>company do?</em></div>
+        <div class="bcw-step-sub">Describe what you offer and how it helps your customers.</div>
+        <textarea id="bcwDesc" class="bcw-inp bcw-textarea" rows="3" placeholder="e.g. A premium skincare brand for people who value clean ingredients and sustainable beauty."></textarea>
+      </div>
+
+      <!-- Step 3: Industry -->
+      <div class="bcw-step" id="bcwS3">
+        <div class="bcw-step-eyebrow">Market Category</div>
+        <div class="bcw-step-q">What <em>industry</em> are you in?</div>
+        <div class="bcw-step-sub">Select the category that best fits your brand.</div>
+        <div class="bcw-pills" id="bcwIndustryPills">
+          <div class="bcw-pill" onclick="bcwPillSelect(this,'bcwIndustryPills')">Tech &amp; Software</div>
+          <div class="bcw-pill" onclick="bcwPillSelect(this,'bcwIndustryPills')">Luxury &amp; Fashion</div>
+          <div class="bcw-pill" onclick="bcwPillSelect(this,'bcwIndustryPills')">Health &amp; Fitness</div>
+          <div class="bcw-pill" onclick="bcwPillSelect(this,'bcwIndustryPills')">E-commerce</div>
+          <div class="bcw-pill" onclick="bcwPillSelect(this,'bcwIndustryPills')">Agency &amp; Creative</div>
+          <div class="bcw-pill" onclick="bcwPillSelect(this,'bcwIndustryPills')">Startup</div>
+          <div class="bcw-pill" onclick="bcwPillSelect(this,'bcwIndustryPills')">Personal Brand</div>
+          <div class="bcw-pill" onclick="bcwPillSelect(this,'bcwIndustryPills')">Food &amp; Lifestyle</div>
+        </div>
+      </div>
+
+      <!-- Step 4: Target Audience -->
+      <div class="bcw-step" id="bcwS4">
+        <div class="bcw-step-eyebrow">Target Audience</div>
+        <div class="bcw-step-q">Who do you <em>create for?</em></div>
+        <div class="bcw-step-sub">ORIVEN will always generate with your audience in mind.</div>
+        <textarea id="bcwAudience" class="bcw-inp bcw-textarea" rows="2" placeholder="e.g. Health-conscious women aged 25–40 who follow wellness creators and prioritize sustainable living."></textarea>
+      </div>
+
+      <!-- Step 5: Brand Type -->
+      <div class="bcw-step" id="bcwS5">
+        <div class="bcw-step-eyebrow">Brand Character</div>
+        <div class="bcw-step-q">What <em>type</em> of brand do you want?</div>
+        <div class="bcw-step-sub">This shapes the overall personality of your BrandCore.</div>
+        <div class="bcw-pills" id="bcwTypePills">
+          <div class="bcw-pill" onclick="bcwPillSelect(this,'bcwTypePills')">Luxury</div>
+          <div class="bcw-pill" onclick="bcwPillSelect(this,'bcwTypePills')">Startup</div>
+          <div class="bcw-pill" onclick="bcwPillSelect(this,'bcwTypePills')">Fitness</div>
+          <div class="bcw-pill" onclick="bcwPillSelect(this,'bcwTypePills')">Fashion</div>
+          <div class="bcw-pill" onclick="bcwPillSelect(this,'bcwTypePills')">Tech</div>
+          <div class="bcw-pill" onclick="bcwPillSelect(this,'bcwTypePills')">Agency</div>
+          <div class="bcw-pill" onclick="bcwPillSelect(this,'bcwTypePills')">E-commerce</div>
+          <div class="bcw-pill" onclick="bcwPillSelect(this,'bcwTypePills')">Personal Brand</div>
+        </div>
+      </div>
+
+      <!-- Step 6: Visual Style -->
+      <div class="bcw-step" id="bcwS6">
+        <div class="bcw-step-eyebrow">Visual Identity</div>
+        <div class="bcw-step-q">What <em>visual style</em> fits your brand?</div>
+        <div class="bcw-step-sub">This influences your color system, typography, and visual direction.</div>
+        <div class="bcw-pills" id="bcwStylePills">
+          <div class="bcw-pill" onclick="bcwPillSelect(this,'bcwStylePills')">Minimal</div>
+          <div class="bcw-pill" onclick="bcwPillSelect(this,'bcwStylePills')">Premium</div>
+          <div class="bcw-pill" onclick="bcwPillSelect(this,'bcwStylePills')">Modern</div>
+          <div class="bcw-pill" onclick="bcwPillSelect(this,'bcwStylePills')">Bold</div>
+          <div class="bcw-pill" onclick="bcwPillSelect(this,'bcwStylePills')">Playful</div>
+          <div class="bcw-pill" onclick="bcwPillSelect(this,'bcwStylePills')">Corporate</div>
+          <div class="bcw-pill" onclick="bcwPillSelect(this,'bcwStylePills')">Futuristic</div>
+          <div class="bcw-pill" onclick="bcwPillSelect(this,'bcwStylePills')">Cinematic</div>
+        </div>
+      </div>
+
+      <!-- Step 7: Color Direction -->
+      <div class="bcw-step" id="bcwS7">
+        <div class="bcw-step-eyebrow">Color Direction</div>
+        <div class="bcw-step-q">What <em>color direction</em> feels right?</div>
+        <div class="bcw-step-sub">ORIVEN will build a complete 6-color system from this direction.</div>
+        <div class="bcw-pills" id="bcwColorPills">
+          <div class="bcw-pill" onclick="bcwPillSelect(this,'bcwColorPills')">Dark</div>
+          <div class="bcw-pill" onclick="bcwPillSelect(this,'bcwColorPills')">Light</div>
+          <div class="bcw-pill" onclick="bcwPillSelect(this,'bcwColorPills')">Blue-focused</div>
+          <div class="bcw-pill" onclick="bcwPillSelect(this,'bcwColorPills')">Green-focused</div>
+          <div class="bcw-pill" onclick="bcwPillSelect(this,'bcwColorPills')">Monochrome</div>
+          <div class="bcw-pill" onclick="bcwPillSelect(this,'bcwColorPills')">High Contrast</div>
+          <div class="bcw-pill" onclick="bcwPillSelect(this,'bcwColorPills')">Warm &amp; Earthy</div>
+          <div class="bcw-pill" onclick="bcwPillSelect(this,'bcwColorPills')">Vibrant</div>
+        </div>
+      </div>
+
+      <!-- Step 8: Brand Feeling -->
+      <div class="bcw-step" id="bcwS8">
+        <div class="bcw-step-eyebrow">Brand Emotion</div>
+        <div class="bcw-step-q">What <em>feeling</em> should your brand create?</div>
+        <div class="bcw-step-sub">This shapes tone, copy direction, and how every asset feels.</div>
+        <div class="bcw-pills" id="bcwFeelingPills">
+          <div class="bcw-pill" onclick="bcwPillSelect(this,'bcwFeelingPills')">Trust</div>
+          <div class="bcw-pill" onclick="bcwPillSelect(this,'bcwFeelingPills')">Energy</div>
+          <div class="bcw-pill" onclick="bcwPillSelect(this,'bcwFeelingPills')">Innovation</div>
+          <div class="bcw-pill" onclick="bcwPillSelect(this,'bcwFeelingPills')">Luxury</div>
+          <div class="bcw-pill" onclick="bcwPillSelect(this,'bcwFeelingPills')">Simplicity</div>
+          <div class="bcw-pill" onclick="bcwPillSelect(this,'bcwFeelingPills')">Confidence</div>
+          <div class="bcw-pill" onclick="bcwPillSelect(this,'bcwFeelingPills')">Warmth</div>
+          <div class="bcw-pill" onclick="bcwPillSelect(this,'bcwFeelingPills')">Authority</div>
+        </div>
+      </div>
+
+    </div><!-- /bcw-content -->
+
+    <!-- Navigation -->
+    <div class="bcw-nav">
+      <button class="bcw-back-btn" id="bcwBackBtn" onclick="bcwBack()" style="visibility:hidden">← Back</button>
+      <button class="bcw-next-btn" id="bcwNextBtn" onclick="bcwNext()">Next →</button>
+    </div>
+
+  </div>
+</div>
+
+<!-- Keep old modal-genbrand as a shell that opens the wizard -->
+<div class="mbk" id="modal-genbrand" style="display:none"></div>
+
+<div class="glov" id="glov"><div class="glov-inner">
+  <div class="spin" style="margin:0 auto;width:36px;height:36px;border-width:3px"></div>
+  <h3>Building your Brand Brain</h3>
+  <p id="glovStatus">Analyzing personality inputs...</p>
+  <div class="lbar" style="width:240px;margin:0 auto"><div class="lbar-fill"></div></div>
+</div></div>
+
+<div class="mbk" id="modal-bcsetup"><div class="modal" style="width:620px;max-height:88vh;overflow-y:auto">
+  <div class="modal-ttl">Manual BrandCore Setup</div>
+  <div class="modal-sub">Configure every pillar of your brand identity directly.</div>
+
+  <!-- Identity -->
+  <div class="bcs-section">
+    <div class="bcs-section-label">Brand Identity</div>
+    <div class="fg"><label class="lbl">Brand Name *</label><input class="inp" id="bcsName" placeholder="Your brand name"></div>
+    <div class="fg"><label class="lbl">Tagline</label><input class="inp" id="bcsTagline" placeholder="One line that captures your brand essence"></div>
+  </div>
+
+  <!-- Colors -->
+  <div class="bcs-section">
+    <div class="bcs-section-label">Color System</div>
+    <div class="bcs-color-grid">
+      <div class="fg"><label class="lbl">Primary Color *</label><div class="bcs-color-row"><input class="inp bcs-color-inp" id="bcsPrimary" placeholder="#B7FF2A" oninput="bcsPrev('bcsPrimary','bcsPrev1')"><div class="bcs-color-swatch" id="bcsPrev1"></div></div></div>
+      <div class="fg"><label class="lbl">Secondary Color</label><div class="bcs-color-row"><input class="inp bcs-color-inp" id="bcsSecondary" placeholder="#0A0A0A" oninput="bcsPrev('bcsSecondary','bcsPrev2')"><div class="bcs-color-swatch" id="bcsPrev2"></div></div></div>
+      <div class="fg"><label class="lbl">Accent Color</label><div class="bcs-color-row"><input class="inp bcs-color-inp" id="bcsAccent" placeholder="#BFA07A" oninput="bcsPrev('bcsAccent','bcsPrev3')"><div class="bcs-color-swatch" id="bcsPrev3"></div></div></div>
+      <div class="fg"><label class="lbl">Text Color</label><div class="bcs-color-row"><input class="inp bcs-color-inp" id="bcsText" placeholder="#18181A" oninput="bcsPrev('bcsText','bcsPrev4')"><div class="bcs-color-swatch" id="bcsPrev4"></div></div></div>
+      <div class="fg"><label class="lbl">Support Color 1</label><div class="bcs-color-row"><input class="inp bcs-color-inp" id="bcsSupport1" placeholder="#F6F3EE" oninput="bcsPrev('bcsSupport1','bcsPrev5')"><div class="bcs-color-swatch" id="bcsPrev5"></div></div></div>
+      <div class="fg"><label class="lbl">Support Color 2</label><div class="bcs-color-row"><input class="inp bcs-color-inp" id="bcsSupport2" placeholder="#E5DED4" oninput="bcsPrev('bcsSupport2','bcsPrev6')"><div class="bcs-color-swatch" id="bcsPrev6"></div></div></div>
+    </div>
+  </div>
+
+  <!-- Typography -->
+  <div class="bcs-section">
+    <div class="bcs-section-label">Typography</div>
+    <div class="bcs-grid-2">
+      <div class="fg"><label class="lbl">Heading Font</label><input class="inp" id="bcsHead" placeholder="e.g. Instrument Serif"></div>
+      <div class="fg"><label class="lbl">Body Font</label><input class="inp" id="bcsBody" placeholder="e.g. Geist"></div>
+    </div>
+  </div>
+
+  <!-- Brand Personality -->
+  <div class="bcs-section">
+    <div class="bcs-section-label">Brand Personality</div>
+    <div class="fg"><label class="lbl">4 Keywords <span style="font-weight:400;color:var(--muted)">comma-separated</span></label><input class="inp" id="bcsPersonality" placeholder="e.g. Premium, Bold, Minimal, Intelligent"></div>
+    <div class="fg"><label class="lbl">Tone of Voice <span style="font-weight:400;color:var(--muted)">one sentence</span></label><input class="inp" id="bcsTone" placeholder="e.g. Confident and professional without sounding corporate."></div>
+  </div>
+
+  <!-- Audience & Positioning -->
+  <div class="bcs-section">
+    <div class="bcs-section-label">Audience &amp; Positioning</div>
+    <div class="fg"><label class="lbl">Target Audience</label><input class="inp" id="bcsAudience" placeholder="e.g. Startup Founders, E-commerce Brands, Personal Brands"></div>
+    <div class="fg"><label class="lbl">Positioning <span style="font-weight:400;color:var(--muted)">one sentence</span></label><input class="inp" id="bcsPositioning" placeholder="e.g. The AI operating system for modern brands."></div>
+  </div>
+
+  <!-- Visual Direction -->
+  <div class="bcs-section">
+    <div class="bcs-section-label">Visual Direction</div>
+    <div class="fg"><label class="lbl">Visual Style</label><input class="inp" id="bcsVisualDir" placeholder="e.g. Dark, Minimal, Premium, Cinematic"></div>
+  </div>
+
+  <!-- Logo System -->
+  <div class="bcs-section">
+    <div class="bcs-section-label">Logo System</div>
+    <div class="fg"><label class="lbl">Logo Description</label><input class="inp" id="bcsLogoDesc" placeholder="e.g. Wordmark with clean geometric letterforms in primary brand color."></div>
+  </div>
+
+  <div class="modal-ft"><button class="btn btn-g" onclick="closeModal('modal-bcsetup')">Cancel</button><button class="btn btn-p" onclick="saveBCManual()">Save BrandCore</button></div>
+</div></div>
+
+<!-- REGENERATE CHOICE MODAL -->
+<div class="mbk" id="modal-bc-regen"><div class="modal" style="width:420px;padding:32px">
+  <div class="modal-ttl" style="margin-bottom:6px">Regenerate BrandCore</div>
+  <div class="modal-sub" style="margin-bottom:28px">Choose how you'd like to rebuild your brand identity.</div>
+  <div style="display:flex;flex-direction:column;gap:12px">
+    <button class="bcp-regen-choice bcp-regen-ai" onclick="closeModal('modal-bc-regen');openBCWizard()">
+      <div class="bcp-regen-choice-icon">
+        <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" width="20" height="20"><path d="M10 1.5l2 5.5H18l-4.8 3.5 1.8 5.5L10 13l-5 3.5 1.8-5.5L2 7h6z"/></svg>
+      </div>
+      <div class="bcp-regen-choice-body">
+        <div class="bcp-regen-choice-title">Generate with AI</div>
+        <div class="bcp-regen-choice-sub">Answer guided questions and let ORIVEN build a complete BrandCore from scratch.</div>
+      </div>
+    </button>
+    <button class="bcp-regen-choice bcp-regen-manual" onclick="closeModal('modal-bc-regen');openModal('modal-bcsetup')">
+      <div class="bcp-regen-choice-icon">
+        <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" width="20" height="20"><path d="M3 10h14M3 5h14M3 15h8"/></svg>
+      </div>
+      <div class="bcp-regen-choice-body">
+        <div class="bcp-regen-choice-title">Manual Setup</div>
+        <div class="bcp-regen-choice-sub">Fill in your brand details directly with full control over every field.</div>
+      </div>
+    </button>
+  </div>
+  <div class="modal-ft" style="margin-top:24px;border-top:1px solid var(--border);padding-top:16px">
+    <button class="btn btn-g" onclick="closeModal('modal-bc-regen')">Cancel</button>
+  </div>
+</div></div>
+
+<div class="mbk" id="modal-addcolor"><div class="modal" style="width:340px">
+  <div class="modal-ttl" id="colorModalTtl">Add Brand Color</div><div class="modal-sub">Add a color to your brand palette.</div>
+  <div class="fg"><div id="colorPrev" style="height:56px;border-radius:var(--rl);border:1px solid rgba(0,0,0,.06);background:#1A4229;margin-bottom:12px;transition:background .15s"></div></div>
+  <div class="fg"><label class="lbl">Hex code</label><input class="inp" id="colorHex" placeholder="#1A4229" oninput="updateColorPrev(this.value)"></div>
+  <div class="fg"><label class="lbl">Color name</label><input class="inp" id="colorName" placeholder="e.g. Forest Green"></div>
+  <div class="fg"><label class="lbl">Usage role</label><select class="sel" id="colorRole"><option>Primary</option><option>Accent</option><option>Support</option><option>Background</option><option>Text</option></select></div>
+  <div class="modal-ft"><button class="btn btn-g" onclick="closeModal('modal-addcolor')">Cancel</button><button class="btn btn-p" onclick="saveColor()">Save Color</button></div>
+</div></div>
+
+<div class="mbk" id="modal-logo-ai"><div class="modal" style="width:520px">
+  <div class="modal-ttl">Generate Logo with AI</div>
+  <div class="modal-sub">Describe your brand and choose a style. ORIVEN AI will generate a logo concept you can save directly to your Brand Core.</div>
+  <div class="fg"><label class="lbl">Brand name</label><input class="inp" id="logoAIBrand" placeholder="Your brand name"></div>
+  <div class="fg">
+    <label class="lbl">Logo type</label>
+    <div class="b-pills" id="logoAIStylePills" style="margin-top:6px">
+      <button class="b-pill active" data-val="minimal icon / symbol" onclick="bPickModal(this,'logoAIStylePills')">Icon / Symbol</button>
+      <button class="b-pill" data-val="wordmark logo" onclick="bPickModal(this,'logoAIStylePills')">Wordmark</button>
+      <button class="b-pill" data-val="emblem logo badge" onclick="bPickModal(this,'logoAIStylePills')">Emblem</button>
+      <button class="b-pill" data-val="monogram lettermark" onclick="bPickModal(this,'logoAIStylePills')">Monogram</button>
+      <button class="b-pill" data-val="abstract geometric mark" onclick="bPickModal(this,'logoAIStylePills')">Abstract</button>
+    </div>
+  </div>
+  <div class="fg">
+    <label class="lbl">Style direction</label>
+    <div class="b-pills" id="logoAIDirPills" style="margin-top:6px">
+      <button class="b-pill active" data-val="minimal clean refined" onclick="bPickModal(this,'logoAIDirPills')">Minimal</button>
+      <button class="b-pill" data-val="bold strong impactful" onclick="bPickModal(this,'logoAIDirPills')">Bold</button>
+      <button class="b-pill" data-val="premium luxury sophisticated" onclick="bPickModal(this,'logoAIDirPills')">Premium</button>
+      <button class="b-pill" data-val="playful friendly approachable" onclick="bPickModal(this,'logoAIDirPills')">Playful</button>
+      <button class="b-pill" data-val="technical precise systematic" onclick="bPickModal(this,'logoAIDirPills')">Technical</button>
+    </div>
+  </div>
+  <div class="fg"><label class="lbl">Colour palette <span style="font-weight:400;color:var(--muted);font-size:11px">(auto-filled from BrandCore)</span></label><input class="inp" id="logoAIColors" placeholder="e.g. deep forest green, warm beige, charcoal"></div>
+  <div class="fg"><label class="lbl">Description <span style="font-weight:400;color:var(--muted);font-size:11px">optional</span></label><textarea class="inp" id="logoAIDesc" rows="2" placeholder="e.g. A premium wellness brand for modern professionals. Clean, grounded, aspirational."></textarea></div>
+  <div id="logoAIResult" style="display:none"></div>
+  <div class="modal-ft">
+    <button class="btn btn-g" onclick="closeModal('modal-logo-ai')">Cancel</button>
+    <button class="btn btn-p" id="logoAIGenBtn" onclick="generateAILogo()">Generate Logo</button>
+  </div>
+</div></div>
+
+<div class="mbk" id="modal-newcamp"><div class="modal" style="width:480px">
+  <div class="modal-ttl">New Campaign</div><div class="modal-sub">Bundle saved assets into a visual campaign concept.</div>
+  <div class="fg"><label class="lbl">Campaign name *</label><input class="inp" id="ncName" placeholder="e.g. Q3 Product Launch"></div>
+  <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:16px">
+    <div><label class="lbl">Objective</label><select class="sel" id="ncObj"><option>Product Launch</option><option>Feature Release</option><option>Brand Awareness</option><option>Seasonal Drop</option><option>Ad Testing</option><option>Lead Generation</option></select></div>
+    <div><label class="lbl">Target audience</label><input class="inp" id="ncAud" placeholder="e.g. SaaS founders"></div>
+  </div>
+  <div class="fg"><label class="lbl">Notes</label><textarea class="inp" id="ncNotes" placeholder="Campaign brief..." rows="2"></textarea></div>
+  <div class="fg">
+    <label class="lbl">Link Saved Assets</label>
+    <div id="ncAssetPicker" style="max-height:160px;overflow-y:auto;margin-top:4px"></div>
+  </div>
+  <div class="modal-ft"><button class="btn btn-g" onclick="closeModal('modal-newcamp')">Cancel</button><button class="btn btn-p" onclick="createCampaign()">Create Campaign</button></div>
+</div></div>
+
+<div class="mbk" id="modal-tpl"><div class="modal" style="width:500px">
+  <div id="tplPrevContent"></div>
+  <div class="modal-ft"><button class="btn btn-g" onclick="closeModal('modal-tpl')">Close</button><button class="btn btn-g" onclick="toast('Saved as draft');closeModal('modal-tpl')">Save Draft</button><button class="btn btn-p" onclick="useTpl()">Use Template</button></div>
+</div></div>
+
+<div class="mbk" id="modal-rename"><div class="modal" style="width:340px">
+  <div class="modal-ttl">Rename Asset</div>
+  <div class="fg" style="margin-top:16px"><label class="lbl">Name</label><input class="inp" id="renameInp"></div>
+  <div class="modal-ft"><button class="btn btn-g" onclick="closeModal('modal-rename')">Cancel</button><button class="btn btn-p" onclick="doRename()">Rename</button></div>
+</div></div>
+
+<!-- INVITE TEAM MEMBER MODAL -->
+<div class="mbk" id="modal-invite"><div class="modal" style="width:440px">
+  <div class="modal-ttl">Invite Team Member</div>
+  <div class="modal-sub">They'll receive an email invite to join your workspace.</div>
+  <div class="fg"><label class="lbl">Name</label><input class="inp" id="teamInviteName" placeholder="e.g. Jane Smith"></div>
+  <div class="fg"><label class="lbl">Email *</label><input class="inp" id="teamInviteEmail" placeholder="name@company.com" type="email"></div>
+  <div class="fg">
+    <label class="lbl">Role</label>
+    <select class="sel" id="teamInviteRole" onchange="_updateRoleDesc(this.value)">
+      <option value="Member">Member</option>
+      <option value="Editor">Editor</option>
+      <option value="Viewer">Viewer</option>
+      <option value="Admin">Admin</option>
+    </select>
+    <div id="teamRoleDesc" style="font-size:11.5px;color:var(--muted,#888);margin-top:6px;line-height:1.5">Standard collaborative access — generate content and view assets</div>
+  </div>
+  <div class="fg"><label class="lbl">Personal message <span style="font-weight:400;color:var(--muted,#888)">(optional)</span></label><textarea class="inp" id="teamInviteMsg" placeholder="Add a note to your invite…" rows="2" style="resize:vertical;min-height:60px;font-family:inherit"></textarea></div>
+  <div class="modal-ft"><button class="btn btn-g" onclick="closeModal('modal-invite')">Cancel</button><button class="btn btn-p" id="teamInviteSendBtn" onclick="addTeamMember()">Send Invite</button></div>
+</div></div>
+
+<!-- SOFT PAYWALL MODAL -->
+<div id="softPaywallModal" style="display:none">
+  <div class="sp-card">
+    <button class="sp-close" onclick="closeSoftPaywall()">
+      <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M3 3l10 10M13 3L3 13" stroke-linecap="round"/></svg>
+    </button>
+    <div class="sp-accent-bar"></div>
+    <div class="sp-body">
+      <div class="sp-title">Upgrade to continue creating</div>
+      <div class="sp-sub">Unlock Your Brand Operating System</div>
+      <div class="sp-progress-section">
+        <div class="sp-progress-header">
+          <span class="sp-progress-label">Your progress</span>
+          <span class="sp-progress-pct" id="spProgressPct">60%</span>
+        </div>
+        <div class="sp-progress-track"><div class="sp-progress-fill" id="spProgressFill"></div></div>
+        <div class="sp-progress-list" id="spProgressList"></div>
+      </div>
+      <button class="sp-cta-primary" onclick="closeSoftPaywallNoBar();openPaywall()">Unlock Your Brand Operating System</button>
+      <button class="sp-cta-secondary" onclick="closeSoftPaywall()">Maybe later</button>
+    </div>
+  </div>
+</div>
+
+<!-- UPGRADE BAR -->
+<div id="upgradeBar" style="display:none">
+  <div class="upgrade-bar-inner">
+    <span>You've reached your monthly limit —</span>
+    <button class="upgrade-bar-link" onclick="openPaywall()">upgrade to continue</button>
+  </div>
+  <button class="upgrade-bar-dismiss" onclick="hideUpgradeBar()">×</button>
+</div>
+
+<!-- PAYWALL MODAL — premium dark design -->
+<div class="mbk" id="modal-paywall">
+  <div class="modal pw-modal">
+    <!-- Close -->
+    <button onclick="closePaywall()" class="pw-close-btn" title="Close">
+      <svg viewBox="0 0 12 12" width="10" height="10" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M1 1l10 10M11 1L1 11"/></svg>
+    </button>
+
+    <!-- Header -->
+    <div class="pw-header">
+      <div class="pw-eyebrow">
+        <div class="pw-eyebrow-dot"></div>
+        <span>Choose Your Plan</span>
+      </div>
+      <h2 class="pw-title">Unlock <em>ORIVEN.</em></h2>
+      <p class="pw-sub">Enterprise-grade brand intelligence. Built for brands that create at scale.</p>
+    </div>
+
+    <!-- Plans — rendered by plans.js / paywall.js -->
+    <div class="pw-grid" id="pwPlanGrid"></div>
+
+    <!-- Footer -->
+    <div class="pw-footer">
+      <button onclick="closePaywall()" class="pw-skip-btn">Maybe later</button>
+      <span class="pw-footer-note">Secure payment via Stripe &middot; Cancel anytime</span>
+    </div>
+  </div>
+</div>
+
+<!-- ONBOARDING PRODUCT TOUR OVERLAY -->
+<div id="onboardingOverlay" style="display:none">
+
+  <!-- Skip -->
+  <button class="ob-tour-skip" onclick="obFinish()">Skip tour</button>
+
+  <!-- Card -->
+  <div class="ob-tour-card">
+
+    <!-- Step 1: Dashboard -->
+    <div class="ob-step" id="obStep1">
+      <div class="ob-tour-icon ob-icon-dashboard">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"><rect x="2" y="2" width="9" height="9" rx="2"/><rect x="13" y="2" width="9" height="9" rx="2"/><rect x="2" y="13" width="9" height="9" rx="2"/><rect x="13" y="13" width="9" height="9" rx="2"/></svg>
+      </div>
+      <div class="ob-tour-section">Dashboard</div>
+      <div class="ob-tour-title">Your brand <em>intelligence hub.</em></div>
+      <div class="ob-tour-desc">Monitor your brand's intelligence level, track recent creative activity, and get a real-time view of your entire workspace at a glance.</div>
+    </div>
+
+    <!-- Step 2: Create -->
+    <div class="ob-step" id="obStep2">
+      <div class="ob-tour-icon ob-icon-create">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"><path d="M12 2l2.5 6.5L21 10l-4.5 4.4 1.3 6.6L12 17.8l-5.8 3.2 1.3-6.6L3 10l6.5-1.5L12 2z"/></svg>
+      </div>
+      <div class="ob-tour-section">Create</div>
+      <div class="ob-tour-title">Generate any <em>brand asset.</em></div>
+      <div class="ob-tour-desc">Campaigns, visuals, UGC video ads, brand copy, and landing pages — all generated from your BrandCore identity without re-prompting.</div>
+    </div>
+
+    <!-- Step 3: Studio -->
+    <div class="ob-step" id="obStep3">
+      <div class="ob-tour-icon ob-icon-studio">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"><path d="M12 2l2.5 5.5L20 9l-4 3.9 1 5.6L12 16l-5 2.5 1-5.6L4 9l5.5-1.5L12 2z"/></svg>
+      </div>
+      <div class="ob-tour-section">BrandCore</div>
+      <div class="ob-tour-title">Your brand <em>lives here.</em></div>
+      <div class="ob-tour-desc">Your complete brand identity in one place — colors, typography, personality, tone of voice, positioning, and logo system. Every generation draws from it.</div>
+    </div>
+
+    <!-- Step 4: Inspiration -->
+    <div class="ob-step" id="obStep4">
+      <div class="ob-tour-icon ob-icon-inspiration">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"><path d="M12 2a7 7 0 0 1 2.8 13.4V17H9.2v-1.6A7 7 0 0 1 12 2z"/><path d="M9.2 19.5h5.6M10 21.5h4"/></svg>
+      </div>
+      <div class="ob-tour-section">Inspiration</div>
+      <div class="ob-tour-title">Find your <em>creative direction.</em></div>
+      <div class="ob-tour-desc">36 AI-curated creative concepts across Campaign, Visual, Web, and Text. Pick a direction and activate it with one click.</div>
+    </div>
+
+    <!-- Step 5: Settings -->
+    <div class="ob-step" id="obStep5">
+      <div class="ob-tour-icon ob-icon-settings">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"><circle cx="12" cy="12" r="3"/><path d="M12 1v3M12 20v3M4.2 4.2l2.1 2.1M17.7 17.7l2.1 2.1M1 12h3M20 12h3M4.2 19.8l2.1-2.1M17.7 6.3l2.1-2.1"/></svg>
+      </div>
+      <div class="ob-tour-section">Settings</div>
+      <div class="ob-tour-title">Manage your <em>workspace.</em></div>
+      <div class="ob-tour-desc">Control appearance, language, your subscription, and every ORIVEN AI intelligence preference — all in one place.</div>
+    </div>
+
+    <!-- Step 6: Team (Business only — hidden for other plans) -->
+    <div class="ob-step" id="obStep6" style="display:none">
+      <div class="ob-tour-icon ob-icon-team">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87M16 3.13a4 4 0 0 1 0 7.75"/></svg>
+      </div>
+      <div class="ob-tour-section" style="color:#A78BFA">Team</div>
+      <div class="ob-tour-title">Your team. <em>One intelligence.</em></div>
+      <div class="ob-tour-desc">Invite members, share your BrandCore, and build brand intelligence together inside a unified workspace that grows smarter over time.</div>
+    </div>
+
+    <!-- Navigation -->
+    <div class="ob-tour-nav">
+      <div class="ob-dots" id="obDotContainer">
+        <div class="ob-dot" id="obDot1"></div>
+        <div class="ob-dot" id="obDot2"></div>
+        <div class="ob-dot" id="obDot3"></div>
+        <div class="ob-dot" id="obDot4"></div>
+        <div class="ob-dot" id="obDot5"></div>
+        <div class="ob-dot ob-dot-team" id="obDot6" style="display:none"></div>
+      </div>
+      <div class="ob-tour-btns">
+        <button class="ob-back-btn" id="obBackBtn" onclick="obGoTo(_obStep - 1)" style="visibility:hidden">← Back</button>
+        <button class="ob-next-btn" id="obNextBtn" onclick="obGoTo(_obStep + 1)">Next →</button>
+      </div>
+    </div>
+
+  </div>
+</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
+<script src="supabase.js"></script>
+<script src="plans.js"></script>
+<script src="tracking.js"></script>
+<script src="auth.js"></script>
+<script src="guest.js"></script>
+<script src="guide.js"></script>
+<script src="app.js"></script>
+<script src="studio.js"></script>
+<script src="create.js"></script>
+<script src="assistant.js"></script>
+<script src="settings.js"></script>
+<script src="usage.js"></script>
+<script src="paywall.js"></script>
+<script src="team.js"></script>
+<script src="create-flow.js"></script>
+<script src="ugc.js"></script>
+<script src="inspiration.js"></script>
+
+<!-- ════════════════════════════════════════════════════════════
+     AI CONVERSATION FLOW OVERLAY
+     Used for: Image, Text, Campaign
+     ════════════════════════════════════════════════════════════ -->
+<div id="cfOverlay" class="cf-overlay" style="display:none" role="dialog" aria-modal="true" aria-label="AI Create Flow">
+  <div class="cf-panel">
+
+    <!-- Top bar -->
+    <div class="cf-topbar">
+      <div class="cf-type-pill">
+        <span class="cf-type-icon" id="cfTypeIcon"></span>
+        <span class="cf-type-label" id="cfTypeLabel">Image</span>
+      </div>
+      <span class="cf-credit-pill" id="cfCreditPill">1 Credit</span>
+      <button class="cf-close-btn" onclick="closeAIFlow()" aria-label="Close">
+        <svg viewBox="0 0 12 12" width="11" height="11" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round">
+          <path d="M1 1l10 10M11 1L1 11"/>
+        </svg>
+      </button>
+    </div>
+
+    <!-- Progress track -->
+    <div class="cf-progress-track">
+      <div class="cf-progress-fill" id="cfProgressFill"></div>
+    </div>
+
+    <!-- Conversation history (answered questions) -->
+    <div class="cf-history" id="cfHistory"></div>
+
+    <!-- Stage: current question + answers -->
+    <div class="cf-stage">
+
+      <!-- AI question block -->
+      <div class="cf-question-block" id="cfQuestionBlock">
+        <div class="cf-avatar">
+          <img src="assets/orivenlogo.png" alt="ORIVEN AI" width="22" height="22">
+        </div>
+        <div class="cf-question-content">
+          <div class="cf-question-text" id="cfQuestionText"></div>
+          <div class="cf-question-desc" id="cfQuestionDesc"></div>
+        </div>
+      </div>
+
+      <!-- Pill options -->
+      <div class="cf-options" id="cfOptions"></div>
+
+      <!-- Free-text input (for textarea steps) -->
+      <div class="cf-free-input" id="cfFreeInput" style="display:none">
+        <textarea class="cf-textarea" id="cfTextarea" rows="3" placeholder="Type here…"></textarea>
+        <div class="cf-input-row">
+          <button class="cf-skip-btn" id="cfSkipBtn" onclick="cfSkipStep()">Skip</button>
+          <button class="cf-continue-btn" onclick="cfSubmitText()">
+            Continue
+            <svg viewBox="0 0 16 16" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M3 8h10M9 4l4 4-4 4"/>
+            </svg>
+          </button>
+        </div>
+      </div>
+
+    </div>
+  </div>
+</div>
+
+
+<!-- UGC RESULT OVERLAY — shown after cfOverlay flow completes -->
+<div id="ucOverlay" class="cf-overlay" style="display:none;opacity:0" role="dialog" aria-modal="true" aria-label="AI UGC Creator">
+  <div class="cf-panel uc-panel">
+
+    <div class="cf-topbar">
+      <div class="cf-type-pill">
+        <span class="cf-type-icon">
+          <svg viewBox="0 0 20 20" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="1.5" y="4" width="12" height="12" rx="2.5"/><path d="M13.5 8L18 6v9l-4.5-2"/></svg>
+        </span>
+        <span class="cf-type-label">AI UGC Creator</span>
+      </div>
+      <button class="cf-close-btn" onclick="closeUGCCreator()" aria-label="Close">
+        <svg viewBox="0 0 12 12" width="11" height="11" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M1 1l10 10M11 1L1 11"/></svg>
+      </button>
+    </div>
+
+    <div class="uc-body">
+      <div id="ucStatusWrap" class="uc-status-wrap"></div>
+      <div id="ucVideoWrap" style="display:none">
+        <div id="ucVideoFrame" class="uc-video-frame uc-fmt-vertical">
+          <video id="ucVideoEl" controls playsinline class="uc-video-el"></video>
+        </div>
+        <p class="uc-dl-hint">Use the ⋯ menu on the video to download.</p>
+      </div>
+      <div id="ucRetryRow" class="uc-action-row" style="display:none">
+        <button class="btn btn-g" onclick="ucStartOver()">Try Again</button>
+      </div>
+      <div id="ucNewRow" class="uc-action-row" style="display:none">
+        <button class="btn btn-p" style="display:flex;align-items:center;gap:7px" onclick="ucStartOver()">
+          <svg viewBox="0 0 16 16" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><rect x="1.5" y="3.5" width="9" height="9" rx="2"/><path d="M10.5 7l4-1.5v6L10.5 10"/></svg>
+          Create Another
+        </button>
+      </div>
+    </div>
+
+  </div>
+</div>
+
+<!-- GUEST LANDING SCREEN -->
+<div id="guestOnboard" style="display:none">
+  <div class="gob-bg">
+    <div class="gob-blob-1"></div>
+    <div class="gob-blob-2"></div>
+  </div>
+  <div class="gob-content">
+    <div class="gob-logo">
+      <img src="assets/orivenlogo.png" alt="ORIVEN" class="gob-logo-img">
+    </div>
+    <h1 class="gob-headline">Your brand,<br><em>built by AI.</em></h1>
+    <p class="gob-sub">One idea. A complete brand identity — ready in minutes.</p>
+    <div class="gob-ctas">
+      <button class="gob-try" onclick="_guestOnboardTryFree()">
+        Try for free
+        <svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 8h10M9 4l4 4-4 4"/></svg>
+      </button>
+      <button class="gob-login" onclick="_guestOnboardLogin()">Log in</button>
+    </div>
+    <p class="gob-note">No account required &middot; Free to start</p>
+  </div>
+</div>
+
+<!-- GUEST BRANDCORE ENTRY SCREEN — full overlay, shown after Try for Free -->
+<div id="guestBCEntry" style="display:none">
+  <div class="gbc-bg">
+    <div class="gbc-blob"></div>
+  </div>
+
+  <!-- State: Choose -->
+  <div id="gbeChoose" class="gbc-wrap">
+    <div class="gbc-header">
+      <h2 class="gbc-title">Create your BrandCore</h2>
+      <p class="gbc-sub">Your identity that powers everything ORIVEN generates for you.</p>
+    </div>
+    <div class="gbc-options">
+      <button class="gbc-opt gbc-opt-featured" onclick="_gbeChooseAI()">
+        <div class="gbc-opt-badge">Recommended</div>
+        <div class="gbc-opt-icon">
+          <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2l2.4 6.4L21 9l-5 4.5 1.5 6.5L12 17l-5.5 3 1.5-6.5L3 9l6.6-.6Z"/></svg>
+        </div>
+        <div class="gbc-opt-body">
+          <div class="gbc-opt-title">Generate with AI</div>
+          <div class="gbc-opt-desc">Describe your brand — AI builds the full identity for you. Takes about 20 seconds.</div>
+        </div>
+        <svg class="gbc-opt-arr" viewBox="0 0 12 12" width="12" height="12" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M2 6h8M7 3l3 3-3 3"/></svg>
+      </button>
+      <button class="gbc-opt" onclick="_gbeChooseManual()">
+        <div class="gbc-opt-icon gbc-opt-icon-plain">
+          <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4 12.5-12.5z"/></svg>
+        </div>
+        <div class="gbc-opt-body">
+          <div class="gbc-opt-title">Manual setup</div>
+          <div class="gbc-opt-desc">Build your brand identity step by step with full control over every detail.</div>
+        </div>
+        <svg class="gbc-opt-arr" viewBox="0 0 12 12" width="12" height="12" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M2 6h8M7 3l3 3-3 3"/></svg>
+      </button>
+    </div>
+    <div class="gbc-hint">
+      <div class="gbc-hint-dot"></div>
+      Most users complete AI setup in under 30 seconds
+    </div>
+  </div>
+
+  <!-- State: AI input -->
+  <div id="gbeAI" style="display:none" class="gbc-wrap">
+    <button class="gbc-back" onclick="_gbeBack()">
+      <svg viewBox="0 0 12 12" width="12" height="12" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M8 2L4 6l4 4"/></svg>
+      Back
+    </button>
+    <div class="gbc-header">
+      <h2 class="gbc-title">Describe your brand</h2>
+      <p class="gbc-sub">One sentence is enough — AI fills in the rest.</p>
+    </div>
+    <input type="text" id="gbeInput" class="gbc-input" placeholder="e.g. A minimal skincare brand for women 25–40…" maxlength="300" onkeydown="if(event.key==='Enter')_gbeGenerate()">
+    <button class="gbc-gen-btn" onclick="_gbeGenerate()">
+      Generate BrandCore
+      <svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 8h10M9 4l4 4-4 4"/></svg>
+    </button>
+    <p class="gbc-input-hint">Takes 15–30 seconds &middot; Results appear instantly</p>
+  </div>
+
+  <!-- State: Loading -->
+  <div id="gbeLoading" style="display:none" class="gbc-wrap gbc-wrap-center">
+    <div class="gbc-orb">
+      <div class="gbc-orb-ring"></div>
+      <div class="gbc-orb-ring gbc-orb-ring-2"></div>
+      <div class="gbc-orb-core">
+        <img src="assets/orivenlogo.png" alt="ORIVEN" style="width:26px;height:26px;object-fit:contain;display:block">
+      </div>
+    </div>
+    <div class="gbc-loading-label" id="gbeLoadingStep">Analyzing your idea…</div>
+    <p class="gbc-loading-sub">Building your brand identity</p>
+    <div class="gbc-loading-dots"><span></span><span></span><span></span></div>
+  </div>
+</div>
+
+<!-- ════════════════════════════════════════════════════════════
+     GUEST CREATE MODAL — type selector + 1-shot generation
+     ════════════════════════════════════════════════════════════ -->
+<div id="guestCreateModal" style="display:none">
+  <div class="gcm-panel">
+
+    <button class="gcm-back" onclick="_guestCreateBack()">
+      <svg viewBox="0 0 12 12" width="12" height="12" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M8 2L4 6l4 4"/></svg>
+      Back
+    </button>
+
+    <div class="gcm-usage-bar">
+      <svg viewBox="0 0 14 14" width="12" height="12" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"><circle cx="7" cy="7" r="6"/><path d="M7 4v4l2.5 1.5"/></svg>
+      <span id="gcmUsageText">1 free generation left</span>
+    </div>
+
+    <div class="gcm-top">
+      <div class="gcm-title">What do you want to create?</div>
+      <div class="gcm-sub">Choose a type, describe your idea, and generate.</div>
+    </div>
+
+    <div class="gcm-type-row">
+      <button class="gcm-type-chip gcm-type-chip-on" data-type="image" onclick="_guestSetType('image')">
+        <svg viewBox="0 0 16 16" width="13" height="13" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><rect x="1" y="1" width="14" height="14" rx="2.5"/><circle cx="5.5" cy="5.5" r="1.3"/><path d="M1 11l3.5-3.5 3 3 2-2 3.5 3.5"/></svg>
+        <span class="gcm-chip-label">Image<span class="gcm-chip-desc">Generate visuals</span></span>
+      </button>
+      <button class="gcm-type-chip" data-type="campaign" onclick="_guestSetType('campaign')">
+        <svg viewBox="0 0 16 16" width="13" height="13" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><path d="M3 12L8 3l5 9"/><path d="M5.5 8.5h5"/></svg>
+        <span class="gcm-chip-label">Campaign<span class="gcm-chip-desc">Ads + messaging</span></span>
+      </button>
+      <button class="gcm-type-chip" data-type="copy" onclick="_guestSetType('copy')">
+        <svg viewBox="0 0 16 16" width="13" height="13" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><path d="M2 5h12M2 8h8M2 11h10"/></svg>
+        <span class="gcm-chip-label">Copy<span class="gcm-chip-desc">Text &amp; content</span></span>
+      </button>
+    </div>
+
+    <div id="gcCampaignCount" class="gcm-count-row" style="display:none">
+      <span class="gcm-count-label">How many ads?</span>
+      <div class="gcm-count-opts">
+        <button class="gcm-count-btn gcm-count-btn-on" data-count="1" onclick="_guestSetAdCount(1)">1</button>
+        <button class="gcm-count-btn" data-count="3" onclick="_guestSetAdCount(3)">3</button>
+        <button class="gcm-count-btn" data-count="5" onclick="_guestSetAdCount(5)">5</button>
+      </div>
+    </div>
+
+    <input
+      type="text"
+      id="gcInput"
+      class="gcm-input"
+      placeholder="e.g. A clean product shot for a skincare brand…"
+      maxlength="300"
+      onkeydown="if(event.key==='Enter')_guestGenerate()"
+    >
+
+    <button id="gcGenBtn" class="gcm-gen-btn" onclick="_guestGenerate()">
+      <span id="gcGenLabel">Generate image</span>
+      <svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 8h10M9 4l4 4-4 4"/></svg>
+    </button>
+
+    <div id="gcResultArea" style="display:none">
+      <div id="gcResultImg" class="gcm-result-img"></div>
+      <div id="gcSecondaryResult" class="gcm-secondary" style="display:none">
+        <div class="gcm-secondary-label">Caption idea</div>
+        <div id="gcSecondaryText" class="gcm-secondary-text"></div>
+      </div>
+    </div>
+
+    <div id="gcGate" class="gcm-gate" style="display:none">
+      <div class="gcm-gate-card">
+        <p class="gcm-gate-title">Nice, this is what we created.</p>
+        <p class="gcm-gate-sub">Create a free account to save it and unlock everything.</p>
+        <div class="gcm-gate-actions">
+          <button class="gcm-gate-primary" onclick="_gcGateCreate()">Create free account</button>
+          <button class="gcm-gate-ghost" onclick="_gcGateLogin()">Sign in</button>
+        </div>
+      </div>
+    </div>
+
+    <div class="gcm-footer">1 free result &middot; No account needed</div>
+
+  </div>
+</div>
+
+<!-- ════════════════════════════════════════════════════════════
+     GUEST LOCK SCREEN — shown when locked tab is clicked
+     ════════════════════════════════════════════════════════════ -->
+<div id="guestLockScreen" style="display:none">
+  <div class="gls-panel">
+
+    <button class="gls-back" onclick="_hideGuestLockScreen()">
+      <svg viewBox="0 0 12 12" width="12" height="12" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M8 2L4 6l4 4"/></svg>
+      Back
+    </button>
+
+    <div class="gls-lock-icon">
+      <svg viewBox="0 0 24 24" width="28" height="28" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><rect x="5" y="11" width="14" height="11" rx="2"/><path d="M8 11V7a4 4 0 0 1 8 0v4"/></svg>
+    </div>
+    <div class="gls-title" id="glsTitle">BrandCore</div>
+    <div class="gls-desc" id="glsDesc">Your complete brand identity system.</div>
+    <p class="gls-unlock">Everything unlocks after signup.</p>
+
+    <button class="gls-cta" onclick="_showGuestGate('signup')">Create account to unlock</button>
+    <button class="gls-login" onclick="_showGuestGate('login')">Already have an account? Sign in</button>
+
+  </div>
+</div>
+
+<!-- ════════════════════════════════════════════════════════════
+     GUEST GATE MODAL — auth forms only (signup / login)
+     ════════════════════════════════════════════════════════════ -->
+<div id="guestGate" style="display:none">
+  <div class="gg-panel">
+
+    <!-- Signup form (default) -->
+    <div id="ggSignup">
+      <button class="gg-back-btn" onclick="_ggBack()">
+        <svg viewBox="0 0 12 12" width="12" height="12" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M8 2L4 6l4 4"/></svg>
+        Back
+      </button>
+      <div class="gg-form-title">Create your free account</div>
+      <div class="gg-field-row">
+        <div class="gg-field">
+          <input type="text" id="ggFirst" class="gg-input" placeholder="First name" autocomplete="given-name">
+        </div>
+        <div class="gg-field">
+          <input type="text" id="ggLast" class="gg-input" placeholder="Last name" autocomplete="family-name">
+        </div>
+      </div>
+      <div class="gg-field">
+        <input type="email" id="ggEmail" class="gg-input" placeholder="Email address" autocomplete="email">
+      </div>
+      <div class="gg-field">
+        <input type="password" id="ggPass" class="gg-input" placeholder="Password (min. 6 characters)" autocomplete="new-password">
+      </div>
+      <div class="gg-err" id="ggErr"></div>
+      <button class="gg-submit-btn" id="ggSignupBtn" onclick="_ggDoSignup()">Create free account</button>
+    </div>
+
+    <!-- Login form -->
+    <div id="ggLogin" style="display:none">
+      <button class="gg-back-btn" onclick="_ggBack()">
+        <svg viewBox="0 0 12 12" width="12" height="12" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M8 2L4 6l4 4"/></svg>
+        Back
+      </button>
+      <div class="gg-form-title">Sign in to your account</div>
+      <div class="gg-field">
+        <input type="email" id="ggLoginEmail" class="gg-input" placeholder="Email address" autocomplete="email">
+      </div>
+      <div class="gg-field">
+        <input type="password" id="ggLoginPass" class="gg-input" placeholder="Password" autocomplete="current-password">
+      </div>
+      <div class="gg-err" id="ggLoginErr"></div>
+      <button class="gg-submit-btn" id="ggLoginBtn" onclick="_ggDoLogin()">Sign in</button>
+    </div>
+
+  </div>
+</div>
+
+<!-- GUEST CTA BAR — bottom strip shown after BrandCore is generated -->
+<div id="guestCTA" class="gcta-bar" style="display:none">
+  <span class="gcta-text">Sign up or log in to continue</span>
+  <div class="gcta-actions">
+    <button class="gcta-signup" onclick="_guestSignupClick()">Sign up</button>
+    <button class="gcta-login" onclick="_guestLoginClick()">Log in</button>
+  </div>
+</div>
+
+</body>
+</html>

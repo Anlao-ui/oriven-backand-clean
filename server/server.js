@@ -114,8 +114,8 @@ const supabaseAdmin = createClient(
   }
   const _price = (k) => console.log(' ', k, '=', process.env[k] || '❌ NOT SET');
   _price('STRIPE_PRICE_STARTER');
-  _price('STRIPE_PRICE_PREMIUM');
-  _price('STRIPE_PRICE_BUSINESS');
+  _price('STRIPE_PRICE_CREATOR');
+  _price('STRIPE_PRICE_PROFESSIONAL');
 
   // ── SMTP ─────────────────────────────────────────────────────────
   if (!process.env.SMTP_USER || !process.env.SMTP_PASS) {
@@ -128,9 +128,9 @@ const supabaseAdmin = createClient(
 })();
 
 const PRICE_IDS = {
-  starter:  process.env.STRIPE_PRICE_STARTER,
-  premium:  process.env.STRIPE_PRICE_PREMIUM,
-  business: process.env.STRIPE_PRICE_BUSINESS,
+  starter:      process.env.STRIPE_PRICE_STARTER,
+  creator:      process.env.STRIPE_PRICE_CREATOR,
+  professional: process.env.STRIPE_PRICE_PROFESSIONAL,
 };
 
 app.use(cors());
@@ -225,7 +225,7 @@ app.post('/api/stripe-webhook', express.raw({ type: 'application/json' }), async
   }
 
   // 6. Guard: plan must be a known value
-  const validPlans = ['starter', 'premium', 'business'];
+  const validPlans = ['starter', 'creator', 'professional'];
   if (!validPlans.includes(plan)) {
     console.error(`[Webhook] ❌ Unknown plan "${plan}" — expected one of: ${validPlans.join(', ')}`);
     return res.json({ received: true });
@@ -518,6 +518,19 @@ async function callAnthropic(systemPrompt, userPrompt) {
   return response.content[0].text;
 }
 
+// ── Strip markdown/quote fences from HTML output ────────────────
+function extractHtml(raw) {
+  let s = (raw || '').trim();
+  // Strip backtick fences: ```html ... ``` or ``` ... ```
+  s = s.replace(/^```(?:html)?\s*/i, '').replace(/\s*```\s*$/i, '').trim();
+  // Strip triple-quote fences: """html ... """ or """ ... """
+  s = s.replace(/^"{3}(?:html)?\s*/i, '').replace(/\s*"{3}\s*$/i, '').trim();
+  // If there's any preamble before the actual HTML, skip it
+  const htmlStart = s.search(/<(!DOCTYPE|html)[^>]*>/i);
+  if (htmlStart > 0) s = s.slice(htmlStart);
+  return s;
+}
+
 // ── DALL-E 3 supported sizes: 1024x1024 | 1024x1792 | 1792x1024 ─
 async function callDallE(imagePrompt, size = '1024x1024') {
   const client = _getOpenAI();
@@ -565,34 +578,47 @@ Output ONLY the image prompt. No labels. No explanation. No quotes.`;
 
 // ── Text — Anthropic only ───────────────────────────────────────
 // Used by: Text, Brand Assistant, Ideas, Video
+// ── Shared helper: format BrandCore context for AI prompts ──────
+function _buildBrandSection(bc) {
+  if (!bc || !bc.name) return '';
+  const lines = [];
+  if (bc.name)            lines.push(`Brand: ${bc.name}`);
+  if (bc.tagline)         lines.push(`Tagline: ${bc.tagline}`);
+  if (bc.toneOfVoice)     lines.push(`Tone of Voice: ${bc.toneOfVoice}`);
+  if (bc.personality)     lines.push(`Brand Personality: ${bc.personality}`);
+  if (bc.audience)        lines.push(`Target Audience: ${bc.audience}`);
+  if (bc.positioning)     lines.push(`Positioning: ${bc.positioning}`);
+  if (bc.visualDirection) lines.push(`Visual Direction: ${bc.visualDirection}`);
+  return lines.map(l => '  - ' + l).join('\n');
+}
+
 app.post('/api/generate-text', async (req, res) => {
   if (!_requireEnv('ANTHROPIC_API_KEY', res, 'Anthropic')) return;
-  const { prompt, type } = req.body;
+  const { prompt, type, brandContext } = req.body;
   if (!prompt) return res.status(400).json({ error: 'prompt is required' });
 
-  console.log(`[Text/${type || 'default'}] Anthropic → prompt received`);
+  const brandSection = _buildBrandSection(brandContext);
+  const hasBrand     = brandSection.length > 0;
+
+  console.log(`[Text/${type || 'default'}] Anthropic → prompt received | brand: ${hasBrand ? brandContext.name : 'none'}`);
 
   let systemPrompt;
 
   if (type === 'assistant') {
-    // Fully conversational — responds naturally to anything including greetings
-    systemPrompt = `You are a strategic brand advisor and creative consultant embedded in a professional AI brand platform called ORIVEN.
-You are in a real-time conversation with a brand owner or marketer about their brand.
-Be conversational, insightful, and warm. Respond naturally to greetings and casual messages.
-When brand context is provided in the message, use it to give specific, tailored advice.
-Keep responses focused and practical — think like a senior brand strategist having a genuine working conversation.
-Never refuse to engage. Never give generic, hollow advice. Always be direct and specific.`;
+    systemPrompt = `You are a smart, helpful AI assistant for brand owners and marketers. You have deep knowledge of marketing, branding, strategy, copywriting, campaigns, content, and creative direction.${hasBrand ? `\n\nYou have access to the user's brand context below. Use it when it's relevant to their question — but don't reference it in every response. When someone says "hi" or makes small talk, just respond naturally and briefly.\n\nBRAND CONTEXT (draw on this when relevant):\n${brandSection}` : ''}
+
+Be conversational and natural. Match the energy of the message — brief for casual, thorough for strategic questions. Think like a knowledgeable colleague, not a branded bot. Never start with hollow affirmations like "Great!" or "Absolutely!". Be direct.`;
+
   } else if (type === 'text' || type === 'video' || type === 'ideas') {
-    // Structured output generator — no casual replies
     systemPrompt = `You are a senior brand copywriter and content strategist.
 Generate structured, professional content based on the brief provided.
 Output must be specific, intentional, and ready to use — no preamble, no meta-commentary, no filler.
 Never respond conversationally. Never say "Sure!" or "Great!" or explain what you're about to do.
-Just produce the requested content, formatted cleanly and directly.`;
+Just produce the requested content, formatted cleanly and directly.${hasBrand ? `\n\nBRAND CONTEXT — every output must reflect this brand identity exactly:\n${brandSection}` : ''}`;
+
   } else {
-    // Fallback for any unrecognised type
     systemPrompt = `You are a senior brand copywriter. Generate professional brand content based on the brief.
-Be specific and direct. No preamble or filler.`;
+Be specific and direct. No preamble or filler.${hasBrand ? `\n\nBRAND CONTEXT:\n${brandSection}` : ''}`;
   }
 
   try {
@@ -602,6 +628,243 @@ Be specific and direct. No preamble or filler.`;
   } catch (err) {
     console.error(`[Text/${type || 'default'}] Anthropic error:`, err.message);
     res.status(500).json({ error: 'Failed to generate text. Please try again.' });
+  }
+});
+
+// ── Email Designer — Anthropic ─────────────────────────────────
+// Used by: Email Designer generator
+// Receives: { prompt }  Returns: { html }
+app.post('/api/generate-email', async (req, res) => {
+  const { prompt } = req.body;
+  if (!prompt) return res.status(400).json({ error: 'prompt is required' });
+
+  const system = `You are an expert email marketing designer and copywriter. Generate a complete, production-ready HTML email.
+
+CRITICAL: Output ONLY raw HTML starting with <!DOCTYPE html>. No markdown. No code fences. No explanation. No """ or \`\`\` wrappers. The very first character must be <.
+
+TECHNICAL REQUIREMENTS:
+- Table-based layout for maximum email client compatibility (Gmail, Outlook, Apple Mail)
+- Inline every CSS style — attribute style="" on every element (no <style> blocks)
+- Max-width 600px, centered with auto margins
+- Include realistic, compelling sections: header with brand name/logo text, main content body, CTA button, footer with unsubscribe link
+
+DESIGN REQUIREMENTS:
+- Apply brand colours from BrandCore as inline hex values throughout
+- Use web-safe fonts (Arial, Georgia, Helvetica)
+- Every section must have visible content — no blank areas
+- CTA button must be a styled table cell with solid background colour, not a plain link
+- Write all copy based on the brief — zero placeholder text`;
+
+  try {
+    const response = await anthropic.messages.create({
+      model: 'claude-opus-4-6',
+      max_tokens: 4096,
+      system,
+      messages: [{ role: 'user', content: prompt }]
+    });
+    const html = extractHtml(response.content[0].text);
+    res.json({ html });
+  } catch (err) {
+    console.error('[Email] Anthropic error:', err.message);
+    res.status(500).json({ error: 'Failed to generate email. Please try again.' });
+  }
+});
+
+// ── Presentation Generator — Anthropic ─────────────────────────
+// Used by: Presentation Generator
+// Receives: { prompt }  Returns: { slides: [{slide, title, content, notes}] }
+app.post('/api/generate-deck', async (req, res) => {
+  const { prompt } = req.body;
+  if (!prompt) return res.status(400).json({ error: 'prompt is required' });
+
+  const system = `You are a world-class presentation designer and strategist. Generate a complete slide deck with rich visual structure.
+
+CRITICAL: Respond with ONLY a valid JSON object. No markdown. No code fences. No explanation. Start directly with {
+
+OUTPUT SCHEMA — every slide must use this structure:
+{
+  "slides": [
+    {
+      "slide": 1,
+      "layout": "title",
+      "title": "The main headline",
+      "subtitle": "Supporting line (title/closing slides only)",
+      "eyebrow": "SMALL LABEL (optional, title slides only)",
+      "bullets": ["Bullet point 1", "Bullet point 2", "Bullet point 3"],
+      "content": "Paragraph or quote text (content/quote slides)",
+      "metrics": [{"value": "10x", "label": "Growth"}, {"value": "$2M", "label": "ARR"}],
+      "cta": "Call to action text (closing slides only)",
+      "attribution": "Quote author (quote slides only)",
+      "notes": "Speaker notes — what to say while this slide is shown"
+    }
+  ]
+}
+
+LAYOUT TYPES — assign the best layout for each slide:
+- "title" — Opening slide. Large title + subtitle. ALWAYS use for slide 1.
+- "content" — Standard slide. Headline + bullet points (3–5 max). Most slides use this.
+- "stats" — Data slide. Use "metrics" array (2–4 items, each with value + label). Use for any slide with numbers.
+- "feature" — Showcase slide. Use "bullets" as feature names (3–6 items in a grid). Use for feature/benefit lists.
+- "quote" — Impact statement. Use "content" for the quote, "attribution" for the source.
+- "closing" — Final slide. Title + body + CTA. ALWAYS use for the last slide.
+
+RULES:
+- Slide 1 MUST be "title" layout. Last slide MUST be "closing" layout.
+- Use "stats" for any slide with metrics, percentages, or numbers.
+- Bullets: max 5 items per slide. Each bullet must be punchy and concise (under 12 words).
+- Metrics values should be dramatic and formatted (e.g. "3.2x", "$4.8M", "94%").
+- Apply the brand voice and tone from BrandCore to every word.
+- Every slide must have a strong, memorable title.`;
+
+  try {
+    const response = await anthropic.messages.create({
+      model: 'claude-opus-4-6',
+      max_tokens: 3000,
+      system,
+      messages: [{ role: 'user', content: prompt }]
+    });
+    const raw = response.content[0].text.trim();
+    let parsed;
+    try {
+      // Strip markdown fences if present
+      const clean = raw.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '').trim();
+      parsed = JSON.parse(clean);
+    } catch (e) {
+      console.error('[Deck] JSON parse failed:', e.message, raw.slice(0, 200));
+      return res.status(500).json({ error: 'AI returned invalid slide structure. Please try again.' });
+    }
+    res.json({ slides: parsed.slides || [] });
+  } catch (err) {
+    console.error('[Deck] Anthropic error:', err.message);
+    res.status(500).json({ error: 'Failed to generate deck. Please try again.' });
+  }
+});
+
+// ── Poster Generator — Anthropic ───────────────────────────────
+// Used by: Poster Generator
+// Receives: { prompt }  Returns: { html }
+app.post('/api/generate-poster', async (req, res) => {
+  const { prompt } = req.body;
+  if (!prompt) return res.status(400).json({ error: 'prompt is required' });
+
+  const system = `You are a world-class graphic designer. Generate a bold, complete HTML/CSS poster rendered in a browser.
+
+CRITICAL: Output ONLY raw HTML starting with <!DOCTYPE html>. No markdown. No code fences. No explanation. No """ or \`\`\` wrappers. The very first character must be <.
+
+MANDATORY DOCUMENT STRUCTURE:
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <style>
+    /* All styles here */
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body { background: #111; display: flex; justify-content: center; align-items: flex-start; min-height: 100vh; padding: 20px; font-family: 'Arial', sans-serif; }
+    .poster { width: 794px; min-height: 1123px; position: relative; overflow: hidden; /* brand background */ }
+    /* All other styles... */
+  </style>
+</head>
+<body>
+  <div class="poster">
+    <!-- SECTION 1: Header with brand name (large, bold, brand color) -->
+    <!-- SECTION 2: Hero visual area (CSS gradients, geometric shapes — NO <img> tags) -->
+    <!-- SECTION 3: Headline (DOMINANT element — largest text on the poster) -->
+    <!-- SECTION 4: Supporting copy and body text -->
+    <!-- SECTION 5: CTA section (button or URL in brand color) -->
+    <!-- SECTION 6: Footer with brand details -->
+  </div>
+</body>
+</html>
+
+DESIGN REQUIREMENTS:
+- Apply brand colours from BrandCore as the primary palette throughout
+- Headline must be LARGE (80px+) and DOMINANT — the first thing the eye sees
+- Use CSS gradients, shapes, borders, and pseudo-elements for all visual interest (no <img>)
+- High contrast — dark background with bright brand-coloured accents, or vice versa
+- Every section must have VISIBLE CONTENT — zero blank areas
+- Bold typographic hierarchy: headline > subheading > body > CTA
+- Include all copy from the brief verbatim — no placeholder text
+
+POSTER MUST INCLUDE ALL OF THESE SECTIONS:
+1. Brand header (brand name or logo text, brand colour)
+2. Hero/visual area (abstract CSS shapes, gradient backdrop, geometric composition)
+3. Main headline (the largest, most dominant text)
+4. Supporting body text
+5. CTA area (styled button or highlighted URL)
+6. Footer (tagline or brand detail)`;
+
+  try {
+    const response = await anthropic.messages.create({
+      model: 'claude-opus-4-6',
+      max_tokens: 4096,
+      system,
+      messages: [{ role: 'user', content: prompt }]
+    });
+    const html = extractHtml(response.content[0].text);
+    res.json({ html });
+  } catch (err) {
+    console.error('[Poster] Anthropic error:', err.message);
+    res.status(500).json({ error: 'Failed to generate poster. Please try again.' });
+  }
+});
+
+app.post('/api/generate-infographic', async (req, res) => {
+  const { prompt } = req.body;
+  if (!prompt) return res.status(400).json({ error: 'prompt is required' });
+
+  const system = `You are a world-class infographic designer. Generate a bold, complete HTML/CSS infographic rendered in a browser.
+
+CRITICAL: Output ONLY raw HTML starting with <!DOCTYPE html>. No markdown. No code fences. No explanation. No """ or \`\`\` wrappers. The very first character must be <.
+
+MANDATORY DOCUMENT STRUCTURE:
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body { background: #0F0F0F; display: flex; justify-content: center; align-items: flex-start; min-height: 100vh; padding: 20px; font-family: 'Arial', sans-serif; }
+    .infographic { width: 794px; min-height: 1123px; position: relative; overflow: hidden; }
+  </style>
+</head>
+<body>
+  <div class="infographic">
+    <!-- SECTION 1: Title header with brand name and infographic title -->
+    <!-- SECTION 2: Introduction / context line -->
+    <!-- SECTION 3: Main data visualisation (charts, bars, steps, timeline, icons — all CSS only) -->
+    <!-- SECTION 4: Key statistics or callout facts -->
+    <!-- SECTION 5: CTA footer with brand name -->
+  </div>
+</body>
+</html>
+
+DESIGN REQUIREMENTS:
+- Apply brand colours from BrandCore as the primary palette throughout
+- Title must be prominent (56px+) at the top of the infographic
+- Use CSS-only visualisations: bar charts, progress bars, icon shapes, numbered circles, connecting lines — NO <img> tags
+- Data must be visually encoded — numbers should be LARGE and immediately readable
+- High visual hierarchy: title > section headers > data points > supporting text
+- All copy from the brief included verbatim — no placeholder text
+- Sections clearly separated with whitespace, dividers, or background contrast
+
+INFOGRAPHIC MUST INCLUDE ALL OF THESE:
+1. Brand header (brand name, brand colour, infographic title)
+2. Main data section (visually rich — charts, steps, icons, stats, all CSS)
+3. At least one prominent callout stat or highlight box
+4. CTA footer (brand-coloured, action-oriented)`;
+
+  try {
+    const response = await anthropic.messages.create({
+      model: 'claude-opus-4-6',
+      max_tokens: 4096,
+      system,
+      messages: [{ role: 'user', content: prompt }]
+    });
+    const html = extractHtml(response.content[0].text);
+    res.json({ html });
+  } catch (err) {
+    console.error('[Infographic] Anthropic error:', err.message);
+    res.status(500).json({ error: 'Failed to generate infographic. Please try again.' });
   }
 });
 
@@ -830,215 +1093,245 @@ Rules:
 
 // ── BrandCore — AI Generate ─────────────────────────────────────
 app.post('/api/generate-brandcore', async (req, res) => {
-  const { brandName, type, industry, description, targetAudience, colorMood, brandStyle, personality } = req.body;
+  const {
+    brandName, description, industry, targetAudience,
+    brandType, visualStyle, colorDir, brandFeeling,
+    // legacy fields kept for backward compatibility
+    type, colorMood, brandStyle, personality
+  } = req.body;
+
   if (!brandName) return res.status(400).json({ error: 'brandName is required' });
 
-  console.log('[BrandCore] Anthropic → generating brand identity for:', brandName);
-  try {
-    const system = `You are ORIVEN BrandCore AI — a world-class combination of brand strategist, creative director, UI/UX design systems architect, conversion designer, and visual identity specialist.
+  const effectiveIndustry    = industry    || type         || '';
+  const effectiveVisualStyle = visualStyle || brandStyle   || '';
+  const effectiveColorDir    = colorDir    || colorMood    || '';
+  const effectivePersonality = personality || brandType    || '';
 
-Before generating anything, you MUST deeply reason through the brand:
-- Analyze the niche, audience, positioning, emotional tone, and desired perception
-- Consider conversion goals, market sophistication, visual expectations, pricing level, trust requirements, and cultural aesthetic
-- Reason through the psychology of the brand FIRST — then design
+  console.log('[BrandCore] Generating complete brand identity for:', brandName);
 
-You MUST NEVER:
-- Generate generic AI branding
-- Reuse repetitive startup aesthetics or predictable design outputs
-- Default to minimal black-and-white unless strategically justified
-- Use random gradients unless emotionally purposeful
-- Output vague, placeholder, or cliché language
+  const system = `You are ORIVEN BrandCore AI — a world-class brand strategist, creative director, design systems architect, and visual identity specialist.
 
-Every brand must feel: strategically unique, emotionally intentional, commercially believable, visually consistent, and professionally designed.
+Your task is to generate a COMPLETE, real brand identity system from a user brief. Every field must be specific, intentional, and commercially believable.
 
-COLOR SYSTEM RULES:
-- Colors must be purposeful hex codes that reflect industry, audience, emotional tone, and pricing perception
-- Primary color must anchor the brand's emotional identity
-- Secondary and accent colors must create deliberate contrast and hierarchy
-- Avoid generic palettes — every color choice must be explainable
+STRICT RULES:
+- Never produce generic, placeholder, or cliché output
+- Every color must be a purposeful hex code justified by the brand's emotional register, industry, and audience
+- Fonts must be real, widely available typefaces with genuine strategic reasoning
+- Personality must be exactly 4 distinct, powerful single-word keywords (not phrases)
+- Tone of Voice must be exactly one clear sentence describing how the brand speaks
+- Positioning must be exactly one sentence: what the brand is, who it serves, and what makes it distinct
+- Tagline must be punchy, memorable, and ≤ 8 words
+- Visual direction must be a vivid, specific description of the visual language (not generic adjectives)
+- Logo concept imagePrompt must be visual-only, contain NO text or letterforms, suitable for AI image generation
+- Choose typography that feels intentional: pair a distinctive heading font with a high-readability body font
 
-TYPOGRAPHY RULES:
-- Heading font must reflect the brand's authority and emotional register
-- Body font must support readability and perceived quality
-- Choose real, widely available fonts (e.g. Montserrat, Inter, Playfair Display, DM Sans, Lora, Geist, Syne, Cabinet Grotesk, Fraunces, Plus Jakarta Sans)
-- Font pairing must feel intentional, not default
+COLOR SYSTEM REQUIREMENTS:
+- Primary color: anchors brand recognition
+- Secondary color: supports layouts and background surfaces
+- Accent color: highlights interactive elements and key moments
+- Text color: ensures readability (usually near-black or near-white depending on background direction)
+- Support Color 1: neutral surface for content areas
+- Support Color 2: secondary surfaces, dividers, subtle backgrounds
+- All 6 colors must work together as a cohesive system
 
-LOGO CONCEPT RULES:
-- logoConcept.imagePrompt must be specific, visual, contain NO text or letterforms, and be suitable for AI image generation
-- Describe the mark itself: shape language, geometry, metaphor, weight, mood
-- Style must match the brand's positioning (e.g. not "futuristic wordmark" for an artisan brand)
+AVAILABLE FONTS (choose from this list or similar quality equivalents):
+Instrument Serif, Fraunces, Playfair Display, Lora, DM Serif Display, Cormorant Garamond, Libre Baskerville, Geist, Inter, DM Sans, Plus Jakarta Sans, Syne, Cabinet Grotesk, Satoshi, Space Grotesk, Montserrat, Raleway, Work Sans
 
 OUTPUT FORMAT:
-Reply ONLY with valid JSON — no markdown fences, no extra text, no explanation, no preamble.
-The JSON must match this exact structure:
+Reply ONLY with valid JSON. No markdown fences. No extra text. No preamble.
+
 {
   "brandName": "string",
+  "tagline": "string — ≤8 words, punchy, brand-defining",
+  "colorSystem": {
+    "primary":   { "hex": "#XXXXXX", "name": "Primary",   "reason": "string — why this color for this brand" },
+    "secondary": { "hex": "#XXXXXX", "name": "Secondary", "reason": "string — why this color for this brand" },
+    "accent":    { "hex": "#XXXXXX", "name": "Accent",    "reason": "string — why this color for this brand" },
+    "text":      { "hex": "#XXXXXX", "name": "Text",      "reason": "string — readability and contrast rationale" },
+    "support1":  { "hex": "#XXXXXX", "name": "Support 1", "reason": "string — usage context" },
+    "support2":  { "hex": "#XXXXXX", "name": "Support 2", "reason": "string — usage context" }
+  },
+  "typography": {
+    "heading": { "family": "string", "reason": "string — why this font matches the brand personality" },
+    "body":    { "family": "string", "reason": "string — why this font supports readability and brand feel" }
+  },
   "brandStrategy": {
-    "positioning": "string (2–3 sentences: what the brand is, who it serves, and what makes it distinct)",
-    "targetAudience": "string (specific psychographic + demographic description)",
-    "brandPersonality": "string (3–5 personality traits with brief reasoning)",
-    "toneOfVoice": "string (how the brand speaks: register, vocabulary, energy level)"
+    "positioning":    "string — exactly one sentence",
+    "targetAudience": "string — specific psychographic and demographic description",
+    "personality":    ["keyword1", "keyword2", "keyword3", "keyword4"],
+    "toneOfVoice":   "string — exactly one sentence describing how the brand speaks"
   },
   "brandCore": {
-    "brandPromise": "string (one sharp sentence the customer can hold the brand to)",
-    "mission": "string (why the brand exists beyond profit)",
-    "vision": "string (what success looks like in 5–10 years)",
-    "values": ["string", "string", "string"]
+    "brandPromise": "string — one sharp sentence the customer can hold the brand to",
+    "mission":      "string — why the brand exists beyond profit",
+    "vision":       "string — what success looks like in 5 years",
+    "values":       ["string", "string", "string"]
   },
-  "visualIdentity": {
-    "primaryColor": "string (hex)",
-    "secondaryColor": "string (hex)",
-    "accentColor": "string (hex)",
-    "headingFont": "string",
-    "bodyFont": "string",
-    "styleDirection": "string (vivid description of the overall visual language and feel)",
-    "colorMood": "string (the emotional effect of the palette)"
-  },
+  "visualDirection": "string — vivid, specific description of the complete visual language and aesthetic direction",
   "logoConcept": {
-    "description": "string (strategic rationale — what the logo communicates and why)",
-    "style": "string (wordmark / lettermark / icon / combination mark — and why)",
-    "imagePrompt": "string (visual-only DALL-E prompt for the logo mark — no text, no letterforms)"
+    "description":  "string — strategic rationale: what the logo communicates and why",
+    "style":       "string — wordmark / lettermark / icon / combination mark and why",
+    "imagePrompt": "string — specific DALL-E prompt, visual only, no text, no letterforms"
   }
 }`;
 
-    const userPrompt = `Generate a complete brand identity for the following brief:
+  const userPrompt = `Generate a complete BrandCore for the following brand brief. Use ALL provided context to make every decision specific and intentional.
 
+BRAND BRIEF:
 Brand Name: ${brandName}
-Brand Type: ${type || 'not specified'}
-Industry: ${industry || 'not specified'}
-Description: ${description || 'not specified'}
+What the brand does: ${description || 'not specified'}
+Industry: ${effectiveIndustry || 'not specified'}
 Target Audience: ${targetAudience || 'not specified'}
-Color Mood: ${colorMood || 'not specified'}
-Brand Style: ${brandStyle || 'not specified'}
-Personality Tags: ${personality || 'not specified'}
+Brand Character / Type: ${brandType || effectivePersonality || 'not specified'}
+Visual Style Preference: ${effectiveVisualStyle || 'not specified'}
+Color Direction: ${effectiveColorDir || 'not specified'}
+Desired Brand Feeling: ${brandFeeling || 'not specified'}
 
-Return the full JSON brand identity object.`;
+Generate the complete BrandCore JSON now. Every field must be specific to this brand — no generic placeholders.`;
 
-    const raw = await callAnthropic(system, userPrompt);
-    const cleaned = raw.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '').trim();
-    let brandcore;
+  try {
+    // Use a higher token limit than the shared callAnthropic() helper (which is capped at 1024)
+    const params = {
+      model:      'claude-opus-4-6',
+      max_tokens: 3000,
+      system,
+      messages:   [{ role: 'user', content: userPrompt }]
+    };
+    const response = await anthropic.messages.create(params);
+    const raw = response.content[0].text;
+
+    const cleaned = raw
+      .replace(/^```(?:json)?\s*/i, '')
+      .replace(/\s*```$/, '')
+      .trim();
+
+    let bc;
     try {
-      brandcore = JSON.parse(cleaned);
+      bc = JSON.parse(cleaned);
     } catch {
-      console.error('[BrandCore] JSON parse failed, raw output:', raw);
-      return res.status(500).json({ error: 'Failed to parse brand identity output' });
+      console.error('[BrandCore] JSON parse failed. Raw length:', raw.length);
+      console.error('[BrandCore] Raw preview:', raw.slice(0, 500));
+      return res.status(500).json({ error: 'Failed to parse brand identity. Please try again.' });
     }
 
-    console.log('[BrandCore] Anthropic → brand identity ready for:', brandName);
-    res.json(brandcore);
+    console.log('[BrandCore] Generated for:', brandName, '| tagline:', bc.tagline);
+    res.json(bc);
   } catch (err) {
-    console.error('[BrandCore] Anthropic error:', err.message);
-    res.status(500).json({ error: 'Failed to generate brand identity' });
+    console.error('[BrandCore] Generation error:', err.message);
+    res.status(500).json({ error: 'Brand generation failed. Please try again.' });
   }
 });
 
-// ── Brand Check — AI Analysis ───────────────────────────────────
+// ── Brand Check — OpenAI Quality Analysis ────────────────────────
 app.post('/api/brand-check', async (req, res) => {
   const {
-    brandName, colors, fonts, brandPromise, description, targetAudience,
-    styleDirection, colorMood, mission, vision, personality, toneOfVoice,
-    values, positioning, logoConcept, imageData,
+    brandName, tagline, colors, fonts, brandPromise, description,
+    targetAudience, styleDirection, colorMood, mission, vision,
+    personality, toneOfVoice, values, positioning, logoConcept,
   } = req.body;
   if (!brandName) return res.status(400).json({ error: 'brandName is required' });
 
-  const hasImage = !!(imageData);
-  console.log('[BrandCheck] Anthropic → analysing brand:', brandName, hasImage ? '(with image)' : '(manual/BrandCore)');
+  const openai = _getOpenAI();
+  if (!openai) return res.status(503).json({ error: 'OpenAI API key not configured' });
+
+  console.log('[BrandCheck] OpenAI → analysing brand:', brandName);
   try {
-    const system = `You are a senior brand strategist and consultant with 20 years of experience evaluating brand identities.
-Your task is to critically assess the complete brand setup provided and deliver an honest, expert-level analysis.
-Reply ONLY with valid JSON — no markdown fences, no extra text, no explanation.
-The JSON must match this exact structure:
+    const system = `You are a world-class brand strategist with 20 years of experience advising high-growth companies, DTC brands, and funded startups.
+
+Your role: Perform an intelligent, quality-driven brand audit. This is NOT a completeness check.
+A brand with every field filled in can still score poorly if the positioning is weak, the personality is generic, or the visual direction is inconsistent.
+
+Evaluate quality across ten dimensions:
+1. Consistency — do all elements reinforce each other?
+2. Differentiation — does this brand stand out or blend in?
+3. Clarity — is the positioning instantly understandable?
+4. Positioning Strength — is it specific, ownable, and meaningful?
+5. Audience Alignment — does the identity match who it's speaking to?
+6. Visual Coherence — do colors, typography, and style direction work as a system?
+7. Brand Personality Strength — is it distinctive or generic?
+8. Tone of Voice Alignment — does the tone match the personality and audience?
+9. Typography Suitability — does the font choice reinforce the brand feeling?
+10. Color Harmony — does the palette feel intentional and emotionally right?
+
+Score calibration:
+- 30–50: Weak positioning, generic personality, poor alignment
+- 51–65: Some elements working but lacks coherence or differentiation
+- 66–79: Solid foundation with clear opportunities to sharpen
+- 80–89: Strong, coherent identity with minor gaps
+- 90–100: Exceptional clarity, differentiation, and system coherence
+
+Return ONLY valid JSON — no markdown, no extra text — matching this exact structure:
 {
   "score": number,
+  "professionalLevel": "string",
   "summary": "string",
-  "strengths": ["string", "string"],
-  "weaknesses": ["string", "string"],
-  "improvements": ["string", "string"],
-  "consistencyCheck": "string",
-  "professionalLevel": "string"
+  "strengths": ["string"],
+  "opportunities": ["string"],
+  "recommendations": ["string"]
 }
 
 Rules:
-- score is 0–100 reflecting overall brand strength and professionalism
-- summary is 2–3 sentences: honest, strategic, high-level verdict on the brand as a whole
-- strengths: 2–4 specific, concrete positives — reference actual brand elements, avoid vague praise
-- weaknesses: 2–4 specific gaps or problems — be direct and honest but constructive
-- improvements: 2–4 actionable, prioritised recommendations — be specific about what to change and why
-- consistencyCheck: assess alignment between colors, fonts, promise, mission, vision, audience, style, and tone — call out gaps explicitly
-- professionalLevel: one of "beginner", "developing", "intermediate", "advanced", "premium"
-- Evaluate clarity of positioning, memorability, audience fit, and whether the brand feels cohesive
-- If an image is provided, assess it visually — check color usage, typography, layout, and brand alignment
-- Never produce vague, generic, or repetitive feedback — this should read like a premium brand audit`;
+- score: integer 0–100 based entirely on quality, not completeness. Be honest — inflation destroys trust.
+- professionalLevel: one of "developing", "emerging", "established", "advanced", "premium"
+- summary: 2–3 sentences. The most important strategic truth about this brand. Direct, warm, insightful — write as a trusted advisor to a founder, not a report generator.
+- strengths: 3–5 items. Specific and concrete. Reference actual brand elements. No vague praise.
+- opportunities: 3–5 items. Where recognition is being left on the table. Frame as strategic guidance. Be specific about what to improve and why it matters for audience connection or market differentiation.
+- recommendations: 3–5 items. Concrete, prioritized actions the brand owner should take next. Most impactful first. Each must be immediately actionable.
+- Every line must be specific to THIS brand. Generic feedback is a failure.`;
 
-    // Build a rich brand context block from all available fields
-    const lines = [];
-    lines.push(`Brand Name: ${brandName}`);
-    if (positioning)    lines.push(`Positioning: ${positioning}`);
-    if (brandPromise)   lines.push(`Brand Promise: ${brandPromise}`);
+    // Build rich brand context
+    const lines = [`BRAND NAME: ${brandName}`];
+    if (tagline)        lines.push(`Tagline / Brand Promise: ${tagline}`);
+    else if (brandPromise) lines.push(`Brand Promise: ${brandPromise}`);
+    if (positioning)    lines.push(`Positioning Statement: ${positioning}`);
+    if (description)    lines.push(`Brand Description: ${description}`);
     if (mission)        lines.push(`Mission: ${mission}`);
     if (vision)         lines.push(`Vision: ${vision}`);
-    if (values)         lines.push(`Brand Values: ${values}`);
     if (personality)    lines.push(`Brand Personality: ${personality}`);
     if (toneOfVoice)    lines.push(`Tone of Voice: ${toneOfVoice}`);
+    if (values)         lines.push(`Brand Values / Keywords: ${values}`);
     if (targetAudience) lines.push(`Target Audience: ${targetAudience}`);
-    if (description)    lines.push(`Description: ${description}`);
-    if (colors) lines.push(`Color Palette: ${Array.isArray(colors) ? colors.join(', ') : colors}`);
-    if (fonts)  lines.push(`Typography: ${Array.isArray(fonts) ? fonts.join(', ') : fonts}`);
-    if (styleDirection) lines.push(`Style Direction: ${styleDirection}`);
-    if (colorMood)      lines.push(`Color Mood: ${colorMood}`);
+    if (colors && (Array.isArray(colors) ? colors.length : colors)) {
+      lines.push(`Color Palette: ${Array.isArray(colors) ? colors.join(' | ') : colors}`);
+    }
+    if (colorMood)      lines.push(`Color Mood / Direction: ${colorMood}`);
+    if (fonts && (Array.isArray(fonts) ? fonts.length : fonts)) {
+      lines.push(`Typography: ${Array.isArray(fonts) ? fonts.join(' | ') : fonts}`);
+    }
+    if (styleDirection) lines.push(`Visual Style Direction: ${styleDirection}`);
     if (logoConcept)    lines.push(`Logo Concept: ${logoConcept}`);
 
-    // Build message content — support vision if image provided
-    const content = [];
+    const userMsg = `Perform a comprehensive brand audit for the following brand identity. Evaluate quality rigorously — not just whether fields are filled in. Return your full strategic analysis as JSON.\n\n${lines.join('\n')}`;
 
-    if (hasImage) {
-      const match = imageData.match(/^data:([a-zA-Z0-9+/]+\/[a-zA-Z0-9+/]+);base64,(.+)$/);
-      if (match) {
-        content.push({
-          type: 'image',
-          source: { type: 'base64', media_type: match[1], data: match[2] },
-        });
-        content.push({
-          type: 'text',
-          text: `Analyse this uploaded brand asset for "${brandName}". Check visual alignment with the brand identity below, then return a full brand check report.\n\nFull brand identity:\n${lines.join('\n')}`,
-        });
-      } else {
-        // Invalid data URL — fall through to text-only
-        content.push({ type: 'text', text: `Perform a comprehensive brand audit and return a full brand check report for the following brand identity:\n\n${lines.join('\n')}` });
-      }
-    } else {
-      content.push({ type: 'text', text: `Perform a comprehensive brand audit and return a full brand check report for the following brand identity:\n\n${lines.join('\n')}` });
-    }
-
-    // Direct Anthropic call so we can pass structured content (vision support)
-    const response = await anthropic.messages.create({
-      model: 'claude-opus-4-6',
-      max_tokens: 1024,
-      system,
-      messages: [{ role: 'user', content }],
+    const response = await openai.chat.completions.create({
+      model: 'gpt-4o',
+      response_format: { type: 'json_object' },
+      max_tokens: 1200,
+      messages: [
+        { role: 'system', content: system },
+        { role: 'user',   content: userMsg },
+      ],
     });
 
-    const raw = response.content[0].text;
-    const cleaned = raw.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '').trim();
     let report;
     try {
-      report = JSON.parse(cleaned);
+      report = JSON.parse(response.choices[0].message.content);
     } catch {
-      console.error('[BrandCheck] JSON parse failed, raw output:', raw);
+      console.error('[BrandCheck] JSON parse failed');
       return res.status(500).json({ error: 'Failed to parse brand check output' });
     }
 
-    console.log('[BrandCheck] Anthropic → analysis ready for:', brandName, '| Score:', report.score);
+    console.log('[BrandCheck] OpenAI → analysis ready for:', brandName, '| Score:', report.score);
     res.json(report);
   } catch (err) {
-    console.error('[BrandCheck] Anthropic error:', err.message);
+    console.error('[BrandCheck] OpenAI error:', err.message);
     res.status(500).json({ error: 'Failed to run brand check' });
   }
 });
 
 // ── Stripe checkout session ─────────────────────────────────────
 app.post('/api/create-checkout-session', async (req, res) => {
-  const { plan, userId, userEmail } = req.body;
+  const { plan, userId, userEmail, source } = req.body;
 
   console.log(`[Checkout] ▶ Request received — plan: ${plan}, userId: ${userId}, email: ${userEmail || '(none)'}`);
 
@@ -1047,7 +1340,7 @@ app.post('/api/create-checkout-session', async (req, res) => {
     return res.status(400).json({ error: 'plan and userId are required' });
   }
 
-  const validPlans = ['starter', 'premium', 'business'];
+  const validPlans = ['starter', 'creator', 'professional'];
   if (!validPlans.includes(plan)) {
     console.error(`[Checkout] ❌ Unrecognised plan name: "${plan}" — expected one of: ${validPlans.join(', ')}`);
     return res.status(400).json({ error: `Unrecognised plan: ${plan}` });
@@ -1062,6 +1355,9 @@ app.post('/api/create-checkout-session', async (req, res) => {
   }
 
   const frontendUrl = FRONTEND_URL;
+  // Plan-page checkout returns to /plan on cancel (new user hasn't entered the app yet).
+  // In-app paywall checkout returns to /app on cancel (existing user stays in the app).
+  const cancelPath = source === 'plan' ? '/plan?canceled=true' : '/app?canceled=true';
 
   try {
     const session = await stripe.checkout.sessions.create({
@@ -1070,8 +1366,8 @@ app.post('/api/create-checkout-session', async (req, res) => {
       line_items: [{ price: priceId, quantity: 1 }],
       customer_email: userEmail || undefined,
       metadata: { userId, plan },
-      success_url: `${frontendUrl}?success=true`,
-      cancel_url:  `${frontendUrl}?canceled=true`,
+      success_url: `${frontendUrl}/app?success=true`,
+      cancel_url:  `${frontendUrl}${cancelPath}`,
     });
 
     console.log(`[Checkout] ✅ Session created`);
@@ -1079,7 +1375,8 @@ app.post('/api/create-checkout-session', async (req, res) => {
     console.log(`[Checkout]    userId:       ${userId}`);
     console.log(`[Checkout]    plan:         ${plan}`);
     console.log(`[Checkout]    priceId:      ${priceId}`);
-    console.log(`[Checkout]    success_url:  ${frontendUrl}?success=true`);
+    console.log(`[Checkout]    success_url:  ${frontendUrl}/app?success=true`);
+    console.log(`[Checkout]    cancel_url:   ${frontendUrl}${cancelPath}`);
     res.json({ url: session.url });
   } catch (err) {
     // Log every available field on Stripe errors for easy debugging
@@ -1129,7 +1426,7 @@ app.post('/api/schedule-plan-change', async (req, res) => {
   const { plan } = req.body;
   if (!plan) return res.status(400).json({ error: 'plan is required' });
 
-  const validPlans = ['free', 'starter', 'premium', 'business'];
+  const validPlans = ['free', 'starter', 'creator', 'professional'];
   if (!validPlans.includes(plan)) return res.status(400).json({ error: 'Invalid plan' });
 
   const { data: profile, error: profileError } = await supabaseAdmin
@@ -1271,17 +1568,19 @@ app.get('/api/get-usage', async (req, res) => {
 });
 
 // ── POST /api/increment-usage ────────────────────────────────────
+// Body: { count?: number }  — credits consumed (default 1, capped at 20)
 app.post('/api/increment-usage', async (req, res) => {
   const user = await getUserFromToken(req);
   if (!user) return res.status(401).json({ error: 'Unauthorized' });
+  const amount       = Math.min(Math.max(parseInt(req.body.count) || 1, 1), 20);
   const currentMonth = new Date().toISOString().slice(0, 7);
   const currentDay   = new Date().toISOString().slice(0, 10);
   try {
     const { data } = await supabaseAdmin.from('profiles')
       .select('usage_data').eq('id', user.id).maybeSingle();
     const prev         = (data && data.usage_data) || {};
-    const monthlyCount = prev.monthly_key === currentMonth ? (prev.monthly_count || 0) + 1 : 1;
-    const dailyCount   = prev.daily_key   === currentDay   ? (prev.daily_count   || 0) + 1 : 1;
+    const monthlyCount = prev.monthly_key === currentMonth ? (prev.monthly_count || 0) + amount : amount;
+    const dailyCount   = prev.daily_key   === currentDay   ? (prev.daily_count   || 0) + amount : amount;
     await supabaseAdmin.from('profiles').update({
       usage_data: { monthly_count: monthlyCount, monthly_key: currentMonth, daily_count: dailyCount, daily_key: currentDay }
     }).eq('id', user.id);
@@ -1485,7 +1784,7 @@ app.post('/api/send-invite', async (req, res) => {
 
       <!-- CTA -->
       <div style="text-align:center;margin:8px 0 28px;">
-        <a href="https://oriven.app" style="display:inline-block;background:#B7FF2A;color:#000;font-size:14px;font-weight:600;text-decoration:none;padding:13px 32px;border-radius:8px;letter-spacing:.01em;">
+        <a href="https://orivenai.com/app" style="display:inline-block;background:#B7FF2A;color:#000;font-size:14px;font-weight:600;text-decoration:none;padding:13px 32px;border-radius:8px;letter-spacing:.01em;">
           Accept Invitation &rarr;
         </a>
       </div>
@@ -1505,7 +1804,7 @@ app.post('/api/send-invite', async (req, res) => {
       to:      email,
       subject: `You've been invited to ${senderWorkspace} on ORIVEN`,
       html:    html,
-      text:    `Hi ${recipientName},\n\nYou've been invited to join "${senderWorkspace}" on ORIVEN as a ${roleLabel}.\n\nVisit https://oriven.app to accept.\n\n— The ORIVEN Team`
+      text:    `Hi ${recipientName},\n\nYou've been invited to join "${senderWorkspace}" on ORIVEN as a ${roleLabel}.\n\nVisit https://orivenai.com/app to accept.\n\n— The ORIVEN Team`
     });
 
     console.log(`[Invite] ✅ Invite sent to ${email} (role: ${roleLabel}, workspace: ${senderWorkspace})`);
@@ -1735,7 +2034,10 @@ app.post('/api/generate-ugc', async (req, res) => {
   console.log("UGC BODY", JSON.stringify(req.body));
 
   const { adFeeling, adGoal, adContext, avatarId, voiceId, avatarStyle,
-          brandName, brandDesc, brandTone, brandAudience, brandPromise, brandDiff, brandWords,
+          brandName, brandDesc,
+          brandTone, brandToneOfVoice, brandPersonality,
+          brandAudience, brandPositioning, brandPromise, brandDiff,
+          brandVisualDir, brandWords,
           background, customScript, format } = req.body || {};
 
   const formatDimensions = {
@@ -1854,15 +2156,19 @@ app.post('/api/generate-ugc', async (req, res) => {
         launch:    'GOAL: Announce a new launch. Create FOMO and excitement for something that just dropped. CTA should signal scarcity or newness: "just launched", "early access", "be first".',
       }[adGoal] || '';
 
-      // Build brand context block for the system prompt
+      // Build brand context block — prefer new BrandCore fields, fall back to legacy fields
+      const effectiveTone = brandToneOfVoice || brandTone || '';
+      const effectivePos  = brandPositioning || brandPromise || brandDiff || '';
+
       const brandLines = [
-        brandName     ? `Brand name: ${brandName}` : '',
-        brandDesc     ? `What it is: ${brandDesc}` : '',
-        brandTone     ? `Tone of voice: ${brandTone}` : '',
-        brandAudience ? `Target audience: ${brandAudience}` : '',
-        brandPromise  ? `Brand promise: ${brandPromise}` : '',
-        brandDiff     ? `What makes it unique: ${brandDiff}` : '',
-        brandWords    ? `Key vocabulary to use naturally: ${brandWords}` : '',
+        brandName        ? `Brand: ${brandName}` : '',
+        brandDesc        ? `What it does: ${brandDesc}` : '',
+        effectiveTone    ? `Tone of Voice: ${effectiveTone}` : '',
+        brandPersonality ? `Brand Personality: ${brandPersonality}` : '',
+        brandAudience    ? `Target Audience: ${brandAudience}` : '',
+        effectivePos     ? `Positioning: ${effectivePos}` : '',
+        brandVisualDir   ? `Visual Direction: ${brandVisualDir}` : '',
+        brandWords       ? `Key Vocabulary: ${brandWords}` : '',
       ].filter(Boolean);
 
       const system = `You are an expert UGC ad scriptwriter and creative director for TikTok, Instagram Reels, and YouTube Shorts.
@@ -2103,11 +2409,21 @@ app.get('/api/ugc-video-status/:videoId', async (req, res) => {
   }
 });
 
+// ── Public routes — all served by index.html (router handles view) ──
+app.get('/signup',     function(req, res) { res.sendFile(path.resolve(__dirname, '..', 'index.html')); });
+app.get('/login',      function(req, res) { res.sendFile(path.resolve(__dirname, '..', 'index.html')); });
+app.get('/plan',       function(req, res) { res.sendFile(path.resolve(__dirname, '..', 'index.html')); });
+app.get('/onboarding', function(req, res) { res.redirect(302, '/app?tour=1'); });
+
+// ── /app → ORIVEN application ─────────────────────────────────────
+app.get('/app', function(req, res) {
+  res.sendFile(path.resolve(__dirname, '..', 'app.html'));
+});
+
 // ── Fallback — after all routes ──────────────────────────────────
 // /api/* paths return a JSON 404 so the frontend fetch wrapper gets
 // parseable JSON instead of an HTML error page.
-// All other paths (SPA routes like /app, /studio, /settings, etc.)
-// return index.html so the client-side router takes over on refresh.
+// All other paths return index.html (public landing page).
 app.use(function(req, res) {
   if (req.path.startsWith('/api/')) {
     console.warn('[404]', req.method, req.url);

@@ -2,14 +2,8 @@
 // USAGE TRACKING — plan limits, monthly quotas
 // ════════════════════════════════════════════════════════════════
 
-// ── Plan configuration ────────────────────────────────────────
-// Free = 0 generations. The free plan is an exploration tier only.
-var PLAN_LIMITS = {
-  free:     { limit: 0,   label: "Free",     price: null,  explore: true  },
-  starter:  { limit: 50,  label: "Starter",  price: "€19", explore: false },
-  premium:  { limit: 200, label: "Premium",  price: "€49", explore: false },
-  business: { limit: 400, label: "Business", price: "€99", explore: false }
-};
+// Plan limits and labels come from ORIVEN_PLANS (plans.js).
+// usage.js references ORIVEN_PLANS[plan] directly — no separate copy.
 
 // ── Plan cache — avoids hammering Supabase on every generation ─
 var _cachedPlan   = null;
@@ -86,78 +80,83 @@ function _getCounts(){
   return d;
 }
 
-// ── Check whether the user may generate ──────────────────────
+// ── Check whether the user may generate (credit-aware) ───────
+// creditCost: how many credits this generation consumes (default 1)
 // Returns { allowed, message }
-async function checkUsageLimit(){
+async function checkUsageLimit(creditCost){
+  var cost = creditCost || 1;
   var plan = await _getCachedPlan();
-  var cfg  = PLAN_LIMITS[plan] || PLAN_LIMITS.free;
+  var cfg  = ORIVEN_PLANS[plan];
 
-  // Free plan has no generation access
-  if(cfg.explore){
-    return { allowed: false, message: "upgrade" };
-  }
+  if(!cfg) return { allowed: false, message: "upgrade" };
 
-  var used  = _getCounts().monthlyCount;
-  var limit = cfg.limit;
-  if(used < limit) return { allowed: true, message: "" };
+  var used      = _getCounts().monthlyCount;
+  var total     = cfg.credits || cfg.limit;
+  var remaining = Math.max(0, total - used);
+
+  if(remaining >= cost) return { allowed: true, message: "" };
 
   var msg;
-  if(plan === "business"){
-    msg = "You've reached your Business monthly limit (" + limit + " generations). Contact us to discuss higher limits.";
+  if(remaining === 0){
+    msg = "You've used all " + total + " credits on your " + cfg.name + " plan this month. Upgrade to keep creating.";
   } else {
-    msg = "You've reached your " + cfg.label + " monthly limit (" + limit + " generations). Upgrade to continue creating.";
+    msg = "This generation costs " + cost + " credit" + (cost !== 1 ? "s" : "") +
+          ", but you only have " + remaining + " remaining. Upgrade to continue.";
   }
   return { allowed: false, message: msg };
 }
 
-// ── Consume one generation unit ───────────────────────────────
-function consumeUsage(){
+// ── Consume credits ───────────────────────────────────────────
+// amount: credits to deduct (default 1)
+function consumeUsage(amount){
+  var n = amount || 1;
   var d = _getCounts();
-  d.dailyCount   = (d.dailyCount   || 0) + 1;
-  d.monthlyCount = (d.monthlyCount || 0) + 1;
+  d.dailyCount   = (d.dailyCount   || 0) + n;
+  d.monthlyCount = (d.monthlyCount || 0) + n;
   _writeUsage(d);
   _refreshUsageUI();
   _getAccessToken().then(function(token){
     if(!token) return;
     fetch(API_BASE_URL + "/api/increment-usage", {
-      method: "POST", headers: { "Authorization": "Bearer " + token }
+      method: "POST",
+      headers: { "Content-Type": "application/json", "Authorization": "Bearer " + token },
+      body: JSON.stringify({ count: n })
     }).catch(function(){});
   });
 }
 
-// ── True when a paid user has used their last credit ─────────
+// ── True when remaining credits are below minimum ─────────────
 async function isLastFreeCreditUsed(){
   var plan = await _getCachedPlan();
-  if(plan === "free" || plan === "business") return false;
-  var cfg = PLAN_LIMITS[plan];
+  if(!ORIVEN_PLANS[plan] || plan === "professional") return false;
+  var cfg = ORIVEN_PLANS[plan];
   if(!cfg) return false;
-  return _getCounts().monthlyCount >= cfg.limit;
+  var total = cfg.credits || cfg.limit;
+  return _getCounts().monthlyCount >= total;
 }
 
 // ── Combined gate — check then consume ───────────────────────
-// Free users → immediate paywall (no feed message, no quota noise).
-// Paid users at limit → in-feed message + paywall after delay.
-// Returns true if allowed (usage consumed), false if blocked.
-async function gateUsage(){
+// creditCost: credits required for this generation (default 1)
+// Returns true if generation is allowed (credits deducted), false if blocked.
+async function gateUsage(creditCost){
   if(typeof ORIVEN_DEV !== "undefined" && ORIVEN_DEV) return true;
 
+  var cost = creditCost || 1;
   var plan = await _getCachedPlan();
 
-  // Free plan — exploration only, no generation access
-  if((PLAN_LIMITS[plan] || PLAN_LIMITS.free).explore){
+  if(!ORIVEN_PLANS[plan]){
     if(typeof openPaywall === "function") openPaywall();
     return false;
   }
 
-  var result = await checkUsageLimit();
+  var result = await checkUsageLimit(cost);
   if(!result.allowed){
     _showLimitMessage(result.message);
     setTimeout(function(){ if(typeof openPaywall === "function") openPaywall(); }, 500);
     return false;
   }
-  consumeUsage();
+  consumeUsage(cost);
 
-  // Soft paywall nudge after last credit for paid plans
   isLastFreeCreditUsed().then(function(isLast){
     if(isLast && typeof showSoftPaywall === "function") setTimeout(showSoftPaywall, 450);
   });
@@ -168,7 +167,7 @@ async function gateUsage(){
 // ── In-feed limit message ─────────────────────────────────────
 function _showLimitMessage(msg){
   var feed = document.getElementById("cwsFeed");
-  if(!feed){ if(typeof toast === "function") toast("Upgrade to continue creating", "warn"); return; }
+  if(!feed){ if(typeof toast === "function") toast("Credit limit reached — upgrade to continue", "warn"); return; }
 
   var prev = feed.querySelector(".usage-limit-msg");
   if(prev) prev.remove();
@@ -181,7 +180,7 @@ function _showLimitMessage(msg){
         '<svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="10" cy="10" r="8.5"/><path d="M10 6v5" stroke-linecap="round"/><circle cx="10" cy="14" r=".6" fill="currentColor"/></svg>' +
       '</div>' +
       '<div class="usage-limit-text">' +
-        '<div class="usage-limit-title">Creative limit reached</div>' +
+        '<div class="usage-limit-title">Monthly credit limit reached</div>' +
         '<div class="usage-limit-sub">' + msg + '</div>' +
       '</div>' +
       '<button class="btn btn-p btn-sm usage-limit-cta" onclick="openPaywall()">Upgrade</button>' +
@@ -197,29 +196,30 @@ async function _refreshUsageUI(){
   if(!badge) return;
 
   var plan = await _getCachedPlan();
-  var cfg  = PLAN_LIMITS[plan] || PLAN_LIMITS.free;
+  var cfg  = ORIVEN_PLANS[plan];
 
-  if(cfg.explore){
-    badge.textContent = "Explore mode";
+  if(!cfg){
+    badge.textContent = "No Subscription";
     badge.className   = "usage-badge usage-badge-free";
-    if(planLabel){ planLabel.textContent = "Explore"; planLabel.className = "sb-plan-label sb-plan-free"; }
+    if(planLabel){ planLabel.textContent = "No Subscription"; planLabel.className = "sb-plan-label sb-plan-free"; }
     return;
   }
 
-  var used = _getCounts().monthlyCount;
-  var rem  = Math.max(0, cfg.limit - used);
-  var cls  = rem === 0 ? "usage-badge-empty" : rem <= Math.ceil(cfg.limit * 0.1) ? "usage-badge-low" : "usage-badge-ok";
+  var used  = _getCounts().monthlyCount;
+  var total = cfg.credits || cfg.limit;
+  var rem   = Math.max(0, total - used);
+  var cls   = rem === 0 ? "usage-badge-empty" : rem <= Math.ceil(total * 0.1) ? "usage-badge-low" : "usage-badge-ok";
 
-  badge.textContent = used + " of " + cfg.limit + " used";
+  badge.textContent = rem + " credits left";
   badge.className   = "usage-badge " + cls;
-  if(planLabel){ planLabel.textContent = cfg.label; planLabel.className = "sb-plan-label sb-plan-" + plan; }
+  if(planLabel){ planLabel.textContent = cfg.name; planLabel.className = "sb-plan-label sb-plan-" + plan; }
 }
 
-// ── Team nav — Business only ──────────────────────────────────
+// ── Team nav — Professional only ──────────────────────────────
 async function updateTeamNavVisibility(){
   var plan    = await _getCachedPlan();
   var teamNav = document.getElementById("teamNavItem");
-  if(teamNav) teamNav.style.display = plan === "business" ? "" : "none";
+  if(teamNav) teamNav.style.display = plan === "professional" ? "" : "none";
 }
 
 // ── Called from auth.js after sign-in ────────────────────────

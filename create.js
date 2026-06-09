@@ -181,26 +181,65 @@ function textSelectType(ttype){
 // ════════════════════════════════════════════════════════════════
 
 function buildAssistantPrompt(userMsg){
-  var bc = S.brandCore;
-  var parts = [];
-  if(bc && bc.name){
-    var ctx = "BRAND CONTEXT:\n";
-    ctx += "Brand name: " + bc.name + "\n";
-    if(bc.promise)  ctx += "Brand promise: " + bc.promise + "\n";
-    if(bc.mission)  ctx += "Mission: " + bc.mission + "\n";
-    if(bc.vision)   ctx += "Vision: " + bc.vision + "\n";
-    if(bc.tone)     ctx += "Tone of voice: " + (Array.isArray(bc.tone) ? bc.tone.join(", ") : bc.tone) + "\n";
-    if(bc.audience) ctx += "Target audience: " + bc.audience + "\n";
-    if(bc.style)    ctx += "Visual style: " + bc.style + "\n";
-    if(bc.diff)     ctx += "Positioning: " + bc.diff + "\n";
-    var cs = _formatBrandColors(bc.colors);
-    if(cs)          ctx += "Brand colors: " + cs + "\n";
-    if(bc.wordsUse   && bc.wordsUse.length)   ctx += "Words to use: "   + bc.wordsUse.join(", ")   + "\n";
-    if(bc.wordsAvoid && bc.wordsAvoid.length) ctx += "Words to avoid: " + bc.wordsAvoid.join(", ") + "\n";
-    parts.push(ctx.trim());
-  }
-  parts.push("USER MESSAGE: " + userMsg);
-  return parts.join("\n\n");
+  return userMsg;
+}
+
+// ════════════════════════════════════════════════════════════════
+// Brand Assistant — persistent conversation history
+// ════════════════════════════════════════════════════════════════
+
+var _AST_WARN_AT = 90;
+
+function _astHistKey(){
+  try { if(S && S.user && S.user.id) return "oriven_ast_hist_" + S.user.id; } catch(_){}
+  return "oriven_ast_hist_anon";
+}
+
+function _loadAstHistory(){
+  try { var r = localStorage.getItem(_astHistKey()); return r ? JSON.parse(r) : []; } catch(_){ return []; }
+}
+
+function _saveAstHistory(msgs){
+  try { localStorage.setItem(_astHistKey(), JSON.stringify(msgs)); } catch(_){}
+}
+
+function clearAssistantChat(){
+  try { localStorage.removeItem(_astHistKey()); } catch(_){}
+  S._astMsgs = [];
+  openCreateWorkspace("assistant", "copy");
+}
+
+var _AST_AVA = '<div class="chat-ai-avatar"><svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M10 2L12.5 7.5H18L13.5 11L15 16.5L10 13.5L5 16.5L6.5 11L2 7.5H7.5Z"/></svg></div>';
+
+function _restoreAstChat(feed, msgs){
+  feed.innerHTML = "";
+  var clearRow = document.createElement("div");
+  clearRow.className = "ast-clear-row";
+  clearRow.innerHTML = '<span class="ast-hist-label">Previous conversation</span><button class="ast-clear-btn" onclick="clearAssistantChat()">Clear chat</button>';
+  feed.appendChild(clearRow);
+  msgs.forEach(function(m){
+    var el = document.createElement("div");
+    if(m.role === "user"){
+      el.className = "chat-msg user";
+      el.innerHTML = '<div class="chat-bubble user-bubble">' + _escHtml(m.text) + '</div>';
+    } else {
+      el.className = "chat-msg ai";
+      el.innerHTML = _AST_AVA + '<div class="chat-bubble ai-bubble">' + (m.html || '') + '</div>';
+    }
+    feed.appendChild(el);
+  });
+  feed.scrollTop = feed.scrollHeight;
+}
+
+function _checkAstMemoryLimit(feed){
+  if(!S._astMsgs || S._astMsgs.length < _AST_WARN_AT) return;
+  if(!feed) feed = document.getElementById("cwsFeed");
+  if(!feed || feed.querySelector(".ast-memory-notice")) return;
+  var n = document.createElement("div");
+  n.className = "ast-memory-notice";
+  n.innerHTML = 'Conversation memory is nearly full. <button onclick="clearAssistantChat()">Start a new chat</button>';
+  feed.appendChild(n);
+  feed.scrollTop = feed.scrollHeight;
 }
 
 function _buildAssistantStarters(bc){
@@ -579,175 +618,145 @@ function _buildImageBuilderPrompt(custom){
   var bc  = S.brandCore;
   var fmt = b.imgFormat || "1:1";
 
-  var isLogo = (b.imgDesignType === "logo");
+  var parts = [];
 
-  // ── Human-readable type labels ────────────────────────────────
+  // ── Visual type ──────────────────────────────────────────────
   var typeLabels = {
-    logo:        "logo",
-    social:      "social media post",
-    ad_creative: "ad creative",
-    poster:      "poster",
-    product:     "product image"
+    poster:        "poster",
+    advertisement: "advertisement",
+    social:        "social media post",
+    product:       "product visual",
+    website:       "website graphic",
+    banner:        "banner",
+    presentation:  "presentation graphic",
+    custom:        "brand visual",
+    logo:          "logo",
+    ad_creative:   "ad creative"
   };
+  var typeLabel = typeLabels[b.imgVisualType] || typeLabels[b.imgDesignType] || "brand visual";
+  parts.push("Create a premium " + typeLabel + " for this brand.");
 
-  // ── Purpose descriptions ──────────────────────────────────────
-  var purposeLabels = {
-    promotion:      "Promotion — create desire, lead with value",
-    engagement:     "Engagement — invite interaction, emotionally compelling",
-    brand_awareness:"Brand awareness — memorable, brand-first, no hard sell",
-    showcase:       "Showcase product — hero product, best angle, deliberate staging",
-    features:       "Highlight features — detail-forward, shows what makes it distinct",
-    campaign:       "Campaign visual — bold, cohesive, campaign-defining",
-    storytelling:   "Brand storytelling — narrative-driven, emotional, authentic",
-    brand_identity: "Brand identity — definitive, distinctive, built to last",
-    rebrand:        "Rebranding — fresh direction, signals evolution"
+  // ── Purpose ───────────────────────────────────────────────────
+  var purposeMap = {
+    promote:         "PURPOSE: Promote a product — create desire, lead with value, make the offer impossible to ignore.",
+    launch:          "PURPOSE: Launch campaign — announce arrival, maximum energy, urgency without desperation.",
+    awareness:       "PURPOSE: Build awareness — memorable, brand-first, no hard sell.",
+    leads:           "PURPOSE: Generate leads — clear value exchange, low-friction, value-forward.",
+    sales:           "PURPOSE: Increase sales — value proposition unmissable, CTA dominant, remove hesitation.",
+    inform:          "PURPOSE: Share information — clear visual hierarchy, easy to scan, credibility-first.",
+    promotion:       "PURPOSE: Promotion — create desire, lead with value.",
+    engagement:      "PURPOSE: Engagement — emotionally compelling, invites interaction.",
+    brand_awareness: "PURPOSE: Brand awareness — memorable, brand-first.",
+    introduction:    "PURPOSE: Introduction — confident, clear, establishes identity."
   };
+  if(b.imgPurpose && purposeMap[b.imgPurpose]) parts.push(purposeMap[b.imgPurpose]);
 
-  // ── Resolve text content (builder and flow paths) ─────────────
-  var wantsText = (b._hasText === "yes");
+  // ── Subject (what the visual is about) ──────────────────────
+  var aboutText = (b.imgAbout || "").trim();
+  if(aboutText) parts.push("SUBJECT: " + aboutText);
+
+  // ── Scene / imagery (most important field) ───────────────────
+  var sceneText = (b.imgScene || "").trim();
+  if(sceneText){
+    parts.push("SCENE / IMAGERY:\n" + sceneText
+      + "\nBuild the entire composition around this description. This is the primary visual concept.");
+  }
+
+  // ── Text overlay ──────────────────────────────────────────────
   var textContent = (b.imgTextContent || "").trim();
-  if(!textContent){
-    var fp = [b.imgHeadline, b.imgSubtext, b.imgCta].filter(Boolean);
-    if(fp.length){ textContent = fp.join(" / "); wantsText = true; }
+  if(!textContent && b._hasText === "yes"){
+    textContent = [b.imgHeadline, b.imgSubtext, b.imgCta].filter(Boolean).join(" / ");
   }
-
-  // ── Person ───────────────────────────────────────────────────
-  var wantsPerson = (b.imgSubject === "yes" || b.imgSubject === "person");
-  var modelDesc   = (b.imgModelDesc || "").trim();
-
-  // ── Section builders ─────────────────────────────────────────
-
-  // 1. Opening
-  var typeLabel = typeLabels[b.imgDesignType] || "brand visual";
-  var opening = "Create a " + typeLabel + " for a brand with the following identity:";
-
-  // 2. Brand identity block (full — trimmed only under budget pressure)
-  var brandLines = [];
-  if(bc && bc.name)     brandLines.push("Brand: " + bc.name);
-  if(bc && bc.audience) brandLines.push("Target audience: " + bc.audience);
-  var vstyle = bc && (bc.styleDirection || bc.style);
-  if(vstyle)            brandLines.push("Style: " + vstyle);
-  var tone = bc && bc.tone;
-  if(tone)              brandLines.push("Mood: " + (Array.isArray(tone) ? tone.join(", ") : tone));
-  var cs = bc && _formatBrandColors(bc.colors);
-  if(cs)                brandLines.push("Color palette: " + cs + " — apply to surfaces, environment, props. Not to skin.");
-  if(bc && bc.promise)  brandLines.push("Visual direction: " + bc.promise);
-  var brandBlock = brandLines.length
-    ? brandLines.join("\n")
-    : "Brand: Not defined. Clean, minimal aesthetic — neutral palette with one intentional accent. Premium feel.";
-
-  // 3. Purpose
-  var purposeLabel = purposeLabels[b.imgPurpose] || "";
-  var purposeBlock = purposeLabel ? ("Purpose: " + purposeLabel) : "";
-
-  // 3b. Visual style, mood, lighting (from flow enrichment)
-  var visualStyleMap = {
-    editorial: "editorial — bold graphic composition, fashion-magazine aesthetic, strong geometric structure",
-    minimal:   "minimal — abundant white space, single strong focal point, quiet and deliberate",
-    bold:      "bold — high contrast, saturated color, immediate visual impact, no ambiguity",
-    cinematic: "cinematic — widescreen feel, dramatic lighting, film-quality atmosphere, depth of field",
-    lifestyle: "lifestyle — authentic, natural, human-first, real-world context, organic and unposed",
-    dark:      "dark — low-key, premium, moody, shadow-dominant, depth and mystery"
-  };
-  var moodMap = {
-    premium:   "premium, aspirational, elevated and refined",
-    energetic: "energetic, active, dynamic and high-energy",
-    calm:      "calm, composed, quiet confidence",
-    dramatic:  "dramatic, intense, high-emotion",
-    playful:   "playful, light, approachable and warm",
-    serene:    "serene, peaceful, meditative stillness"
-  };
-  var lightingMap = {
-    natural:  "natural light — soft, directional, authentic and unmanipulated",
-    studio:   "studio lighting — clean, controlled, deliberate shadows",
-    dramatic: "dramatic lighting — high contrast, strong shadows, chiaroscuro effect",
-    soft:     "soft box lighting — diffused, flattering, professional and clean",
-    ambient:  "ambient light — environmental light sources, atmospheric and contextual"
-  };
-  var visualStyleBlock = b.imgVisualStyle ? ("VISUAL STYLE: " + (visualStyleMap[b.imgVisualStyle] || b.imgVisualStyle)) : "";
-  var moodBlock        = b.imgMood        ? ("MOOD: "         + (moodMap[b.imgMood]               || b.imgMood))       : "";
-  var lightingBlock    = b.imgLighting    ? ("LIGHTING: "     + (lightingMap[b.imgLighting]        || b.imgLighting))   : "";
-
-  // 4. Person (conditional)
-  var personBlock = "";
-  if(!isLogo){
-    if(wantsPerson){
-      personBlock = "Include a person in this image."
-        + (modelDesc
-          ? " Description: " + modelDesc + " — reproduce exactly. Do not alter gender, age, or appearance."
-          : "")
-        + " Authentically human, genuine expression. Brand-aligned wardrobe and setting.";
-    } else {
-      personBlock = "No person. Pure brand visual — deliberate composition, premium feel.";
-    }
-  }
-
-  // 5. Text (conditional)
-  var textBlock = "";
-  if(wantsText && textContent){
-    textBlock = 'Include text: "' + textContent.slice(0, 200) + '"'
+  if(textContent){
+    var textSnippet = textContent.slice(0, 200);
+    parts.push(
+      "TEXT IN IMAGE: \"" + textSnippet + "\""
       + " — clean typography, fully legible, naturally integrated into the composition."
-      + " Font style must align with the brand mood and style.";
-  } else if(!isLogo){
-    textBlock = "No text in the image. Pure visual — typography added in post-production.";
+      + " Font style must align with brand tone and personality."
+    );
+  } else {
+    parts.push("NO TEXT IN IMAGE — pure visual. Typography will be added in post-production.");
   }
 
-  // 6. Upload context (conditional)
-  var uploadBlock = "";
-  var uploadType = b.imgUploadType;
-  if(uploadType === "product"){
-    uploadBlock = "Product reference uploaded: reproduce the product as the hero — exact shape, color, material, proportions. Stage in a brand-aligned environment.";
-  } else if(uploadType === "reference"){
-    uploadBlock = "Style reference uploaded: apply its aesthetic — lighting, composition, color temperature, mood. Elevate it, do not copy literally.";
-  } else if(uploadType === "logo"){
-    uploadBlock = "Logo reference uploaded: do not include the logo. Use its visual language — shapes, forms, palette — to inform the composition.";
+  // ── Extra notes ───────────────────────────────────────────────
+  var extraNotes = (custom || (b._extraNotes || "")).trim();
+  if(extraNotes) parts.push("ADDITIONAL DIRECTION: " + extraNotes);
+
+  // ── BrandCore — full injection ─────────────────────────────────
+  if(bc && bc.name){
+    var bLines = ["BRANDCORE — this visual must unmistakably belong to this brand, not look generic:"];
+    bLines.push("Brand: " + bc.name);
+
+    var cs = _formatBrandColors(bc.colors);
+    if(cs){
+      bLines.push("Brand colours: " + cs);
+      bLines.push(
+        "COLOUR APPLICATION RULE (mandatory — do not substitute):\n"
+        + "  Background and large surfaces: use the darkest or most neutral brand colour.\n"
+        + "  Hero elements, highlights, and focal points: use the primary brand colour.\n"
+        + "  Supporting details, borders, and accents: use the accent brand colour.\n"
+        + "  The brand colour palette is non-negotiable — random or generic colours are not acceptable."
+      );
+    }
+
+    if(bc.headingFont || bc.bodyFont){
+      var typoParts = [];
+      if(bc.headingFont) typoParts.push("heading: " + bc.headingFont);
+      if(bc.bodyFont)    typoParts.push("body: "    + bc.bodyFont);
+      bLines.push(
+        "TYPOGRAPHY: " + typoParts.join(", ")
+        + " — text rendering must reflect this typographic personality and weight."
+      );
+    }
+
+    if(bc.tone)        bLines.push("Tone of voice: " + (Array.isArray(bc.tone) ? bc.tone.join(", ") : bc.tone));
+    if(bc.personality) bLines.push("Brand personality: " + bc.personality);
+    if(bc.promise)     bLines.push("Brand promise: " + bc.promise);
+    if(bc.diff || bc.positioning) bLines.push("Positioning: " + (bc.diff || bc.positioning));
+    if(bc.audience)    bLines.push("Target audience: " + bc.audience);
+
+    var vstyle = bc.styleDirection || bc.style;
+    if(vstyle){
+      bLines.push(
+        "VISUAL DIRECTION: " + vstyle
+        + "\nApply this to: lighting style, compositional approach, overall mood, and aesthetic feel."
+      );
+    }
+
+    if(bc.wordsUse   && bc.wordsUse.length)   bLines.push("Copy words to use: "   + bc.wordsUse.join(", "));
+    if(bc.wordsAvoid && bc.wordsAvoid.length) bLines.push("Copy words to avoid: " + bc.wordsAvoid.join(", "));
+
+    parts.push(bLines.join("\n"));
   }
 
-  // 7. Additional context (droppable under budget pressure)
-  var extraBlock = custom ? ("Additional context: " + custom.slice(0, 400)) : "";
+  // ── Quality and format ─────────────────────────────────────────
+  parts.push(
+    "QUALITY: Photorealistic, premium, professionally art-directed. "
+    + "This visual must feel like it was made specifically for this brand — not a generic AI output. "
+    + "Real, motivated lighting. No painterly blur, dreamlike gradients, or AI aesthetic clichés."
+  );
+  parts.push("FORMAT: " + fmt + " — fill frame edge to edge. Keep the " + _imgTextZone(fmt) + " uncluttered for text overlay.");
 
-  // 8. Quality instruction
-  var qualityBlock = isLogo
-    ? "Logo design: clean vector-style mark, scalable at any size. Flat or semi-flat graphic style. Simple, iconic, memorable. White or transparent background. Crisp edges. NOT photorealistic."
-    : "The image must feel cohesive, premium, and aligned with the brand identity. Avoid generic AI outputs.\nPhotorealistic quality. Real, motivated lighting. No painterly blur, dreamlike gradients, or AI aesthetic.";
+  // ── Budget trimming ───────────────────────────────────────────
+  var result = parts.filter(Boolean).join("\n\n");
 
-  // 9. Technical format
-  var techBlock = "Format: " + fmt + " — fill edge to edge. Keep the " + _imgTextZone(fmt) + " uncluttered for text overlay.";
-
-  // ── Assemble: all sections except extras ─────────────────────
-  var coreSections = [opening, brandBlock, purposeBlock, visualStyleBlock, moodBlock, lightingBlock, personBlock, textBlock, uploadBlock, qualityBlock, techBlock]
-    .filter(Boolean);
-  var coreText = coreSections.join("\n\n");
-  var result   = extraBlock ? (coreText + "\n\n" + extraBlock) : coreText;
-
-  console.log("[ImagePrompt] Raw length: " + result.length);
-
-  // Budget trimming: drop extra context first
-  if(result.length > _IMG_PROMPT_MAX && extraBlock){
-    result = coreText;
-    console.log("[ImagePrompt] Dropped extra context. Length: " + result.length);
-  }
-
-  // Still over: trim brand to name + audience + colors only
   if(result.length > _IMG_PROMPT_MAX && bc && bc.name){
-    var shortBrandLines = [];
-    if(bc.name)     shortBrandLines.push("Brand: " + bc.name);
-    if(bc.audience) shortBrandLines.push("Target audience: " + bc.audience);
+    var trimmed = [];
+    trimmed.push(parts[0]);
+    if(sceneText)  trimmed.push("SCENE: " + sceneText);
+    if(aboutText)  trimmed.push("SUBJECT: " + aboutText);
     var cs2 = _formatBrandColors(bc.colors);
-    if(cs2)         shortBrandLines.push("Color palette: " + cs2);
-    var shortBrand = shortBrandLines.join("\n");
-    var trimSections = [opening, shortBrand, purposeBlock, visualStyleBlock, moodBlock, lightingBlock, personBlock, textBlock, uploadBlock, qualityBlock, techBlock].filter(Boolean);
-    result = trimSections.join("\n\n");
-    console.log("[ImagePrompt] Trimmed brand block. Length: " + result.length);
+    if(cs2) trimmed.push("Brand: " + bc.name + ". Colours (mandatory): " + cs2 + ".");
+    var vstyle2 = bc.styleDirection || bc.style;
+    if(vstyle2) trimmed.push("Visual direction: " + vstyle2);
+    if(bc.tone) trimmed.push("Tone: " + (Array.isArray(bc.tone) ? bc.tone.join(", ") : bc.tone));
+    trimmed.push(parts[parts.length - 2]);
+    trimmed.push(parts[parts.length - 1]);
+    result = trimmed.filter(Boolean).join("\n\n");
   }
 
-  // Hard clamp — final safety net
-  if(result.length > _IMG_PROMPT_MAX){
-    result = result.slice(0, _IMG_PROMPT_MAX);
-    console.log("[ImagePrompt] Hard-clamped.");
-  }
+  if(result.length > _IMG_PROMPT_MAX) result = result.slice(0, _IMG_PROMPT_MAX);
 
-  console.log("[ImagePrompt] Final length: " + result.length);
   return result;
 }
 
@@ -923,99 +932,79 @@ function _buildAdsBuilderPrompt(custom){
 function _buildCampaignBuilderPrompt(custom){
   var b  = S._builder || {};
   var bc = S.brandCore;
-  var n  = parseInt(b.campVariations || "5", 10);
-
-  var campTypes = {
-    launch:      "Campaign type: Launch \u2014 maximum energy, first impression, announces arrival.",
-    awareness:   "Campaign type: Awareness \u2014 build familiarity, consistency of message, no hard sell.",
-    conversion:  "Campaign type: Conversion \u2014 drive action, clear value proposition, remove friction.",
-    promotion:   "Campaign type: Promotion \u2014 specific offer, value-forward, compelling reason to act now.",
-    retargeting: "Campaign type: Retargeting \u2014 warm audience, new angle or social proof, address objection.",
-    other:       "Campaign type: General brand campaign."
-  };
-
-  var channels = {
-    meta:    "Channel: Meta (Facebook + Instagram ecosystem)",
-    tiktok:  "Channel: TikTok (native content + paid)",
-    youtube: "Channel: YouTube (pre-roll + bumper ads)",
-    multi:   "Channel: Multi-platform \u2014 output must work across Meta, TikTok, and YouTube"
-  };
-
-  var formats = {
-    square:     "Format: Square 1:1 \u2014 versatile, feed-optimised",
-    portrait:   "Format: Portrait 4:5 \u2014 scroll-stopping feed asset",
-    story_reel: "Format: Story/Reel 9:16 \u2014 full-screen vertical native content",
-    mixed:      "Format: Mixed \u2014 vary format across variations"
-  };
-
-  var subjects = {
-    product: "Campaign subject: A product.",
-    service: "Campaign subject: A service.",
-    brand:   "Campaign subject: The brand itself.",
-    offer:   "Campaign subject: A specific offer or deal.",
-    other:   "Campaign subject: See brief."
-  };
+  var n  = parseInt(b.campCount || b.campVariations || "4", 10);
+  if(n < 2) n = 2; if(n > 6) n = 6;
 
   var parts = [];
 
-  parts.push(campTypes[b.campType || "awareness"] || campTypes.awareness);
-  parts.push(channels[b.campChannel || "meta"]    || channels.meta);
-  parts.push(formats[b.campFormat || "square"]    || formats.square);
-  parts.push(subjects[b.campSubject || "brand"]   || subjects.brand);
-
-  // Funnel stage and audience warmth (from flow enrichment)
-  var funnelMap = {
-    awareness:     "FUNNEL STAGE: Awareness — first impression, brand-first, maximum reach priority over persuasion. Prioritise memorability.",
-    consideration: "FUNNEL STAGE: Consideration — educate, differentiate, build preference. Show why this brand over alternatives.",
-    conversion:    "FUNNEL STAGE: Conversion — drive action now. Remove every objection. Value proposition unmissable. CTA dominant.",
-    retention:     "FUNNEL STAGE: Retention — reward loyalty, deepen relationship. Tone is appreciative, exclusive, insider-feeling."
-  };
-  var audienceMap = {
-    cold:       "AUDIENCE WARMTH: Cold — no prior brand exposure. Lead with problem recognition or strong hook, not brand claims. Earn trust before asking.",
-    warm:       "AUDIENCE WARMTH: Warm — brand-aware. Lean into differentiation, unique proof points, and what makes this brand the right choice.",
-    retargeted: "AUDIENCE WARMTH: Retargeted — visited or engaged before but didn't convert. New angle, social proof, address the specific hesitation."
-  };
-  if(b.campFunnelStage    && funnelMap[b.campFunnelStage])       parts.push(funnelMap[b.campFunnelStage]);
-  if(b.campAudienceWarmth && audienceMap[b.campAudienceWarmth])  parts.push(audienceMap[b.campAudienceWarmth]);
-
-  if(custom){
-    parts.push(
-      "CAMPAIGN BRIEF — FOLLOW EXACTLY:\n" + custom
-      + "\n\nCRITICAL: Build every variation specifically for this brief. Do not generalize the offer, audience, or product. "
-      + "The brief overrides any generic defaults — treat it as the primary creative directive."
-    );
+  if(b.campPromotion){
+    parts.push("PROMOTING: " + b.campPromotion);
   }
 
-  // BrandCore is the primary intelligence — applied across all variations
+  var goalLabels = {
+    sales:     "Sales — drive direct purchases. Value proposition unmissable, offer clear, CTA dominant.",
+    leads:     "Lead Generation — collect contacts. Low-friction offer, clear value exchange.",
+    awareness: "Brand Awareness — memorable first impression. Brand-first, no hard sell.",
+    launch:    "Product Launch — maximum energy, announce arrival, create urgency and excitement.",
+    traffic:   "Website Traffic — pull clicks to a specific page. Curiosity-driven, benefit-led.",
+    community: "Community Growth — invite participation. Warm, inclusive, value-forward."
+  };
+  if(b.campGoal){
+    parts.push("CAMPAIGN GOAL: " + (goalLabels[b.campGoal] || b.campGoal));
+  }
+
+  if(b.campAudience){
+    parts.push("TARGET AUDIENCE: " + b.campAudience
+      + "\nEvery hook, angle, and CTA must speak directly to this specific audience.");
+  }
+
+  if(b.campOffer){
+    parts.push("MAIN OFFER / MESSAGE: " + b.campOffer
+      + "\nThis is the core reason someone should stop and pay attention. Feature it prominently in every variation.");
+  }
+
+  if(b.campVisuals){
+    parts.push("VISUAL DIRECTION — use this directly when writing image prompts:\n" + b.campVisuals
+      + "\nThe imagePrompt for each variation must reflect this visual direction specifically. Do not substitute generic visuals.");
+  }
+
+  if(custom){
+    parts.push("ADDITIONAL DIRECTION:\n" + custom);
+  }
+
   if(bc && bc.name){
-    var bLines = ["BRAND IDENTITY \u2014 must be consistent and unmistakable across all variations:"];
+    var bLines = ["BRANDCORE — apply consistently and unmistakably across ALL variations:"];
     bLines.push("Brand: " + bc.name);
     var cs = _formatBrandColors(bc.colors);
-    if(cs) bLines.push("Brand colours: " + cs + " \u2014 apply to every variation.");
-    if(bc.tone) bLines.push("Tone: " + (Array.isArray(bc.tone) ? bc.tone.join(", ") : bc.tone));
-    if(bc.audience) bLines.push("Audience: " + bc.audience);
+    if(cs) bLines.push("Brand colours: " + cs + " — apply to every variation\u2019s visual.");
+    if(bc.tone) bLines.push("Tone of voice: " + (Array.isArray(bc.tone) ? bc.tone.join(", ") : bc.tone));
+    if(bc.audience) bLines.push("Brand audience: " + bc.audience);
     if(bc.promise)  bLines.push("Brand promise: " + bc.promise);
     if(bc.diff || bc.positioning) bLines.push("Positioning: " + (bc.diff || bc.positioning));
+    var vstyle = bc.styleDirection || bc.style;
+    if(vstyle) bLines.push("Visual direction: " + vstyle);
+    if(bc.wordsUse   && bc.wordsUse.length)   bLines.push("Words to use: "   + bc.wordsUse.join(", "));
+    if(bc.wordsAvoid && bc.wordsAvoid.length) bLines.push("Words to avoid: " + bc.wordsAvoid.join(", "));
     parts.push(bLines.join("\n"));
   }
 
   parts.push(
     "OUTPUT: Generate exactly " + n + " campaign variation objects as a valid JSON array.\n"
-    + "Each variation is one adset-style creative concept. Use genuinely different angles \u2014 not repetitions.\n"
+    + "Each variation must use a genuinely different creative angle — not repetitions of the same idea.\n"
     + "Reply with ONLY the JSON array. No markdown fences. No extra text.\n"
-    + '[{"title":"...","headline":"...","body":"...","cta":"...","imagePrompt":"..."},...]\n'
-    + "\u2014 title: variation name (max 5 words, unique per variation)\n"
-    + "\u2014 headline: platform-optimised headline (max 10 words, brand-voice specific)\n"
-    + "\u2014 body: benefit-led copy (2\u20133 sentences, brand voice, no filler)\n"
-    + "\u2014 cta: direct action CTA (max 4 words)\n"
-    + "\u2014 imagePrompt: a 100\u2013180 char DALL-E 3 prompt for this variation\u2019s visual. "
-    + "CRITICAL: 100% text-free visual description. Must use brand colours. No text/letters/logos in image. "
-    + "Describe the visual composition, subject, mood, and colour palette specifically."
+    + '[{"title":"...","headline":"...","body":"...","cta":"...","imagePrompt":"..."},...]\
+'
+    + "— title: variation name (max 5 words, unique per variation)\n"
+    + "— headline: hook-first, brand-voice specific (max 10 words)\n"
+    + "— body: benefit-led copy aligned to the campaign goal (2–3 sentences, brand voice, no filler)\n"
+    + "— cta: direct, specific CTA (max 4 words)\n"
+    + "— imagePrompt: 100–180 char DALL-E 3 prompt. CRITICAL: text-free visual description only. "
+    + "Must reflect the visual direction above and use brand colours. "
+    + "Describe composition, subject, mood, colour palette. No text/letters/logos in image."
   );
 
   return parts.join("\n\n");
 }
-
 function _buildBuilderPrompt(type){
   var custom = "";
   // 1. Flow wizard answers (original builder)
@@ -1035,6 +1024,10 @@ function _buildBuilderPrompt(type){
   if(type === "ads")      return _buildAdsBuilderPrompt(custom);
   if(type === "campaign") return _buildCampaignBuilderPrompt(custom);
   if(type === "web")      return _buildWebBuilderPrompt(custom);
+  if(type === "email")    return _buildEmailBuilderPrompt(custom);
+  if(type === "deck")     return _buildDeckBuilderPrompt(custom);
+  if(type === "poster")      return _buildPosterBuilderPrompt(custom);
+  if(type === "infographic") return _buildInfographicBuilderPrompt(custom);
   return custom;
 }
 
@@ -1043,24 +1036,237 @@ function _buildWebBuilderPrompt(custom){
   var bc   = S.brandCore  || {};
   var parts = [];
 
-  if(bc.name)      parts.push("Brand: " + bc.name);
-  if(bc.industry)  parts.push("Industry: " + bc.industry);
-  if(bc.values)    parts.push("Brand values: " + bc.values);
-  if(bc.tone)      parts.push("Brand tone: " + bc.tone);
-  if(bc.palette)   parts.push("Brand palette: " + bc.palette);
+  var webTypeLabels = {
+    landing:   "Landing Page — single goal, one offer, one CTA",
+    business:  "Business Website — services, team, contact, and about",
+    portfolio: "Portfolio — showcase work or personal brand",
+    ecommerce: "E-commerce Store — products, cart, and checkout flow",
+    agency:    "Agency Website — services, case studies, and contact",
+    saas:      "SaaS Website — features, pricing, and signup"
+  };
+  if(b.webType){
+    parts.push("WEBSITE TYPE: " + (webTypeLabels[b.webType] || b.webType));
+  }
 
-  if(b.webPromotion) parts.push("Promoting: " + b.webPromotion);
-  if(b.webAudience)  parts.push("Target audience: " + b.webAudience);
-  if(b.webStyle)     parts.push("Design style: " + b.webStyle);
-  if(b.webAnimations)parts.push("Animations: " + b.webAnimations);
-  if(b.webSections)  parts.push("Page sections: " + b.webSections.replace(/-/g, " + "));
-  if(custom)         parts.push("Additional notes: " + custom);
+  if(b.webAbout){
+    parts.push("WEBSITE ABOUT: " + b.webAbout);
+  }
 
-  return parts.join("\n");
+  var webGoalLabels = {
+    sales:     "Generate Sales — every element drives toward purchase",
+    leads:     "Collect Leads — low-friction signup, value-first",
+    book_call: "Book Calls — CTA orients toward calendar/call booking",
+    showcase:  "Showcase Work — portfolio-led, visual-first",
+    trust:     "Build Trust — credibility signals, testimonials, authority",
+    launch:    "Launch Product — announcement energy, exclusivity, urgency"
+  };
+  if(b.webGoal){
+    parts.push("PRIMARY GOAL: " + (webGoalLabels[b.webGoal] || b.webGoal));
+  }
+
+  if(b.webAudience){
+    parts.push("TARGET AUDIENCE: " + b.webAudience
+      + "\nAll copy, CTAs, and section ordering should speak directly to this audience.");
+  }
+
+  if(b.webSections){
+    parts.push("PAGE SECTIONS (include all, in this order): " + b.webSections
+      + "\nBuild each section as a complete, conversion-optimised block.");
+  }
+
+  if(b.webStyle){
+    parts.push("DESIGN STYLE: " + b.webStyle
+      + "\nThis is the primary aesthetic direction. Every visual decision must align with this.");
+  }
+
+  if(custom){
+    parts.push("ADDITIONAL NOTES: " + custom);
+  }
+
+  var bcLines = ["BRANDCORE — inject throughout. This website must feel like the brand, not a generic template:"];
+  if(bc.name)      bcLines.push("Brand: " + bc.name);
+  var cs = _formatBrandColors(bc.colors);
+  if(cs)           bcLines.push("Brand colours: " + cs + " — use throughout as the primary palette");
+  if(bc.tone)      bcLines.push("Tone of voice: " + (Array.isArray(bc.tone) ? bc.tone.join(", ") : bc.tone));
+  if(bc.audience)  bcLines.push("Brand audience: " + bc.audience);
+  if(bc.promise)   bcLines.push("Brand promise: " + bc.promise);
+  if(bc.diff || bc.positioning) bcLines.push("Positioning: " + (bc.diff || bc.positioning));
+  var vstyle = bc.styleDirection || bc.style;
+  if(vstyle)       bcLines.push("Visual direction: " + vstyle);
+  if(bc.mission)   bcLines.push("Mission: " + bc.mission);
+  if(bc.wordsUse   && bc.wordsUse.length)   bcLines.push("Words to use: "   + bc.wordsUse.join(", "));
+  if(bc.wordsAvoid && bc.wordsAvoid.length) bcLines.push("Words to avoid: " + bc.wordsAvoid.join(", "));
+  if(bcLines.length > 1) parts.push(bcLines.join("\n"));
+
+  parts.push(
+    "OUTPUT: Generate complete, production-ready HTML/CSS for this website. "
+    + "The output must feel unmistakably like the brand — not a generic template. "
+    + "Apply the BrandCore colours, tone, and visual direction throughout. "
+    + "Every section should be conversion-optimised and aligned with the primary goal."
+  );
+
+  return parts.join("\n\n");
+}
+function _buildEmailBuilderPrompt(custom){
+  var b    = S._builder  || {};
+  var bc   = S.brandCore || {};
+  var parts = [];
+
+  var emailTypeLabels = {
+    newsletter:     "Newsletter — regular update, editorial tone",
+    product_launch: "Product Launch — announcement-focused, excitement and urgency",
+    welcome:        "Welcome Email — warm, onboarding tone, builds trust",
+    sales:          "Sales Email — persuasive, benefit-led, strong CTA",
+    promotion:      "Promotion — offer-led, urgency, clear discount or deal",
+    announcement:   "Announcement — news-focused, clear and authoritative"
+  };
+  if(b.emailType) parts.push("EMAIL TYPE: " + (emailTypeLabels[b.emailType] || b.emailType));
+
+  var emailGoalLabels = {
+    drive_sales: "Drive Sales — every line should push toward purchase",
+    build_trust: "Build Trust — credibility, social proof, authority",
+    engagement:  "Increase Engagement — encourage clicks, replies, shares",
+    promote:     "Promote a Product — feature the product clearly and compellingly",
+    nurture:     "Nurture Leads — value-first, relationship-building",
+    announce:    "Make an Announcement — clear, confident, newsworthy"
+  };
+  if(b.emailGoal) parts.push("PRIMARY GOAL: " + (emailGoalLabels[b.emailGoal] || b.emailGoal));
+
+  if(b.emailAudience) parts.push("AUDIENCE: " + b.emailAudience);
+  if(b.emailMessage)  parts.push("CORE MESSAGE: " + b.emailMessage);
+  if(b.emailCta)      parts.push("CALL-TO-ACTION: " + b.emailCta);
+  if(custom)          parts.push("ADDITIONAL NOTES: " + custom);
+
+  var bcLines = ["BRANDCORE — the email must feel unmistakably like this brand:"];
+  if(bc.name)     bcLines.push("Brand: " + bc.name);
+  var cs = _formatBrandColors(bc.colors);
+  if(cs)          bcLines.push("Brand colours: " + cs + " — use as primary palette in the email design");
+  if(bc.tone)     bcLines.push("Tone of voice: " + (Array.isArray(bc.tone) ? bc.tone.join(", ") : bc.tone));
+  if(bc.audience) bcLines.push("Brand audience: " + bc.audience);
+  if(bc.promise)  bcLines.push("Brand promise: " + bc.promise);
+  if(bc.diff || bc.positioning) bcLines.push("Positioning: " + (bc.diff || bc.positioning));
+  if(bc.wordsUse   && bc.wordsUse.length)   bcLines.push("Words to use: "   + bc.wordsUse.join(", "));
+  if(bc.wordsAvoid && bc.wordsAvoid.length) bcLines.push("Words to avoid: " + bc.wordsAvoid.join(", "));
+  if(bcLines.length > 1) parts.push(bcLines.join("\n"));
+
+  parts.push("OUTPUT: Generate the complete branded HTML email. Apply BrandCore colours and voice throughout. Write all copy — no placeholders.");
+
+  return parts.join("\n\n");
 }
 
+function _buildDeckBuilderPrompt(custom){
+  var b    = S._builder  || {};
+  var bc   = S.brandCore || {};
+  var parts = [];
 
-// ── DALL-E size resolution for builder ───────────────────────
+  var deckTypeLabels = {
+    pitch:    "Pitch Deck — problem/solution/market/traction/ask structure",
+    investor: "Investor Deck — financial focus, market opportunity, growth story",
+    sales:    "Sales Deck — problem → solution → proof → pricing → next steps",
+    overview: "Company Overview — who we are, what we do, why it matters",
+    launch:   "Product Launch — announce, excite, and demonstrate the product",
+    custom:   "Custom Presentation"
+  };
+  if(b.deckType) parts.push("DECK TYPE: " + (deckTypeLabels[b.deckType] || b.deckType));
+
+  if(b.deckGoal)     parts.push("PRESENTATION GOAL: " + b.deckGoal);
+  if(b.deckAudience) parts.push("AUDIENCE: " + b.deckAudience);
+  if(b.deckSlides)   parts.push("NUMBER OF SLIDES: " + b.deckSlides + " (generate exactly this many)");
+  if(b.deckTopic)    parts.push("TOPIC / SUBJECT: " + b.deckTopic);
+  if(custom)         parts.push("ADDITIONAL NOTES: " + custom);
+
+  var bcLines = ["BRANDCORE — apply brand voice and positioning throughout every slide:"];
+  if(bc.name)     bcLines.push("Brand: " + bc.name);
+  if(bc.tone)     bcLines.push("Tone of voice: " + (Array.isArray(bc.tone) ? bc.tone.join(", ") : bc.tone));
+  if(bc.audience) bcLines.push("Brand audience: " + bc.audience);
+  if(bc.promise)  bcLines.push("Brand promise: " + bc.promise);
+  if(bc.diff || bc.positioning) bcLines.push("Positioning: " + (bc.diff || bc.positioning));
+  if(bc.mission)  bcLines.push("Mission: " + bc.mission);
+  if(bc.wordsUse   && bc.wordsUse.length)   bcLines.push("Words to use: "   + bc.wordsUse.join(", "));
+  if(bc.wordsAvoid && bc.wordsAvoid.length) bcLines.push("Words to avoid: " + bc.wordsAvoid.join(", "));
+  if(bcLines.length > 1) parts.push(bcLines.join("\n"));
+
+  parts.push("OUTPUT: Return valid JSON matching the required format. Every slide must have a title, content, and notes. Brand voice must be consistent throughout.");
+
+  return parts.join("\n\n");
+}
+
+function _buildPosterBuilderPrompt(custom){
+  var b    = S._builder  || {};
+  var bc   = S.brandCore || {};
+  var parts = [];
+
+  var posterTypeLabels = {
+    product:     "Product Poster — product-focused, benefit-led visual",
+    launch:      "Launch Poster — announcement energy, bold and exciting",
+    event:       "Event Poster — date, time, location prominent",
+    recruitment: "Recruitment Poster — professional, aspirational, action-oriented",
+    promotion:   "Promotion Poster — offer-led, urgency, compelling deal",
+    custom:      "Custom Poster"
+  };
+  if(b.posterType) parts.push("POSTER TYPE: " + (posterTypeLabels[b.posterType] || b.posterType));
+
+  if(b.posterHeadline) parts.push("HEADLINE: " + b.posterHeadline + "\n(This must be the dominant typographic element — largest, boldest)");
+  if(b.posterBody)     parts.push("SUPPORTING COPY: " + b.posterBody);
+  if(b.posterCta)      parts.push("CTA / URL: " + b.posterCta);
+  if(b.posterVisual)   parts.push("VISUAL STYLE: " + b.posterVisual + "\n(Drive all colour, layout, and typographic decisions from this direction)");
+  if(custom)           parts.push("ADDITIONAL NOTES: " + custom);
+
+  var bcLines = ["BRANDCORE — the poster must feel unmistakably like this brand:"];
+  if(bc.name)     bcLines.push("Brand: " + bc.name);
+  var cs = _formatBrandColors(bc.colors);
+  if(cs)          bcLines.push("Brand colours: " + cs + " — use as the primary palette");
+  if(bc.tone)     bcLines.push("Tone of voice: " + (Array.isArray(bc.tone) ? bc.tone.join(", ") : bc.tone));
+  if(bc.audience) bcLines.push("Brand audience: " + bc.audience);
+  if(bc.promise)  bcLines.push("Brand promise: " + bc.promise);
+  if(bc.diff || bc.positioning) bcLines.push("Positioning: " + (bc.diff || bc.positioning));
+  var vstyle = bc.styleDirection || bc.style;
+  if(vstyle)      bcLines.push("Visual direction: " + vstyle);
+  if(bcLines.length > 1) parts.push(bcLines.join("\n"));
+
+  parts.push("OUTPUT: Generate a complete HTML/CSS poster document. A4 portrait. Brand colours and voice applied throughout. All copy included — no placeholders.");
+
+  return parts.join("\n\n");
+}
+
+function _buildInfographicBuilderPrompt(custom){
+  var b    = S._builder  || {};
+  var bc   = S.brandCore || {};
+  var parts = [];
+
+  var typeLabels = {
+    process:    "Process Infographic — step-by-step flow with numbered stages",
+    timeline:   "Timeline Infographic — chronological events with milestones",
+    statistics: "Statistics Infographic — data-heavy, numbers as hero elements",
+    comparison: "Comparison Infographic — side-by-side evaluation of options",
+    guide:      "Guide / How-To Infographic — instructional, clear and sequential",
+    funnel:     "Marketing Funnel Infographic — stages of a conversion or journey",
+    roadmap:    "Roadmap Infographic — future-looking plan with phases",
+    custom:     "Custom Infographic"
+  };
+  if(b.infographicType)     parts.push("INFOGRAPHIC TYPE: " + (typeLabels[b.infographicType] || b.infographicType));
+  if(b.infographicTopic)    parts.push("TOPIC: " + b.infographicTopic);
+  if(b.infographicData)     parts.push("DATA / CONTENT TO VISUALISE:\n" + b.infographicData);
+  if(b.infographicAudience) parts.push("TARGET AUDIENCE: " + b.infographicAudience);
+  if(b.infographicCta)      parts.push("CALL-TO-ACTION: " + b.infographicCta);
+  if(custom)                parts.push("ADDITIONAL NOTES: " + custom);
+
+  var bcLines = ["BRANDCORE — the infographic must feel unmistakably like this brand:"];
+  if(bc.name)     bcLines.push("Brand: " + bc.name);
+  var cs = _formatBrandColors(bc.colors);
+  if(cs)          bcLines.push("Brand colours: " + cs + " — use as the primary palette");
+  if(bc.tone)     bcLines.push("Tone of voice: " + (Array.isArray(bc.tone) ? bc.tone.join(", ") : bc.tone));
+  if(bc.audience) bcLines.push("Brand audience: " + bc.audience);
+  if(bc.promise)  bcLines.push("Brand promise: " + bc.promise);
+  if(bc.diff || bc.positioning) bcLines.push("Positioning: " + (bc.diff || bc.positioning));
+  var vstyle = bc.styleDirection || bc.style;
+  if(vstyle)      bcLines.push("Visual direction: " + vstyle);
+  if(bcLines.length > 1) parts.push(bcLines.join("\n"));
+
+  parts.push("OUTPUT: Generate a complete HTML/CSS infographic document. A4 portrait. Brand colours and voice applied throughout. All data included — no placeholders. No external images.");
+
+  return parts.join("\n\n");
+}
 
 function _builderImgSize(){
   var fmt = (S._builder || {}).imgFormat || "1:1";
@@ -1919,9 +2125,10 @@ async function runBuilder(){
   var type = S._builderType;
   if(!type) return;
 
-  // Usage gate
+  // Usage gate — credit cost varies by generator type
   if(typeof gateUsage === "function"){
-    var allowed = await gateUsage();
+    var creditCost = (typeof CREDIT_COSTS !== "undefined" && CREDIT_COSTS[type]) || 1;
+    var allowed = await gateUsage(creditCost);
     if(!allowed) return;
   }
 
@@ -1934,7 +2141,7 @@ async function runBuilder(){
   // Loading state
   if(resultWrap) resultWrap.style.display = "";
   if(resultBody) resultBody.innerHTML = _buildCodeLoader(type);
-  if(saveBtn){ saveBtn.disabled = true; saveBtn.textContent = "Save to Studio"; }
+  if(saveBtn){ saveBtn.disabled = true; saveBtn.textContent = "Save Asset"; }
 
   var prompt = _buildBuilderPrompt(type);
 
@@ -1972,7 +2179,8 @@ async function runBuilder(){
     };
   } else if(type === "text"){
     endpoint    = API_BASE_URL+"/api/generate-text";
-    requestBody = { prompt: prompt, type: "text" };
+    var _textBc = (typeof _buildBrandContext === "function") ? _buildBrandContext(S.brandCore) : null;
+    requestBody = { prompt: prompt, type: "text", brandContext: _textBc };
   } else if(type === "web"){
     var _b = S._builder  || {};
     var _c = S.brandCore || {};
@@ -1990,6 +2198,18 @@ async function runBuilder(){
       web_type:        _b.webType           || "",
       layout:          _b.webLayout         || ""
     };
+  } else if(type === "email"){
+    endpoint    = API_BASE_URL+"/api/generate-email";
+    requestBody = { prompt: prompt };
+  } else if(type === "deck"){
+    endpoint    = API_BASE_URL+"/api/generate-deck";
+    requestBody = { prompt: prompt };
+  } else if(type === "poster"){
+    endpoint    = API_BASE_URL+"/api/generate-poster";
+    requestBody = { prompt: prompt };
+  } else if(type === "infographic"){
+    endpoint    = API_BASE_URL+"/api/generate-infographic";
+    requestBody = { prompt: prompt };
   }
 
   console.log("[Builder/" + type + "] → " + endpoint);
@@ -2168,7 +2388,276 @@ function _showBuilderResult(type, data){
     return;
   }
 
+  if(type === "email"){
+    if(!data.html){
+      body.innerHTML = '<div class="builder-error">No email was returned.</div>';
+      return;
+    }
+    var eHtml = _cleanHtmlOutput(data.html);
+    var ehtml  = '<div class="builder-email-result">';
+    ehtml += '<div class="ber-toolbar">';
+    ehtml += '<span class="ber-label">Email Preview</span>';
+    ehtml += '<button class="ber-dl-btn" onclick="_downloadEmailHtml()">Download HTML</button>';
+    ehtml += '</div>';
+    ehtml += '<div class="ber-frame-wrap">';
+    ehtml += '<iframe class="ber-frame" sandbox="allow-same-origin"></iframe>';
+    ehtml += '</div>';
+    ehtml += '<div class="ber-info-panel">';
+    ehtml += '<div class="ber-info-title">How to use this email</div>';
+    ehtml += '<ol class="ber-info-steps">';
+    ehtml += '<li>Click <strong>Download HTML</strong> above to save the email template file.</li>';
+    ehtml += '<li>Import into <strong>Mailchimp</strong>, <strong>Klaviyo</strong>, or your platform via their HTML code editor.</li>';
+    ehtml += '<li>Alternatively, open the HTML file in a browser and copy the content into your editor.</li>';
+    ehtml += '</ol>';
+    ehtml += '<div class="ber-info-coming"><span class="bic-label">Coming soon</span><span class="bic-list">Mailchimp &middot; Klaviyo &middot; Outlook &middot; Gmail &middot; HubSpot</span></div>';
+    ehtml += '</div>';
+    ehtml += '</div>';
+    body.innerHTML = ehtml;
+    body._emailHtml = eHtml;
+    // Load via srcdoc after DOM insertion to avoid attribute-escaping issues
+    var eframe = body.querySelector('.ber-frame');
+    if(eframe) eframe.srcdoc = eHtml;
+    return;
+  }
+
+  if(type === "deck"){
+    var slides = data.slides;
+    if(!slides || !slides.length){
+      body.innerHTML = '<div class="builder-error">No slides were returned.</div>';
+      return;
+    }
+    var bc      = S.brandCore || {};
+    var accent  = _getDeckAccent(bc);
+    var rgb     = _hexToRgb(accent) || {r:99, g:102, b:241};
+    var accVars = 'style="--dac:' + accent + ';--dar:' + rgb.r + ';--dag:' + rgb.g + ';--dab:' + rgb.b + '"';
+
+    var dhtml = '<div class="deck-result-wrap"><div class="deck-slides-list">';
+
+    slides.forEach(function(s, idx){
+      var layout   = (s.layout || 'content').toLowerCase();
+      var slideNum = s.slide || idx + 1;
+
+      dhtml += '<div class="deck-slide-wrap">';
+      dhtml += '<div class="dcs-meta"><span class="dcs-num">Slide&nbsp;' + slideNum + '</span>'
+             + '<span class="dcs-layout">' + layout.charAt(0).toUpperCase() + layout.slice(1) + '</span></div>';
+      dhtml += '<div class="slide-canvas slide-canvas-' + layout + '" ' + accVars + '>';
+      dhtml += '<div class="sc-deco sc-deco-1"></div><div class="sc-deco sc-deco-2"></div>';
+
+      if(layout === 'title'){
+        dhtml += '<div class="sc-title-wrap">';
+        if(s.eyebrow) dhtml += '<div class="sc-eyebrow">' + _escHtml(s.eyebrow) + '</div>';
+        dhtml += '<div class="sc-title">' + _escHtml(s.title || '') + '</div>';
+        if(s.subtitle) dhtml += '<div class="sc-subtitle">' + _escHtml(s.subtitle) + '</div>';
+        dhtml += '</div>';
+      } else if(layout === 'stats'){
+        dhtml += '<div class="sc-inner">';
+        dhtml += '<div class="sc-slide-title">' + _escHtml(s.title || '') + '</div>';
+        dhtml += '<div class="sc-metrics-row">';
+        (s.metrics || []).forEach(function(m){
+          dhtml += '<div class="sc-metric"><div class="sc-metric-val">' + _escHtml(m.value||'')
+                +  '</div><div class="sc-metric-lbl">' + _escHtml(m.label||'') + '</div></div>';
+        });
+        dhtml += '</div>';
+        if(s.content) dhtml += '<div class="sc-metric-note">' + _escHtml(s.content) + '</div>';
+        dhtml += '</div>';
+      } else if(layout === 'quote'){
+        dhtml += '<div class="sc-quote-wrap">';
+        dhtml += '<div class="sc-qmark">&ldquo;</div>';
+        dhtml += '<div class="sc-quote-text">' + _escHtml(s.content || s.title || '') + '</div>';
+        if(s.attribution) dhtml += '<div class="sc-attr">&mdash;&nbsp;' + _escHtml(s.attribution) + '</div>';
+        dhtml += '</div>';
+      } else if(layout === 'feature'){
+        dhtml += '<div class="sc-inner">';
+        dhtml += '<div class="sc-slide-title">' + _escHtml(s.title || '') + '</div>';
+        dhtml += '<div class="sc-feat-grid">';
+        (s.bullets || []).forEach(function(b){
+          dhtml += '<div class="sc-feat-card">' + _escHtml(b) + '</div>';
+        });
+        dhtml += '</div></div>';
+      } else if(layout === 'closing'){
+        dhtml += '<div class="sc-closing-wrap">';
+        dhtml += '<div class="sc-closing-title">' + _escHtml(s.title || '') + '</div>';
+        if(s.content) dhtml += '<div class="sc-closing-body">' + _escHtml(s.content) + '</div>';
+        if(s.cta) dhtml += '<div class="sc-cta">' + _escHtml(s.cta) + '</div>';
+        dhtml += '</div>';
+      } else {
+        // Default: content
+        dhtml += '<div class="sc-inner">';
+        dhtml += '<div class="sc-slide-title">' + _escHtml(s.title || '') + '</div>';
+        if(s.bullets && s.bullets.length){
+          dhtml += '<ul class="sc-bullets">';
+          s.bullets.forEach(function(b){ dhtml += '<li>' + _escHtml(b) + '</li>'; });
+          dhtml += '</ul>';
+        } else if(s.content){
+          dhtml += '<div class="sc-body-text">' + _escHtml(s.content) + '</div>';
+        }
+        dhtml += '</div>';
+      }
+
+      dhtml += '<div class="sc-badge">' + slideNum + '</div>';
+      dhtml += '</div>'; // slide-canvas
+
+      if(s.notes){
+        dhtml += '<div class="dcs-notes"><span class="dcs-notes-lbl">Speaker Notes</span>' + _escHtml(s.notes) + '</div>';
+      }
+      dhtml += '</div>'; // deck-slide-wrap
+    });
+
+    dhtml += '</div>'; // deck-slides-list
+    dhtml += '<div class="deck-info-panel">'
+           + '<div class="dip-title">PowerPoint Export</div>'
+           + '<div class="dip-body">PowerPoint export (.pptx) is being prepared for a future release. Your presentation structure and content are fully generated now — PPTX export will be available in an upcoming update.</div>'
+           + '<div class="dip-roadmap"><span class="dip-lbl">Coming soon</span><span class="dip-list">PowerPoint &middot; Google Slides &middot; PDF</span></div>'
+           + '</div>';
+    dhtml += '</div>'; // deck-result-wrap
+    body.innerHTML = dhtml;
+    return;
+  }
+
+  if(type === "poster"){
+    if(!data.html){
+      body.innerHTML = '<div class="builder-error">No poster was returned.</div>';
+      return;
+    }
+    _renderPosterResult(
+      data.html, body,
+      document.getElementById("flowGuideMessage"),
+      document.getElementById("flowStep"),
+      document.getElementById("builderSaveBtn")
+    );
+    return;
+  }
+
+  if(type === "infographic"){
+    if(!data.html){
+      body.innerHTML = '<div class="builder-error">No infographic was returned.</div>';
+      return;
+    }
+    _renderInfographicResult(
+      data.html, body,
+      document.getElementById("flowGuideMessage"),
+      document.getElementById("flowStep"),
+      document.getElementById("builderSaveBtn")
+    );
+    return;
+  }
+
   body.innerHTML = '<div class="builder-result-text">' + _formatBrief(data.result || "") + '</div>';
+}
+
+// ── Strip markdown/quote fences from HTML output (client-side) ──
+function _cleanHtmlOutput(raw){
+  if(!raw) return '';
+  var s = raw.trim();
+  s = s.replace(/^```(?:html)?\s*/i,'').replace(/\s*```\s*$/i,'').trim();
+  s = s.replace(/^"{3}(?:html)?\s*/i,'').replace(/\s*"{3}\s*$/i,'').trim();
+  var idx = s.search(/<(!DOCTYPE|html)[^>]*>/i);
+  if(idx > 0) s = s.slice(idx);
+  return s;
+}
+
+// ── Brand accent colour for deck slides ─────────────────────────
+function _getDeckAccent(bc){
+  if(bc && bc.colors && bc.colors.length){
+    var c = bc.colors[0];
+    return typeof c === 'string' ? c : (c.hex || c.value || '#6366F1');
+  }
+  if(bc && bc.palette) return bc.palette;
+  return '#6366F1';
+}
+
+// ── Hex → {r,g,b} ───────────────────────────────────────────────
+function _hexToRgb(hex){
+  var r = /^#?([a-f\d]{2})([a-f\d]{2})([a-f\d]{2})$/i.exec(hex || '');
+  return r ? {r:parseInt(r[1],16), g:parseInt(r[2],16), b:parseInt(r[3],16)} : null;
+}
+
+// ── Poster: dedicated result renderer ───────────────────────────
+function _renderPosterResult(html, resultBody, msgEl, stepEl, saveBtn){
+  _stopCodeLoader();
+  html = _cleanHtmlOutput(html);
+  S._lastPosterHTML = html;
+
+  var phtml = '<div class="poster-result-wrap">'
+    + '<div class="pr-toolbar">'
+    + '<span class="pr-label">Poster Preview</span>'
+    + '<button class="pr-dl-btn" onclick="_downloadPosterHtml()">Download HTML</button>'
+    + '</div>'
+    + '<div class="pr-frame-wrap">'
+    + '<iframe id="poster-preview" class="pr-frame" sandbox="allow-same-origin"></iframe>'
+    + '</div>'
+    + '</div>';
+
+  if(resultBody) resultBody.innerHTML = phtml;
+
+  var frame = document.getElementById('poster-preview');
+  if(frame) frame.srcdoc = html;
+
+  if(saveBtn) saveBtn.disabled = false;
+  if(msgEl)  msgEl.textContent = "Your poster is ready. Download to print or share.";
+  if(stepEl) stepEl.innerHTML  = '';
+}
+
+// ── Poster download ──────────────────────────────────────────────
+function _downloadPosterHtml(){
+  var html = S._lastPosterHTML || '';
+  if(!html) return;
+  var blob = new Blob([html], { type: 'text/html' });
+  var a    = document.createElement('a');
+  a.href     = URL.createObjectURL(blob);
+  a.download = 'poster.html';
+  document.body.appendChild(a); a.click();
+  setTimeout(function(){ URL.revokeObjectURL(a.href); document.body.removeChild(a); }, 1000);
+}
+
+// ── Infographic: dedicated result renderer ───────────────────────
+function _renderInfographicResult(html, resultBody, msgEl, stepEl, saveBtn){
+  _stopCodeLoader();
+  html = _cleanHtmlOutput(html);
+  S._lastInfographicHTML = html;
+
+  var ihtml = '<div class="infographic-result-wrap">'
+    + '<div class="ir-toolbar">'
+    + '<span class="ir-label">Infographic Preview</span>'
+    + '<button class="ir-dl-btn" onclick="_downloadInfographicHtml()">Download HTML</button>'
+    + '</div>'
+    + '<div class="ir-frame-wrap">'
+    + '<iframe id="infographic-preview" class="ir-frame" sandbox="allow-same-origin"></iframe>'
+    + '</div>'
+    + '</div>';
+
+  if(resultBody) resultBody.innerHTML = ihtml;
+
+  var frame = document.getElementById('infographic-preview');
+  if(frame) frame.srcdoc = html;
+
+  if(saveBtn) saveBtn.disabled = false;
+  if(msgEl)  msgEl.textContent = "Your infographic is ready. Download to share or embed.";
+  if(stepEl) stepEl.innerHTML  = '';
+}
+
+function _downloadInfographicHtml(){
+  var html = S._lastInfographicHTML || '';
+  if(!html) return;
+  var blob = new Blob([html], { type: 'text/html' });
+  var a    = document.createElement('a');
+  a.href     = URL.createObjectURL(blob);
+  a.download = 'infographic.html';
+  document.body.appendChild(a); a.click();
+  setTimeout(function(){ URL.revokeObjectURL(a.href); document.body.removeChild(a); }, 1000);
+}
+
+// ── Email download ───────────────────────────────────────────────
+function _downloadEmailHtml(){
+  var body = document.getElementById("builderResultBody");
+  var html = body && body._emailHtml;
+  if(!html) return;
+  var blob = new Blob([html], { type: "text/html" });
+  var a    = document.createElement("a");
+  a.href     = URL.createObjectURL(blob);
+  a.download = "email-template.html";
+  document.body.appendChild(a); a.click();
+  setTimeout(function(){ URL.revokeObjectURL(a.href); document.body.removeChild(a); }, 1000);
 }
 
 // ════════════════════════════════════════════════════════════════
@@ -2183,7 +2672,10 @@ var _CL_STEPS = {
   image:    ["Analyzing brand identity…","Composing visual layout…","Applying color palette…","Rendering final image…","Finalizing output…"],
   text:     ["Reading brand voice…","Structuring content outline…","Writing copy…","Refining tone and style…","Polishing output…"],
   ads:      ["Loading brand assets…","Writing ad copy…","Building visual layout…","Optimizing for platform…","Finalizing creative…"],
-  campaign: ["Building campaign strategy…","Generating variations…","Applying brand guidelines…","Reviewing copy…","Packaging results…"]
+  campaign: ["Building campaign strategy…","Generating variations…","Applying brand guidelines…","Reviewing copy…","Packaging results…"],
+  email:    ["Reading brand identity…","Structuring email layout…","Writing email copy…","Styling sections…","Finalizing template…"],
+  deck:     ["Loading brand context…","Building slide structure…","Writing slide content…","Refining messaging…","Packaging presentation…"],
+  poster:   ["Reading brand identity…","Designing poster layout…","Applying typography…","Styling brand elements…","Finalizing poster…"]
 };
 
 var _CL_MICRO = [
@@ -3006,6 +3498,10 @@ function _setImgTextColor(mode){
 
 function builderSave(){
   if(!S._lastBuilderResult) return;
+  if(typeof loadSettings === "function" && loadSettings().generationHistory === false){
+    toast("Generation History is off — enable it in Settings to save content", "warn");
+    return;
+  }
 
   var type = S._lastBuilderResult.type;
   var data = S._lastBuilderResult.data;
@@ -3060,7 +3556,7 @@ function builderSave(){
   var saveBtn = document.getElementById("builderSaveBtn");
   if(saveBtn){ saveBtn.disabled = true; saveBtn.textContent = "Saved ✓"; }
 
-  if(typeof toast === "function") toast("Saved to Studio");
+  if(typeof toast === "function") toast("Asset saved");
 }
 
 
@@ -3104,9 +3600,12 @@ function openCreateWorkspace(type, outType){
     el.style.display = (id === activeCfgId) ? "" : "none";
   });
 
+  var cwsHeader = document.getElementById("cwsHeader");
+  if(cwsHeader) cwsHeader.style.display = (type === "assistant") ? "none" : "";
+
   var cwsCtrls = document.getElementById("cwsControls");
   var activeCfgId = CWS_CFG_MAP[type] || null;
-  if(activeCfgId){
+  if(activeCfgId || type === "assistant"){
     if(cwsCtrls) cwsCtrls.style.display = "none";
   } else {
     if(cwsCtrls) cwsCtrls.style.display = "";
@@ -3120,34 +3619,39 @@ function openCreateWorkspace(type, outType){
   var inp = document.getElementById("cwsInput");
   if(inp && !activeCfgId) inp.placeholder = ct.placeholder;
 
-  // Welcome screen
+  // Welcome screen / history restore
   var feed = document.getElementById("cwsFeed");
   if(feed){
     var bc          = S.brandCore;
-    var bcHint      = bc ? ' using your <strong>' + bc.name + '</strong> Brand Core' : "";
     var isAssistant = type === "assistant";
 
-    var assistantBlock = "";
     if(isAssistant){
-      var starters    = _buildAssistantStarters(bc);
-      var starterHtml = starters.map(function(s){
-        return '<div class="chat-sug" onclick="assistantFill(' + JSON.stringify(s) + ')">' + _escHtml(s) + '</div>';
-      }).join("");
-      var subline = bc
-        ? 'Personalized for <strong>' + _escHtml(bc.name) + '</strong>. Select a prompt to get started, or ask anything.'
-        : 'Select a prompt to get started, or ask anything about your brand.';
-      assistantBlock =
-        '<p class="chat-welcome-sub">' + subline + '</p>'
-        + '<div class="chat-suggestions ast-starters">' + starterHtml + '</div>';
+      var savedMsgs = _loadAstHistory();
+      if(savedMsgs && savedMsgs.length > 0){
+        S._astMsgs = savedMsgs;
+        _restoreAstChat(feed, savedMsgs);
+        _checkAstMemoryLimit(feed);
+      } else {
+        S._astMsgs = [];
+        var welcomeMsg = bc
+          ? "Welcome back. I’ve loaded your <strong>" + _escHtml(bc.name) + "</strong> brand context and I’m ready whenever you are."
+          : "Welcome back. How can I help today?";
+        feed.innerHTML =
+          '<div class="chat-welcome">'
+          + '<div class="chat-welcome-icon"><svg viewBox="0 0 28 28" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" width="28" height="28"><path d="M3.5 20V7a3.5 3.5 0 0 1 3.5-3.5h14A3.5 3.5 0 0 1 24.5 7v9a3.5 3.5 0 0 1-3.5 3.5H9L3.5 24.5V20z"/><path d="M9.5 13h9M9.5 9h6"/></svg></div>'
+          + '<h2>Brand Assistant</h2>'
+          + '<p>' + welcomeMsg + '</p>'
+          + '</div>';
+      }
+    } else {
+      var bcHint = bc ? ' using your <strong>' + bc.name + '</strong> Brand Core' : "";
+      feed.innerHTML =
+        '<div class="chat-welcome">'
+        + '<div class="chat-welcome-icon"><svg viewBox="0 0 28 28" fill="none" stroke="currentColor" stroke-width="1.4" width="28" height="28"><path d="M14 3L17 10H24L19 14L21 21L14 17L7 21L9 14L4 10H11Z"/></svg></div>'
+        + '<h2>Create ' + ct.label + '</h2>'
+        + '<p>Describe what you want to create' + bcHint + '. I will generate it for you.</p>'
+        + '</div>';
     }
-
-    feed.innerHTML =
-      '<div class="chat-welcome">'
-      + '<div class="chat-welcome-icon"><svg viewBox="0 0 28 28" fill="none" stroke="currentColor" stroke-width="1.4" width="28" height="28"><path d="M14 3L17 10H24L19 14L21 21L14 17L7 21L9 14L4 10H11Z"/></svg></div>'
-      + '<h2>' + (isAssistant ? "Brand Assistant" : "Create " + ct.label) + '</h2>'
-      + '<p>' + (isAssistant ? t("welcomeMsg") : "Describe what you want to create" + bcHint + ". I will generate it for you.") + '</p>'
-      + assistantBlock
-      + '</div>';
   }
 
   navigate("create-workspace");
@@ -3219,7 +3723,7 @@ function cwsSaveToStudio(btn){
   btn.disabled    = true;
   btn.textContent = "Saved";
   btn.classList.add("cws-save-btn-done");
-  if(typeof toast === "function") toast("Saved to Studio");
+  if(typeof toast === "function") toast("Asset saved");
 }
 
 
@@ -3233,8 +3737,10 @@ async function sendCWS(){
   var prompt = input.value.trim();
   if(!prompt) return;
 
-  if(typeof gateUsage === "function"){
-    var allowed = await gateUsage();
+  // Brand Assistant is unlimited — no credit gate
+  if(S._cwsType !== "assistant" && typeof gateUsage === "function"){
+    var cwsCreditCost = (typeof CREDIT_COSTS !== "undefined" && CREDIT_COSTS[S._cwsType]) || 1;
+    var allowed = await gateUsage(cwsCreditCost);
     if(!allowed) return;
   }
 
@@ -3243,6 +3749,12 @@ async function sendCWS(){
 
   if(!S._cwsHistory) S._cwsHistory = [];
   S._cwsHistory.push({ role:"user", text:prompt });
+
+  var cwsTypeNow = S._cwsType || "assistant";
+  if(cwsTypeNow === "assistant"){
+    if(!S._astMsgs) S._astMsgs = [];
+    S._astMsgs.push({ role:"user", text:prompt, ts:Date.now() });
+  }
 
   var feed = document.getElementById("cwsFeed");
   if(!feed) return;
@@ -3273,11 +3785,12 @@ async function sendCWS(){
   else                             finalPrompt = prompt;
 
   var endpoint = API_BASE_URL+"/api/generate-text";
+  var _cwsBc = (typeof _buildBrandContext === "function") ? _buildBrandContext(S.brandCore) : null;
 
   fetch(endpoint, {
     method:  "POST",
     headers: { "Content-Type": "application/json" },
-    body:    JSON.stringify({ prompt: finalPrompt, type: cwsType })
+    body:    JSON.stringify({ prompt: finalPrompt, type: cwsType, brandContext: _cwsBc })
   })
   .then(function(res){ return res.json(); })
   .then(function(data){
@@ -3288,7 +3801,7 @@ async function sendCWS(){
     ad.className = "chat-msg ai";
     var bubbleContent = renderBubble(cwsType, data);
     var saveRow = !data.error
-      ? '<div class="cws-save-row"><button class="cws-save-btn" onclick="cwsSaveToStudio(this)" data-type="' + cwsType + '" data-payload=\'' + JSON.stringify(data).replace(/'/g, "&#39;") + '\'>Save to Studio</button></div>'
+      ? '<div class="cws-save-row"><button class="cws-save-btn" onclick="cwsSaveToStudio(this)" data-type="' + cwsType + '" data-payload=\'' + JSON.stringify(data).replace(/'/g, "&#39;") + '\'>Save Asset</button></div>'
       : "";
     ad.innerHTML =
       '<div class="chat-ai-avatar"><svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M10 2L12.5 7.5H18L13.5 11L15 16.5L10 13.5L5 16.5L6.5 11L2 7.5H7.5Z"/></svg></div>'
@@ -3296,6 +3809,13 @@ async function sendCWS(){
     feed.appendChild(ad);
     feed.scrollTop = feed.scrollHeight;
     S._cwsHistory.push({ role:"ai", text:"[" + cwsType + " response]" });
+
+    if(cwsType === "assistant"){
+      if(!S._astMsgs) S._astMsgs = [];
+      S._astMsgs.push({ role:"ai", html:bubbleContent, ts:Date.now() });
+      _saveAstHistory(S._astMsgs);
+      _checkAstMemoryLimit(feed);
+    }
   })
   .catch(function(err){
     console.error("[CWS/" + cwsType + "] error:", err);

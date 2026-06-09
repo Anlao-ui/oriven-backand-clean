@@ -9,117 +9,75 @@ var CF_FLOWS = {
 
   image: [
     {
-      key:  "imgDesignType",
-      q:    "What kind of image do you need?",
-      desc: "This defines the type and purpose of the visual.",
+      key:  "imgVisualType",
+      q:    "What type of visual do you need?",
+      desc: "This defines the structure, composition, and intended use of the visual.",
       options: [
-        { val: "product",      label: "Product Image" },
-        { val: "social",       label: "Social Post" },
-        { val: "poster",       label: "Poster" },
-        { val: "ad_creative",  label: "Ad Creative" },
-        { val: "promo",        label: "Promo Image" },
-        { val: "announcement", label: "Announcement" }
+        { val: "poster",        label: "Poster" },
+        { val: "advertisement", label: "Advertisement" },
+        { val: "social",        label: "Social Media Post" },
+        { val: "product",       label: "Product Visual" },
+        { val: "website",       label: "Website Graphic" },
+        { val: "banner",        label: "Banner" },
+        { val: "presentation",  label: "Presentation Graphic" },
+        { val: "custom",        label: "Custom" }
       ]
     },
     {
       key:  "imgPurpose",
-      q:    "What is the purpose of this image?",
-      desc: "Define how the image will be used — this shapes the composition and messaging.",
+      q:    "What is the purpose of this visual?",
+      desc: "This shapes the composition, message hierarchy, and call-to-action intensity.",
       options: [
-        { val: "launch",       label: "Product Launch" },
-        { val: "promotion",    label: "Promotion" },
-        { val: "awareness",    label: "Brand Awareness" },
-        { val: "sales",        label: "Drive Sales" },
-        { val: "engagement",   label: "Engagement" },
-        { val: "introduction", label: "Introduction" }
+        { val: "promote",   label: "Promote Product" },
+        { val: "launch",    label: "Launch Campaign" },
+        { val: "awareness", label: "Build Awareness" },
+        { val: "leads",     label: "Generate Leads" },
+        { val: "sales",     label: "Increase Sales" },
+        { val: "inform",    label: "Share Information" }
       ]
     },
     {
-      key:  "imgSubject",
-      q:    "Should this image include a person?",
-      desc: "Choose whether the image should feature a human subject.",
-      options: [
-        { val: "person", label: "Yes — include a person" },
-        { val: "no",     label: "No — brand visual only" }
-      ]
+      key:         "imgAbout",
+      q:           "What should the visual be about?",
+      desc:        "Describe the product, service, or concept this visual represents.",
+      type:        "textarea",
+      placeholder: "e.g. Premium creatine supplement. AI branding platform. Marketing service. Luxury fashion product.",
+      optional:    false
     },
     {
-      key:  "imgVisualStyle",
-      q:    "What visual style do you want?",
-      desc: "This sets the aesthetic direction — composition, mood, and overall look.",
-      options: [
-        { val: "editorial",    label: "Editorial" },
-        { val: "minimal",      label: "Minimal" },
-        { val: "bold",         label: "Bold" },
-        { val: "cinematic",    label: "Cinematic" },
-        { val: "lifestyle",    label: "Lifestyle" },
-        { val: "dark",         label: "Dark" }
-      ]
+      key:         "imgTextContent",
+      q:           "What text should appear on the visual?",
+      desc:        "Leave blank to let AI generate on-brand copy using your BrandCore tone and positioning.",
+      type:        "textarea",
+      placeholder: "e.g. Launch Your Brand Faster. 20% Off This Week. Built For Performance. (Leave blank for AI-generated copy)",
+      optional:    true
     },
     {
-      key:  "imgMood",
-      q:    "What mood should this image evoke?",
-      desc: "Mood shapes the emotional response and energy of the composition.",
-      options: [
-        { val: "premium",   label: "Premium" },
-        { val: "energetic", label: "Energetic" },
-        { val: "calm",      label: "Calm" },
-        { val: "dramatic",  label: "Dramatic" },
-        { val: "playful",   label: "Playful" },
-        { val: "serene",    label: "Serene" }
-      ]
-    },
-    {
-      key:  "imgLighting",
-      q:    "What lighting style do you want?",
-      desc: "Lighting is one of the strongest signals of quality and brand feel.",
-      options: [
-        { val: "natural",  label: "Natural" },
-        { val: "studio",   label: "Studio" },
-        { val: "dramatic", label: "Dramatic" },
-        { val: "soft",     label: "Soft" },
-        { val: "ambient",  label: "Ambient" }
-      ]
-    },
-    {
-      key:  "imgIncludeText",
-      q:    "Do you want to include text in the image?",
-      desc: "Add a title, slogan, or message that should appear in the image.",
-      options: [
-        { val: "none",   label: "No text" },
-        { val: "title",  label: "Short title" },
-        { val: "slogan", label: "Slogan" },
-        { val: "custom", label: "Custom text" }
-      ]
-    },
-    {
-      key:          "imgTextContent",
-      q:            "What text should be included?",
-      desc:         "This text will be integrated into the image design.",
-      type:         "textarea",
-      placeholder:  "Type the exact text to include in the image…",
-      optional:     false,
-      conditional:  "imgIncludeText",
-      conditionalVal: "custom"
+      key:         "imgScene",
+      q:           "Describe the scene or imagery.",
+      desc:        "This is the most important field — be as specific as possible about setting, mood, and visual elements.",
+      type:        "textarea",
+      placeholder: "e.g. Black supplement container on a dark premium background. Modern SaaS dashboard floating in a futuristic environment. Athlete training under dramatic lighting.",
+      optional:    false
     },
     {
       key:  "imgFormat",
-      q:    "What format do you need?",
+      q:    "Preferred format?",
       desc: "This sets the dimensions and aspect ratio of the output.",
       options: [
         { val: "1:1",  label: "Square 1:1" },
         { val: "4:5",  label: "Portrait 4:5" },
         { val: "9:16", label: "Story 9:16" },
-        { val: "16:9", label: "Wide 16:9" }
+        { val: "16:9", label: "Landscape 16:9" }
       ]
     },
     {
-      key:  "_extraNotes",
-      q:    "Anything else you'd like to add?",
-      desc: "The more specific your input, the better the final result.",
-      type: "textarea",
-      placeholder: "Describe any specific details, references, colors, lighting, or elements…",
-      optional: true
+      key:         "_extraNotes",
+      q:           "Anything else?",
+      desc:        "Optional direction for aesthetic, tone, contrast, or creative focus.",
+      type:        "textarea",
+      placeholder: "e.g. Minimal design. Focus on trust. Premium aesthetic. High contrast.",
+      optional:    true
     }
   ],
 
@@ -186,88 +144,67 @@ var CF_FLOWS = {
 
   campaign: [
     {
-      key:  "campType",
-      q:    "What type of campaign are you running?",
-      desc: "This defines the overarching strategy and campaign structure.",
+      key:         "campPromotion",
+      q:           "What are you promoting?",
+      desc:        "Name the product, service, or offer this campaign is for.",
+      type:        "textarea",
+      placeholder: "e.g. Protein Powder, Marketing Agency, AI Tool, Online Course, Mobile App…",
+      optional:    false
+    },
+    {
+      key:  "campGoal",
+      q:    "What is the goal of this campaign?",
+      desc: "Every element — hook, copy, visuals, CTA — will be shaped around this goal.",
       options: [
-        { val: "launch",      label: "Product Launch" },
-        { val: "awareness",   label: "Brand Awareness" },
-        { val: "conversion",  label: "Conversion" },
-        { val: "promotion",   label: "Seasonal / Promo" },
-        { val: "retargeting", label: "Retargeting" }
+        { val: "sales",     label: "Sales" },
+        { val: "leads",     label: "Lead Generation" },
+        { val: "awareness", label: "Brand Awareness" },
+        { val: "launch",    label: "Product Launch" },
+        { val: "traffic",   label: "Website Traffic" },
+        { val: "community", label: "Community Growth" }
       ]
     },
     {
-      key:  "campChannel",
-      q:    "Which platform will this campaign run on?",
-      desc: "Select where this campaign will live and be distributed.",
+      key:  "campCount",
+      q:    "How many ads should be generated?",
+      desc: "Each ad will use a different creative angle within your BrandCore.",
       options: [
-        { val: "meta",    label: "Meta / Facebook / Instagram" },
-        { val: "tiktok",  label: "TikTok" },
-        { val: "youtube", label: "YouTube" },
-        { val: "multi",   label: "Multi-platform" }
+        { val: "3", label: "3 Ads" },
+        { val: "4", label: "4 Ads" },
+        { val: "5", label: "5 Ads" }
       ]
     },
     {
-      key:  "campFormat",
-      q:    "What format do you need?",
-      desc: "This sets the dimensions across all campaign variations.",
-      options: [
-        { val: "square",     label: "Square 1:1" },
-        { val: "portrait",   label: "Portrait 4:5" },
-        { val: "story_reel", label: "Story / Reel" },
-        { val: "mixed",      label: "Mixed formats" }
-      ]
+      key:         "campAudience",
+      q:           "Who is this campaign targeting?",
+      desc:        "Be specific — this shapes the hook, tone, and message angle.",
+      type:        "textarea",
+      placeholder: "e.g. Gym Owners, Startup Founders, Small Businesses, Content Creators…",
+      optional:    false
     },
     {
-      key:  "campSubject",
-      q:    "What is this campaign about?",
-      desc: "Knowing the subject shapes the creative angle and messaging.",
-      options: [
-        { val: "product", label: "Product" },
-        { val: "service", label: "Service" },
-        { val: "brand",   label: "Brand" },
-        { val: "offer",   label: "Offer / Deal" }
-      ]
+      key:         "campOffer",
+      q:           "What is the main offer or message?",
+      desc:        "The core reason someone should stop and pay attention.",
+      type:        "textarea",
+      placeholder: "e.g. 20% Off, Free Trial, Limited Launch, New Collection, Book A Demo…",
+      optional:    false
     },
     {
-      key:  "campFunnelStage",
-      q:    "What stage of the funnel is this campaign for?",
-      desc: "Funnel stage defines message intensity and creative direction.",
-      options: [
-        { val: "awareness",     label: "Awareness" },
-        { val: "consideration", label: "Consideration" },
-        { val: "conversion",    label: "Conversion" },
-        { val: "retention",     label: "Retention" }
-      ]
+      key:         "campVisuals",
+      q:           "Describe the visuals you want.",
+      desc:        "This directly drives visual generation — be specific about setting, mood, and style.",
+      type:        "textarea",
+      placeholder: "e.g. Dark gym with athletes training. Premium black supplement containers with dramatic lighting. Minimal luxury workspace with modern technology.",
+      optional:    false
     },
     {
-      key:  "campAudienceWarmth",
-      q:    "How warm is your target audience?",
-      desc: "Warm audiences already know your brand — cold ones don't.",
-      options: [
-        { val: "cold",       label: "Cold Audience" },
-        { val: "warm",       label: "Warm Audience" },
-        { val: "retargeted", label: "Retargeted" }
-      ]
-    },
-    {
-      key:  "campVariations",
-      q:    "How many ad variations do you want?",
-      desc: "Each variation is a unique creative angle within the campaign.",
-      options: [
-        { val: "2", label: "2 variations" },
-        { val: "3", label: "3 variations" },
-        { val: "4", label: "4 variations" }
-      ]
-    },
-    {
-      key:  "_extraNotes",
-      q:    "Anything else you'd like to add?",
-      desc: "The more specific your input, the better the final result.",
-      type: "textarea",
-      placeholder: "Describe your offer, audience, key messages, or any creative direction…",
-      optional: true
+      key:         "_extraNotes",
+      q:           "Anything else the campaign should include?",
+      desc:        "Optional direction for tone, urgency, trust signals, or creative focus.",
+      type:        "textarea",
+      placeholder: "e.g. Include urgency. Focus on trust. Highlight premium quality. Keep it minimal.",
+      optional:    true
     }
   ],
 
@@ -345,82 +282,305 @@ var CF_FLOWS = {
   web: [
     {
       key:  "webType",
-      q:    "What kind of website do you need?",
-      desc: "Choose the type that best matches your goal — this shapes the structure and content.",
+      q:    "What type of website do you need?",
+      desc: "This defines the structure, sections, and layout approach.",
       options: [
-        { val: "one-page",  label: "One Page",         desc: "Single scroll — intro, features, contact" },
-        { val: "portfolio", label: "Portfolio",         desc: "Showcase your work or personal brand" },
-        { val: "saas",      label: "SaaS / Startup",   desc: "Feature-rich product site with pricing" },
-        { val: "ecommerce", label: "E-commerce",        desc: "Products, store layout, and CTAs" },
-        { val: "agency",    label: "Agency / Service",  desc: "Services, case studies, and contact" },
-        { val: "landing",   label: "Landing Page",      desc: "Single goal — one offer, one CTA" }
+        { val: "landing",   label: "Landing Page",       desc: "Single goal — one offer, one CTA" },
+        { val: "business",  label: "Business Website",   desc: "Services, team, contact, and about" },
+        { val: "portfolio", label: "Portfolio",           desc: "Showcase work or personal brand" },
+        { val: "ecommerce", label: "E-commerce Store",   desc: "Products, cart, and checkout flow" },
+        { val: "agency",    label: "Agency Website",     desc: "Services, case studies, and contact" },
+        { val: "saas",      label: "SaaS Website",       desc: "Features, pricing, and signup" }
       ]
     },
     {
-      key:         "webPromotion",
-      q:           "What are you promoting?",
-      desc:        "Describe the product, service, or offer this website is for.",
+      key:         "webAbout",
+      q:           "What is the website about?",
+      desc:        "Describe the brand, product, or service this site represents.",
       type:        "textarea",
-      placeholder: "e.g. A SaaS tool for freelance designers that automates invoicing…",
+      placeholder: "e.g. AI Branding Platform, Fitness Supplement Brand, Marketing Agency, Personal Brand…",
       optional:    false
     },
     {
-      key:  "webStyle",
-      q:    "What design style do you want?",
-      desc: "Sets the visual language and layout density of the page.",
+      key:  "webGoal",
+      q:    "What is the primary goal of the website?",
+      desc: "Every element — headline, CTA, layout — will orient toward this.",
       options: [
-        { val: "minimal",    label: "Minimal" },
-        { val: "modern",     label: "Modern" },
-        { val: "bold",       label: "Bold" },
-        { val: "luxury",     label: "Luxury" },
-        { val: "futuristic", label: "Futuristic" },
-        { val: "clean",      label: "Clean" },
-        { val: "corporate",  label: "Corporate" },
-        { val: "playful",    label: "Playful" },
-        { val: "elegant",    label: "Elegant" },
-        { val: "startup",    label: "Startup" },
-        { val: "dark",       label: "Dark" },
-        { val: "light",      label: "Light" }
+        { val: "sales",     label: "Generate Sales" },
+        { val: "leads",     label: "Collect Leads" },
+        { val: "book_call", label: "Book Calls" },
+        { val: "showcase",  label: "Showcase Work" },
+        { val: "trust",     label: "Build Trust" },
+        { val: "launch",    label: "Launch Product" }
       ]
     },
     {
-      key:  "webConversionGoal",
-      q:    "What is the primary conversion goal?",
-      desc: "Every element on the page will orient toward this goal.",
-      options: [
-        { val: "signup",    label: "Sign Up / Free Trial" },
-        { val: "purchase",  label: "Purchase" },
-        { val: "contact",   label: "Contact / Enquiry" },
-        { val: "download",  label: "Download" },
-        { val: "book_call", label: "Book a Call" },
-        { val: "awareness", label: "Brand Awareness" }
-      ]
+      key:         "webAudience",
+      q:           "Who is the target audience?",
+      desc:        "The more specific, the more relevant the copy and layout.",
+      type:        "textarea",
+      placeholder: "e.g. Startup Founders, Gym Enthusiasts, Small Businesses, Creators, Agencies…",
+      optional:    false
     },
     {
-      key:  "webAnimations",
-      q:    "What animation style should the page use?",
-      desc: "Animations improve feel but may affect load time on slower devices.",
-      options: [
-        { val: "none",               label: "None" },
-        { val: "subtle",             label: "Subtle" },
-        { val: "smooth",             label: "Smooth" },
-        { val: "fade-in",            label: "Fade In" },
-        { val: "slide-up",           label: "Slide Up" },
-        { val: "slide-in-left",      label: "Slide Left" },
-        { val: "slide-in-right",     label: "Slide Right" },
-        { val: "zoom-in",            label: "Zoom In" },
-        { val: "parallax",           label: "Parallax" },
-        { val: "staggered",          label: "Staggered" },
-        { val: "hover-effects",      label: "Hover Effects" },
-        { val: "micro-interactions", label: "Micro Interactions" }
-      ]
+      key:         "webSections",
+      q:           "What sections should the website include?",
+      desc:        "List the sections you need — these become the page structure.",
+      type:        "textarea",
+      placeholder: "e.g. Hero, Features, Testimonials, Pricing, FAQ, Contact",
+      optional:    false
+    },
+    {
+      key:         "webStyle",
+      q:           "Describe the style you want.",
+      desc:        "This drives the visual direction — be specific about mood, aesthetic, and feel.",
+      type:        "textarea",
+      placeholder: "e.g. Minimal and premium. Dark and futuristic. Luxury black and gold. Clean SaaS design. Modern technology aesthetic.",
+      optional:    false
     },
     {
       key:         "_extraNotes",
-      q:           "Anything else you'd like to add?",
-      desc:        "The more specific your input, the better the final result.",
+      q:           "Anything else the website should include?",
+      desc:        "Optional notes on CTAs, trust signals, mobile focus, or creative direction.",
       type:        "textarea",
-      placeholder: "Specific copy direction, color preferences, tone notes, inspiration…",
+      placeholder: "e.g. Strong call-to-actions. Trust-building sections. Focus on conversions. Mobile-first design.",
+      optional:    true
+    }
+  ],
+
+  // ── Email Designer ────────────────────────────────────────────
+  email: [
+    {
+      key:  "emailType",
+      q:    "What type of email are you creating?",
+      desc: "This shapes the structure, urgency, and tone of the email.",
+      options: [
+        { val: "newsletter",    label: "Newsletter" },
+        { val: "product_launch",label: "Product Launch" },
+        { val: "welcome",       label: "Welcome Email" },
+        { val: "sales",         label: "Sales Email" },
+        { val: "promotion",     label: "Promotion" },
+        { val: "announcement",  label: "Announcement" }
+      ]
+    },
+    {
+      key:  "emailGoal",
+      q:    "What is the primary goal of this email?",
+      desc: "Every section — headline, body, CTA — will orient toward this goal.",
+      options: [
+        { val: "drive_sales",   label: "Drive Sales" },
+        { val: "build_trust",   label: "Build Trust" },
+        { val: "engagement",    label: "Increase Engagement" },
+        { val: "promote",       label: "Promote a Product" },
+        { val: "nurture",       label: "Nurture Leads" },
+        { val: "announce",      label: "Make an Announcement" }
+      ]
+    },
+    {
+      key:         "emailAudience",
+      q:           "Who is this email going to?",
+      desc:        "Be specific — the more you describe your audience, the more targeted the copy.",
+      type:        "textarea",
+      placeholder: "e.g. Existing customers, new subscribers, warm leads, gym enthusiasts aged 25–40…",
+      optional:    false
+    },
+    {
+      key:         "emailMessage",
+      q:           "What is the core message of this email?",
+      desc:        "The main thing you want readers to know, feel, or do after reading.",
+      type:        "textarea",
+      placeholder: "e.g. Introducing our new summer collection. 30% off this week only. Your free trial starts now.",
+      optional:    false
+    },
+    {
+      key:         "emailCta",
+      q:           "What should the call-to-action be?",
+      desc:        "The single action you want readers to take — keep it clear and direct.",
+      type:        "textarea",
+      placeholder: "e.g. Shop Now. Claim Your Discount. Book a Call. Start Free Trial.",
+      optional:    false
+    },
+    {
+      key:         "_extraNotes",
+      q:           "Any additional details for the email?",
+      desc:        "Tone adjustments, specific offers, urgency signals, or copy direction.",
+      type:        "textarea",
+      placeholder: "e.g. Include a sense of urgency. Mention the 48-hour deadline. Keep it short and punchy.",
+      optional:    true
+    }
+  ],
+
+  // ── Presentation Generator ────────────────────────────────────
+  deck: [
+    {
+      key:  "deckType",
+      q:    "What type of presentation is this?",
+      desc: "The type determines the narrative structure, section order, and tone.",
+      options: [
+        { val: "pitch",     label: "Pitch Deck" },
+        { val: "investor",  label: "Investor Deck" },
+        { val: "sales",     label: "Sales Deck" },
+        { val: "overview",  label: "Company Overview" },
+        { val: "launch",    label: "Product Launch" },
+        { val: "custom",    label: "Custom" }
+      ]
+    },
+    {
+      key:         "deckGoal",
+      q:           "What is the goal of this presentation?",
+      desc:        "What should the audience think, feel, or do by the end?",
+      type:        "textarea",
+      placeholder: "e.g. Secure Series A funding. Close the enterprise deal. Launch the product to press.",
+      optional:    false
+    },
+    {
+      key:         "deckAudience",
+      q:           "Who is the audience?",
+      desc:        "Knowing who's in the room shapes the level of detail, language, and persuasion angle.",
+      type:        "textarea",
+      placeholder: "e.g. Venture capitalists, enterprise buyers, press and media, internal leadership team…",
+      optional:    false
+    },
+    {
+      key:  "deckSlides",
+      q:    "How many slides should the deck have?",
+      desc: "Choose a length that fits your context — less is often more.",
+      options: [
+        { val: "5",  label: "5 slides" },
+        { val: "10", label: "10 slides" },
+        { val: "15", label: "15 slides" },
+        { val: "20", label: "20 slides" }
+      ]
+    },
+    {
+      key:         "deckTopic",
+      q:           "What is this presentation about?",
+      desc:        "Describe the product, company, or idea being presented.",
+      type:        "textarea",
+      placeholder: "e.g. AI branding platform for DTC brands. Revenue-cycle management SaaS. Premium supplement brand.",
+      optional:    false
+    },
+    {
+      key:         "_extraNotes",
+      q:           "Anything else to include in the deck?",
+      desc:        "Specific slides, sections, talking points, or tone direction.",
+      type:        "textarea",
+      placeholder: "e.g. Include a market size slide. Emphasise the founder story. Keep language non-technical.",
+      optional:    true
+    }
+  ],
+
+  // ── Poster Generator ─────────────────────────────────────────
+  poster: [
+    {
+      key:  "posterType",
+      q:    "What type of poster is this?",
+      desc: "The category shapes the visual structure, hierarchy, and urgency level.",
+      options: [
+        { val: "product",     label: "Product" },
+        { val: "launch",      label: "Launch" },
+        { val: "event",       label: "Event" },
+        { val: "recruitment", label: "Recruitment" },
+        { val: "promotion",   label: "Promotion" },
+        { val: "custom",      label: "Custom" }
+      ]
+    },
+    {
+      key:         "posterHeadline",
+      q:           "What is the main headline?",
+      desc:        "The dominant line — bold, memorable, and impossible to ignore.",
+      type:        "textarea",
+      placeholder: "e.g. The Future of Fitness. Launch Day is Here. Join the Movement.",
+      optional:    false
+    },
+    {
+      key:         "posterBody",
+      q:           "What supporting copy should the poster include?",
+      desc:        "Secondary text — product details, event info, key message.",
+      type:        "textarea",
+      placeholder: "e.g. Premium creatine, zero fillers. 10% OFF launch price. Apply before 1 July.",
+      optional:    false
+    },
+    {
+      key:         "posterCta",
+      q:           "What is the call-to-action or URL?",
+      desc:        "The action or destination at the bottom of the poster.",
+      type:        "textarea",
+      placeholder: "e.g. Shop Now — oriven.ai  |  Scan the QR code  |  Visit us at Stand 14",
+      optional:    true
+    },
+    {
+      key:         "posterVisual",
+      q:           "Describe the visual style you want.",
+      desc:        "This drives the colour, layout, and typographic direction of the poster.",
+      type:        "textarea",
+      placeholder: "e.g. Dark background, bold white type. Minimal and premium. High-contrast neon on black.",
+      optional:    false
+    },
+    {
+      key:         "_extraNotes",
+      q:           "Any other details for the poster?",
+      desc:        "Specific layout requests, brand elements, or creative direction.",
+      type:        "textarea",
+      placeholder: "e.g. Include the brand logo at top. Use the brand green as accent. Make it feel luxury.",
+      optional:    true
+    }
+  ],
+
+  infographic: [
+    {
+      key:  "infographicType",
+      q:    "What type of infographic is this?",
+      desc: "The format shapes how data is arranged, the visual hierarchy, and the reading flow.",
+      options: [
+        { val: "process",    label: "Process" },
+        { val: "timeline",   label: "Timeline" },
+        { val: "statistics", label: "Statistics" },
+        { val: "comparison", label: "Comparison" },
+        { val: "guide",      label: "Guide" },
+        { val: "funnel",     label: "Marketing Funnel" },
+        { val: "roadmap",    label: "Roadmap" },
+        { val: "custom",     label: "Custom" }
+      ]
+    },
+    {
+      key:         "infographicTopic",
+      q:           "What is this infographic about?",
+      desc:        "The subject or theme the infographic explains.",
+      type:        "textarea",
+      placeholder: "e.g. How our onboarding works. The 5 stages of brand building. Q3 performance highlights.",
+      optional:    false
+    },
+    {
+      key:         "infographicData",
+      q:           "What data or information should be visualised?",
+      desc:        "Enter the facts, steps, stats, or content to include.",
+      type:        "textarea",
+      placeholder: "e.g. Step 1: Sign up. Step 2: Complete BrandCore. Step 3: Generate content. Or: 83% of buyers trust visual content.",
+      optional:    false
+    },
+    {
+      key:         "infographicAudience",
+      q:           "Who is the target audience?",
+      desc:        "Knowing the audience shapes language, complexity, and visual style.",
+      type:        "textarea",
+      placeholder: "e.g. Marketing managers at SMEs. Early-stage founders. Social media audiences aged 25–40.",
+      optional:    false
+    },
+    {
+      key:         "infographicCta",
+      q:           "What call-to-action should appear at the end?",
+      desc:        "Drive viewers to take the next step.",
+      type:        "textarea",
+      placeholder: "e.g. Visit oriven.ai. Book a free call. Download the full report.",
+      optional:    true
+    },
+    {
+      key:         "_extraNotes",
+      q:           "Any other details for the infographic?",
+      desc:        "Specific layout, data emphasis, or creative direction.",
+      type:        "textarea",
+      placeholder: "e.g. Lead with the biggest statistic. Use brand green as accent. Include icons for each step.",
       optional:    true
     }
   ]
@@ -454,20 +614,44 @@ var CF_META = {
   ugc: {
     label: "UGC Creator",
     icon: '<svg viewBox="0 0 20 20" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="1.5" y="4" width="12" height="12" rx="2.5"/><path d="M13.5 8L18 6v9l-4.5-2"/></svg>'
+  },
+  email: {
+    label: "Email",
+    icon: '<svg viewBox="0 0 20 20" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="1.5" y="3.5" width="17" height="13" rx="2.5"/><path d="M1.5 7l8.5 6 8.5-6"/></svg>'
+  },
+  deck: {
+    label: "Presentation",
+    icon: '<svg viewBox="0 0 20 20" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="1" y="2" width="18" height="11" rx="2.5"/><path d="M5 7h10M5 10h7"/><path d="M7.5 17.5h5M10 13v4.5"/></svg>'
+  },
+  poster: {
+    label: "Poster",
+    icon: '<svg viewBox="0 0 20 20" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="2.5" y="1.5" width="15" height="17" rx="2.5"/><rect x="5" y="4" width="10" height="7" rx="1"/><path d="M5 14h10M5 17h7"/></svg>'
+  },
+  infographic: {
+    label: "Infographic",
+    icon: '<svg viewBox="0 0 20 20" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="1" y="7" width="4" height="10" rx="1"/><rect x="8" y="4" width="4" height="13" rx="1"/><rect x="15" y="1" width="4" height="16" rx="1"/></svg>'
   }
 };
 
 // ── Open ──────────────────────────────────────────────────────
-function openAIFlow(type){
+function openAIFlow(type, preseeded){
   _cfType    = type;
   _cfStep    = 0;
-  _cfAnswers = {};
+  // Accept pre-seeded answers from inspiration cards so later steps auto-advance
+  _cfAnswers = preseeded || {};
 
   var meta  = CF_META[type] || CF_META.image;
   var icon  = document.getElementById("cfTypeIcon");
   var label = document.getElementById("cfTypeLabel");
   if(icon)  icon.innerHTML = meta.icon;
   if(label) label.textContent = meta.label;
+
+  var creditPill = document.getElementById("cfCreditPill");
+  if(creditPill && typeof CREDIT_COSTS !== "undefined"){
+    var cost = CREDIT_COSTS[type] || 1;
+    creditPill.textContent = cost + " Credit" + (cost !== 1 ? "s" : "");
+    creditPill.className = "cf-credit-pill cf-credit-pill--" + type;
+  }
 
   // Clear state
   var hist  = document.getElementById("cfHistory");
@@ -521,6 +705,25 @@ function _cfShowStep(){
   if(!steps) return;
   var step = steps[_cfStep];
   if(!step) return;
+
+  // Auto-advance steps that are already answered by inspiration pre-fill.
+  // Avatar-picker and voice-picker always show — user must make these choices.
+  if(step.type !== "avatar-picker" && step.type !== "voice-picker" && _cfAnswers[step.key]){
+    var preAns = _cfAnswers[step.key];
+    _cfAppendHistory(step.q, String(preAns.label || preAns.val || "Set"));
+    _cfStep++;
+    // Skip conditional steps whose condition is unmet
+    while(steps && _cfStep < steps.length){
+      var ns = steps[_cfStep];
+      if(ns && ns.conditional){
+        var ca = _cfAnswers[ns.conditional];
+        if(!ca || ca.val !== ns.conditionalVal){ _cfStep++; continue; }
+      }
+      break;
+    }
+    if(_cfStep >= steps.length){ _cfLaunch(); } else { _cfShowStep(); }
+    return;
+  }
 
   _cfUpdateProgress(_cfStep);
 
@@ -1048,16 +1251,9 @@ function _cfDispatch(){
 
   // Fill defaults for fields builder expects that the conversation skips
   if(_cfType === "image"){
-    if(!S._builder.imgFormat)    S._builder.imgFormat    = "1:1";
-    S._builder._hasText      = "no";
-    S._builder.imgTextStyle  = "clean";
-    S._builder.imgHeadline   = "";
-    S._builder.imgSubtext    = "";
-    S._builder.imgCta        = "";
+    if(!S._builder.imgFormat) S._builder.imgFormat = "1:1";
   } else if(_cfType === "campaign"){
-    if(!S._builder.campVariations) S._builder.campVariations = "3";
-    if(!S._builder.campFormat)     S._builder.campFormat = "square";
-    if(!S._builder.campSubject)    S._builder.campSubject = "brand";
+    if(!S._builder.campCount) S._builder.campCount = "3";
   } else if(_cfType === "web"){
     if(!S._builder.webStyle)      S._builder.webStyle      = "modern";
     if(!S._builder.webAnimations) S._builder.webAnimations = "subtle";
@@ -1072,6 +1268,12 @@ function _cfDispatch(){
     };
     var _wt = S._builder.webType || "saas";
     S._builder._webTypeDefaultSections = _webTypeSections[_wt] || ["hero","features","cta"];
+  } else if(_cfType === "email"){
+    if(!S._builder.emailType) S._builder.emailType = "newsletter";
+  } else if(_cfType === "deck"){
+    if(!S._builder.deckSlides) S._builder.deckSlides = "10";
+  } else if(_cfType === "poster"){
+    if(!S._builder.posterType) S._builder.posterType = "product";
   }
 
   // Set up builder page (matches openBuilder() setup)

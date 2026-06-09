@@ -2,11 +2,260 @@
 
 function refreshStudio(){
   renderAssets();
-  renderCampaigns();
   updateStudioBCPanel();
   resetCheckPanel();
+  _studioRefreshMain();
   var sisc=document.getElementById("siSavedCount");
   if(sisc) sisc.textContent=S.assets.length+" asset"+(S.assets.length===1?"":"s");
+}
+
+function _studioRefreshMain(){
+  var intel=(typeof _dashComputeIntel==="function")?_dashComputeIntel():null;
+  if(!intel) return;
+
+  var bc=S.brandCore;
+
+  // ── Toggle empty vs profile ────────────────────────────────────
+  var emptyEl   = document.getElementById("stBCEmpty2");
+  var profileEl = document.getElementById("bcProfileContent");
+  if(emptyEl)   emptyEl.style.display   = bc ? "none" : "";
+  if(profileEl) profileEl.style.display = bc ? ""     : "none";
+
+  // Eyebrow dot
+  var dot=document.getElementById("stEyebrowDot");
+  if(dot) dot.className="bcp-eyebrow-dot"+(bc?" active":"");
+
+  // Score display
+  var scoreLbl = document.getElementById("stLevelBadge");
+  var scoreFill= document.getElementById("stIlFill");
+  var scoreMsg = document.getElementById("stIlMsg");
+  if(scoreLbl)  scoreLbl.textContent = intel.pct+"%";
+  if(scoreFill) setTimeout(function(){ scoreFill.style.width=intel.pct+"%"; },80);
+  if(scoreMsg)  scoreMsg.textContent = intel.msg;
+
+  // Quick access count
+  var qa=document.getElementById("stQaAssets");
+  var ac=(S.assets||[]).length;
+  if(qa) qa.textContent=ac+" item"+(ac===1?"":"s");
+
+  if(!bc) return;
+
+  // ── Section 1: Brand name + tagline ───────────────────────────
+  var nameEl    = document.getElementById("bcProfileName");
+  var taglineEl = document.getElementById("bcProfileTagline");
+  if(nameEl)    nameEl.textContent    = bc.name    || "";
+  if(taglineEl) taglineEl.textContent = bc.tagline || "";
+
+  // ── Section 2: Color System ────────────────────────────────────
+  _bcRenderColors();
+
+  // ── Section 3: Typography ──────────────────────────────────────
+  _bcRenderTypo();
+
+  // ── Section 4: Personality chips ──────────────────────────────
+  _bcRenderPersonality();
+
+  // ── Section 5: Tone of Voice ───────────────────────────────────
+  _bcRenderTone();
+
+  // ── Section 6: Positioning ────────────────────────────────────
+  _bcRenderPositioning();
+
+  // ── Section 7: Target Audience ────────────────────────────────
+  _bcRenderAudience();
+
+  // ── Section 8: Visual Direction ───────────────────────────────
+  _bcRenderVisual();
+
+  // ── Section 9: Logo System ────────────────────────────────────
+  _bcRenderLogos();
+
+  // ── Moodboard ─────────────────────────────────────────────────
+  _bcRenderMoodboard();
+}
+
+// ── Color System ───────────────────────────────────────────────
+function _bcRenderColors(){
+  var el=document.getElementById("bcProfileColors");
+  if(!el) return;
+  var bc=S.brandCore;
+  if(!bc||(bc.colors||[]).length===0){
+    el.innerHTML='<div class="bcp-empty-field">No colors configured</div>';
+    return;
+  }
+  // Show up to 5 fixed colors (Primary, Secondary, Accent 1, Accent 2, Text) — no add slot
+  el.innerHTML=(bc.colors||[]).slice(0,5).map(function(c,i){
+    var luma=_hexLuma(c.hex);
+    var txtCol=luma>0.5?"#0A0A0A":"#F0F0F0";
+    return '<div class="bcp-color-chip" onclick="bcpEditColor('+i+')" title="Click to edit">'
+      +'<div class="bcp-color-swatch" style="background:'+c.hex+'">'
+      +'<span class="bcp-color-hex" style="color:'+txtCol+'">'+c.hex+'</span>'
+      +'</div>'
+      +'<div class="bcp-color-meta">'
+      +'<div class="bcp-color-role">'+c.name+'</div>'
+      +(c.explanation?'<div class="bcp-color-exp">'+c.explanation+'</div>':'')
+      +'</div>'
+      +'</div>';
+  }).join("");
+}
+
+function _hexLuma(hex){
+  try{
+    var r=parseInt(hex.slice(1,3),16)/255;
+    var g=parseInt(hex.slice(3,5),16)/255;
+    var b=parseInt(hex.slice(5,7),16)/255;
+    return 0.2126*r+0.7152*g+0.0722*b;
+  }catch(_){ return 0; }
+}
+
+// ── Typography ─────────────────────────────────────────────────
+function _bcRenderTypo(){
+  var el=document.getElementById("bcProfileTypo");
+  if(!el) return;
+  var bc=S.brandCore;
+  if(!bc||(bc.fonts||[]).length===0){
+    el.innerHTML='<div class="bcp-empty-field">No typography configured</div>';
+    return;
+  }
+  el.innerHTML=(bc.fonts||[]).slice(0,2).map(function(f){
+    var isHeading=f.role&&f.role.toLowerCase().indexOf("head")>=0;
+    var sample=isHeading?"Your Brand. Defined.":"Every word, every line, on-brand.";
+    return '<div class="bcp-typo-card">'
+      +'<div class="bcp-typo-role">'+f.role+'</div>'
+      +'<div class="bcp-typo-sample" style="font-family:\''+f.family+'\',serif,sans-serif">'+sample+'</div>'
+      +'<div class="bcp-typo-name">'+f.family+'</div>'
+      +(f.explanation?'<div class="bcp-typo-reason">'+f.explanation+'</div>':'')
+      +'</div>';
+  }).join("");
+}
+
+// ── Brand Personality chips ────────────────────────────────────
+function _bcRenderPersonality(){
+  var el=document.getElementById("bcProfilePersonality");
+  if(!el) return;
+  var bc=S.brandCore;
+  var pers=Array.isArray(bc.personality)?bc.personality:(bc.tone||[]);
+  if(!pers.length){
+    el.innerHTML='<div class="bcp-empty-field">No personality defined</div>';
+    return;
+  }
+  el.innerHTML=pers.slice(0,4).map(function(k,i){
+    var accents=["bcp-chip-a","bcp-chip-b","bcp-chip-c","bcp-chip-d"];
+    return '<span class="bcp-chip '+accents[i%4]+'">'+k+'</span>';
+  }).join("");
+}
+
+// ── Tone of Voice ──────────────────────────────────────────────
+function _bcRenderTone(){
+  var el=document.getElementById("bcProfileTone");
+  if(!el) return;
+  var bc=S.brandCore;
+  var tov=bc.toneOfVoice||(bc.tone&&bc.tone.join(", "))||"";
+  el.innerHTML=tov
+    ?'<div class="bcp-quote">&ldquo;'+tov+'&rdquo;</div>'
+    :'<div class="bcp-empty-field">Tone of voice not defined</div>';
+}
+
+// ── Positioning ────────────────────────────────────────────────
+function _bcRenderPositioning(){
+  var el=document.getElementById("bcProfilePositioning");
+  if(!el) return;
+  var bc=S.brandCore;
+  var pos=bc.positioning||bc.promise||bc.diff||"";
+  el.innerHTML=pos
+    ?'<div class="bcp-statement">'+pos+'</div>'
+    :'<div class="bcp-empty-field">Positioning not defined</div>';
+}
+
+// ── Target Audience ────────────────────────────────────────────
+function _bcRenderAudience(){
+  var el=document.getElementById("bcProfileAudience");
+  if(!el) return;
+  var bc=S.brandCore;
+  var aud=bc.audience||bc.aud||"";
+  el.innerHTML=aud
+    ?'<div class="bcp-audience-text">'+aud+'</div>'
+    :'<div class="bcp-empty-field">Target audience not defined</div>';
+}
+
+// ── Visual Direction ───────────────────────────────────────────
+function _bcRenderVisual(){
+  var el=document.getElementById("bcProfileVisual");
+  if(!el) return;
+  var bc=S.brandCore;
+  var vd=bc.visualDirection||bc.styleDirection||"";
+  el.innerHTML=vd
+    ?'<div class="bcp-visual-desc">'+vd+'</div>'
+    :'<div class="bcp-empty-field">Visual direction not defined</div>';
+}
+
+// ── Logo System ────────────────────────────────────────────────
+function _bcRenderLogos(){
+  var el=document.getElementById("bcProfileLogos");
+  if(!el) return;
+  var bc=S.brandCore;
+  var logos=bc.logos||{};
+  var SLOTS=[
+    {key:"primary",   label:"Primary Logo",   hint:"Main brand mark for light backgrounds"},
+    {key:"secondary", label:"Secondary Logo",  hint:"Variant for dark backgrounds"},
+    {key:"icon",      label:"Brand Mark",      hint:"Compact icon for small placements"}
+  ];
+  // Never inject ORIVEN placeholders — show clean empty state if no real logos
+  var hasAnyLogo=SLOTS.some(function(s){ return logos[s.key]&&logos[s.key].url&&logos[s.key].source!=="placeholder"; });
+
+  if(!hasAnyLogo&&!logos.description){
+    el.innerHTML='<div class="bcp-logo-empty">'
+      +'<div class="bcp-logo-empty-msg">No logo generated yet</div>'
+      +'<div class="bcp-logo-empty-sub">Generate a logo system with AI, or upload your own assets.</div>'
+      +'<div class="bcp-logo-empty-actions">'
+      +'<button class="bcp-action-btn bcp-action-btn-primary" onclick="openLogoAIModal()">Generate with AI</button>'
+      +'<button class="bcp-action-btn" onclick="uploadLogo(\'primary\')">Upload Logo</button>'
+      +'</div></div>';
+    return;
+  }
+
+  el.innerHTML=SLOTS.map(function(slot){
+    var logo=logos[slot.key];
+    var hasLogo=logo&&logo.url&&logo.source!=="placeholder";
+    return '<div class="bcp-logo-slot">'
+      +(hasLogo
+        ?'<div class="bcp-logo-preview" onclick="uploadLogo(\''+slot.key+'\')"><img src="'+logo.url+'" alt="'+slot.label+'" class="bcp-logo-img"><div class="bcp-logo-overlay">Replace</div></div>'
+        :'<div class="bcp-logo-upload" onclick="uploadLogo(\''+slot.key+'\')"><svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.4" width="22" height="22"><path d="M10 13V3M6 7l4-4 4 4M3 16v1a1 1 0 001 1h12a1 1 0 001-1v-1" stroke-linecap="round"/></svg><span>Upload</span></div>'
+      )
+      +'<div class="bcp-logo-footer">'
+      +'<div class="bcp-logo-name">'+slot.label+'</div>'
+      +'<div class="bcp-logo-hint">'+slot.hint+'</div>'
+      +(hasLogo?'<button class="bcp-logo-remove" onclick="removeLogo(\''+slot.key+'\')">Remove</button>':'')
+      +'</div>'
+      +'</div>';
+  }).join("")
+  +(logos.description?'<div class="bcp-logo-desc-block"><div class="bcp-logo-desc-lbl">Logo Description</div><div class="bcp-logo-desc-txt">'+logos.description+'</div></div>':'');
+}
+
+// ── Moodboard / Visual References ─────────────────────────────
+function _bcRenderMoodboard(){
+  var el=document.getElementById("bcMoodGrid");
+  if(!el) return;
+  var bc=S.brandCore;
+  var refs=(bc.visualReferences||[]);
+  if(!refs.length){ el.innerHTML=""; return; }
+  el.innerHTML=refs.map(function(r,i){
+    return '<div class="bcp-mood-item">'
+      +'<img src="'+r.url+'" alt="Visual reference" class="bcp-mood-img">'
+      +'<button class="bcp-mood-remove" onclick="bcRemoveVisualRef('+i+')" title="Remove">✕</button>'
+      +'</div>';
+  }).join("");
+}
+
+function _studioRenderBCGrid(){
+  // Legacy function — new profile rendering is handled by _studioRefreshMain.
+  // Kept to avoid JS errors from any external callers.
+  var bc=S.brandCore;
+  var grid=document.getElementById("stBCGrid");
+  if(!grid) return;
+  if(!bc){ grid.innerHTML=""; return; }
+
+  // Profile rendering is now handled by _studioRefreshMain → individual _bcRender* functions.
 }
 
 function switchStudioTab(name){
@@ -17,7 +266,7 @@ function switchStudioTab(name){
   var hub=document.getElementById("studioHubView");
   var pv=document.getElementById("studioPanelView");
   var titleEl=document.getElementById("studioPanelTitle");
-  var titles={saved:"Saved",brandcore:"Brand Core",check:"Brand Check",campaigns:"Campaigns"};
+  var titles={saved:"Saved",brandcore:"Brand Core",check:"Brand Check"};
   if(titleEl) titleEl.textContent=titles[name]||name;
 
   if(hub){
@@ -34,8 +283,8 @@ function switchStudioTab(name){
   }
 
   if(name==="saved") renderAssets();
-  if(name==="campaigns") renderCampaigns();
   if(name==="brandcore") refreshBC();
+  if(name==="check") setTimeout(function(){ startBrandCheck(); }, 200);
 }
 
 function showStudioHub(){
@@ -99,7 +348,6 @@ function renderAssets(){
 function addAssetToCampaign(id){
   if(!S.campaigns.length){
     toast("Create a campaign first","warn");
-    switchStudioTab("campaigns");
     return;
   }
   // Add to most recent campaign
@@ -133,193 +381,225 @@ function doRename(){
 
 // ═══ BRAND CHECK ══════════════════════════════════════════════
 
-var _checkImageData=null;
+var _BC_STEPS = [
+  { key:"colors",      label:"Analyzing Color System"     },
+  { key:"typo",        label:"Analyzing Typography"        },
+  { key:"personality", label:"Analyzing Brand Personality" },
+  { key:"tone",        label:"Analyzing Tone of Voice"     },
+  { key:"positioning", label:"Analyzing Positioning"       },
+  { key:"audience",    label:"Analyzing Target Audience"   },
+  { key:"visual",      label:"Analyzing Visual Direction"  },
+  { key:"logo",        label:"Analyzing Logo"              }
+];
 
-function resetCheckPanel(){
-  _checkImageData=null;
-  var upZone=document.getElementById("upZone");
-  var ckPreview=document.getElementById("ckPreview");
-  var ckActions=document.getElementById("ckActions");
-  var ckLoad=document.getElementById("ckLoad");
-  var ckScore=document.getElementById("ckScore");
-  var ckOrDivider=document.getElementById("ckOrDivider");
-  var ckManualBtn=document.getElementById("ckManualBtn");
-  if(upZone){ upZone.style.display="flex"; }
-  if(ckPreview){ ckPreview.classList.add("hidden"); }
-  if(ckActions){ ckActions.classList.add("hidden"); }
-  if(ckLoad){ ckLoad.classList.add("hidden"); }
-  if(ckScore){ ckScore.classList.add("hidden"); }
-  if(ckOrDivider){ ckOrDivider.style.display=""; }
-  if(ckManualBtn){ ckManualBtn.style.display=""; }
-}
+var _bcAnimDone = false;
+var _bcApiData  = null;
+var _bcRunning  = false;
 
-function handleCheckUpload(input){
-  if(!input.files||!input.files[0]) return;
-  var file=input.files[0];
-  var reader=new FileReader();
-  reader.onload=function(e){
-    _checkImageData=e.target.result;
-    showImagePreview(_checkImageData, file.name);
-  };
-  reader.readAsDataURL(file);
-}
-
-function handleCheckDrop(e){
-  e.preventDefault();
-  e.stopPropagation();
-  var dt=e.dataTransfer;
-  if(!dt||!dt.files||!dt.files[0]) return;
-  var file=dt.files[0];
-  if(!file.type.startsWith("image/")){ toast("Please drop an image file","warn"); return; }
-  var reader=new FileReader();
-  reader.onload=function(ev){
-    _checkImageData=ev.target.result;
-    showImagePreview(_checkImageData, file.name);
-  };
-  reader.readAsDataURL(file);
-}
-
-function handleCheckDragOver(e){
-  e.preventDefault();
-  document.getElementById("upZone").classList.add("drag-over");
-}
-function handleCheckDragLeave(){
-  document.getElementById("upZone").classList.remove("drag-over");
-}
-
-function showImagePreview(src, name){
-  var upZone=document.getElementById("upZone");
-  var ckPreview=document.getElementById("ckPreview");
-  var ckActions=document.getElementById("ckActions");
-  var ckOrDivider=document.getElementById("ckOrDivider");
-  var ckManualBtn=document.getElementById("ckManualBtn");
-  if(upZone) upZone.style.display="none";
-  if(ckOrDivider) ckOrDivider.style.display="none";
-  if(ckManualBtn) ckManualBtn.style.display="none";
-  if(ckPreview){
-    ckPreview.classList.remove("hidden");
-    var img=document.getElementById("ckPreviewImg");
-    var fname=document.getElementById("ckFileName");
-    if(img) img.src=src;
-    if(fname) fname.textContent=name||"Uploaded image";
+function _onBcBothDone(){
+  if(!_bcAnimDone || !_bcApiData) return;
+  _bcRunning = false;
+  var analyzing = document.getElementById("ckAnalyzing");
+  if(analyzing) analyzing.classList.add("hidden");
+  if(_bcApiData.error){
+    toast(_bcApiData.error,"warn");
+    var idle = document.getElementById("ckIdle");
+    if(idle) idle.classList.remove("hidden");
+    return;
   }
-  if(ckActions) ckActions.classList.remove("hidden");
+  S.lastScore = _bcApiData.score;
+  S._lastBrandCheckData = _bcApiData;
+  showCheckResult(_bcApiData);
 }
 
+function _renderBcSteps(){
+  var stepsEl = document.getElementById("ckSteps");
+  if(!stepsEl) return;
+  var bc = S.brandCore;
+  var hasLogo = bc && (bc.logoConcept || (bc.logos && bc.logos.length));
+  stepsEl.innerHTML = "";
+  _BC_STEPS.forEach(function(step){
+    if(step.key === "logo" && !hasLogo) return;
+    var div = document.createElement("div");
+    div.className = "bc-step";
+    div.id = "bcStep-" + step.key;
+    div.innerHTML =
+      '<div class="bc-step-icon" id="bcStepIco-'+step.key+'"><div class="bc-step-spinner"></div></div>' +
+      '<span class="bc-step-lbl">'+step.label+'</span>' +
+      '<div class="bc-step-ck hidden" id="bcStepCk-'+step.key+'">' +
+        '<svg viewBox="0 0 10 10" fill="none" stroke="#B7FF2A" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M2 5.5l2 2 4-4"/></svg>' +
+      '</div>';
+    stepsEl.appendChild(div);
+  });
+}
 
-function _runBrandCheckRequest(payload, isManual){
-  var ckActions=document.getElementById("ckActions");
-  var ckLoad=document.getElementById("ckLoad");
-  var ckScore=document.getElementById("ckScore");
-  if(ckActions) ckActions.classList.add("hidden");
-  if(ckLoad) ckLoad.classList.remove("hidden");
-  if(ckScore) ckScore.classList.add("hidden");
+function _animateBcSteps(){
+  var bc = S.brandCore;
+  var hasLogo = bc && (bc.logoConcept || (bc.logos && bc.logos.length));
+  var steps = _BC_STEPS.filter(function(s){ return s.key !== "logo" || hasLogo; });
+  var i = 0;
+  function next(){
+    if(i >= steps.length){
+      var sub = document.getElementById("ckAnalyzeSub");
+      if(sub) sub.textContent = "Finalizing report…";
+      _bcAnimDone = true;
+      _onBcBothDone();
+      return;
+    }
+    var step = steps[i];
+    var stepEl = document.getElementById("bcStep-"+step.key);
+    if(stepEl) stepEl.classList.add("bc-step-active");
+    setTimeout(function(){
+      var ckEl  = document.getElementById("bcStepCk-"+step.key);
+      var icoEl = document.getElementById("bcStepIco-"+step.key);
+      if(icoEl) icoEl.style.display = "none";
+      if(ckEl)  ckEl.classList.remove("hidden");
+      if(stepEl){ stepEl.classList.remove("bc-step-active"); stepEl.classList.add("bc-step-done"); }
+      i++;
+      setTimeout(next, 100);
+    }, 600);
+  }
+  next();
+}
+
+function startBrandCheck(force){
+  var bc = S.brandCore;
+  if(!bc){ return; }
+  if(_bcRunning) return;
+  if(!force && S._lastBrandCheckData){
+    showCheckResult(S._lastBrandCheckData);
+    return;
+  }
+  _bcAnimDone = false;
+  _bcApiData  = null;
+  _bcRunning  = true;
+
+  var idle      = document.getElementById("ckIdle");
+  var analyzing = document.getElementById("ckAnalyzing");
+  var score     = document.getElementById("ckScore");
+  if(idle)      idle.classList.add("hidden");
+  if(score)     score.classList.add("hidden");
+  if(analyzing){ analyzing.classList.remove("hidden"); _renderBcSteps(); }
+
+  _animateBcSteps();
+
+  var toneArr = bc.tone ? (Array.isArray(bc.tone) ? bc.tone : [bc.tone]) : [];
+  var wordsArr = Array.isArray(bc.wordsUse) ? bc.wordsUse : [];
+  var avoidArr = Array.isArray(bc.wordsAvoid) ? bc.wordsAvoid : [];
+  var valuesStr = wordsArr.join(", ") + (avoidArr.length ? " (avoid: "+avoidArr.join(", ")+")" : "");
+  var payload = {
+    brandName:      bc.name,
+    tagline:        bc.tagline     || bc.promise || "",
+    colors:         bc.colors      ? bc.colors.map(function(c){ return c.hex+" ("+c.name+")"; }) : [],
+    fonts:          bc.fonts       ? bc.fonts.map(function(f){ return f.role+": "+f.family; })   : [],
+    brandPromise:   bc.promise     || "",
+    description:    bc.desc        || "",
+    targetAudience: bc.audience    || bc.aud || "",
+    styleDirection: bc.styleDirection || bc.style || "",
+    colorMood:      bc.colorMood   || "",
+    mission:        bc.mission     || "",
+    vision:         bc.vision      || "",
+    personality:    bc.personality || (Array.isArray(bc.traits) ? bc.traits.join(", ") : ""),
+    toneOfVoice:    toneArr.join(", "),
+    values:         valuesStr,
+    positioning:    bc.diff        || bc.positioning || "",
+    logoConcept:    bc.logoConcept ? bc.logoConcept.description : ""
+  };
+
   fetch(API_BASE_URL+"/api/brand-check",{
     method:"POST",
     headers:{"Content-Type":"application/json"},
     body:JSON.stringify(payload)
   })
-  .then(function(res){return res.json();})
+  .then(function(r){ return r.json(); })
   .then(function(data){
-    if(ckLoad) ckLoad.classList.add("hidden");
-    if(data.error){
-      toast(data.error,"warn");
-      if(!isManual && ckActions) ckActions.classList.remove("hidden");
-      return;
-    }
-    S.lastScore=data.score;
-    showCheckResult(data);
-    if(!isManual && ckActions) ckActions.classList.remove("hidden");
+    _bcApiData = data;
+    _onBcBothDone();
   })
   .catch(function(err){
-    if(ckLoad) ckLoad.classList.add("hidden");
-    console.error("[BrandCheck] Error:",err);
-    toast("Could not connect to ORIVEN services. Please try again.","warn");
-    if(!isManual && ckActions) ckActions.classList.remove("hidden");
+    console.error("[BrandCheck]",err);
+    _bcApiData = { error:"Could not connect to ORIVEN services. Please try again." };
+    _onBcBothDone();
   });
-}
-
-function startCheck(){
-  if(!_checkImageData){toast("Upload an image first","warn");return;}
-  var bc=S.brandCore;
-  _runBrandCheckRequest({
-    brandName:bc?bc.name:"Unknown Brand",
-    colors:bc?bc.colors.map(function(c){return c.hex;}):[],
-    fonts:bc?bc.fonts.map(function(f){return f.family;}):[],
-    brandPromise:bc?bc.promise:"",
-    description:bc?bc.desc:"",
-    targetAudience:bc?bc.audience:"",
-    styleDirection:bc?bc.styleDirection:"",
-    imageData:_checkImageData
-  });
-}
-
-function startManualCheck(){
-  var bc=S.brandCore;
-  if(!bc){toast("Set up your Brand Core first","warn");return;}
-  console.log("[BrandCheck Manual] Collecting BrandCore data for:", bc.name);
-  var payload={
-    brandName:bc.name,
-    colors:bc.colors?bc.colors.map(function(c){return c.hex+' ('+c.name+')';}):[],
-    fonts:bc.fonts?bc.fonts.map(function(f){return f.role+': '+f.family;}):[],
-    brandPromise:bc.promise||"",
-    description:bc.desc||"",
-    targetAudience:bc.audience||bc.aud||"",
-    styleDirection:bc.styleDirection||"",
-    colorMood:bc.colorMood||"",
-    mission:bc.mission||"",
-    vision:bc.vision||"",
-    personality:bc.personality||"",
-    toneOfVoice:bc.tone?bc.tone.join(", "):"",
-    values:Array.isArray(bc.wordsUse)?bc.wordsUse.join(", "):"",
-    positioning:bc.diff||"",
-    logoConcept:bc.logoConcept?bc.logoConcept.description:""
-  };
-  console.log("[BrandCheck Manual] Sending to /api/brand-check:", payload.brandName);
-  _runBrandCheckRequest(payload, true);
 }
 
 function resetCheck(){
-  resetCheckPanel();
+  S._lastBrandCheckData = null;
+  _bcRunning  = false;
+  _bcAnimDone = false;
+  _bcApiData  = null;
+  var idle      = document.getElementById("ckIdle");
+  var analyzing = document.getElementById("ckAnalyzing");
+  var score     = document.getElementById("ckScore");
+  if(analyzing) analyzing.classList.add("hidden");
+  if(score)     score.classList.add("hidden");
+  if(idle)      idle.classList.remove("hidden");
 }
 
+function _ucFirst(s){ return s ? s.charAt(0).toUpperCase()+s.slice(1) : ""; }
+
 function showCheckResult(data){
-  var card=document.getElementById("ckScore");
+  var card = document.getElementById("ckScore");
   if(!card) return;
   card.classList.remove("hidden");
-  var score=data.score||0;
-  var lbl=score>=85?"Excellent":score>=70?"Good — minor issues":"Needs improvement";
-  var html='<div style="display:flex;align-items:flex-start;justify-content:space-between;margin-bottom:16px">';
-  html+='<div><div class="big-s">'+score+'<span>%</span></div><div class="s-desc">'+(data.professionalLevel||lbl)+'</div></div>';
-  html+='<span class="badge '+(score>=85?"bg-green":score>=70?"bg-warm":"bg-red")+'">'+lbl+"</span></div>";
+  var score  = data.score || 0;
+  var scoreColor = score>=85 ? "#B7FF2A" : score>=70 ? "#F59E0B" : "#EF4444";
+  var levelLabel = score>=90 ? "Excellent" : score>=80 ? "Strong" : score>=70 ? "Good" : score>=55 ? "Developing" : "Needs Attention";
+
+  var html = '<div class="bc-score-block">';
+  html += '<div class="bc-score-ring" style="border-color:'+scoreColor+';box-shadow:0 0 32px '+scoreColor+'26">';
+  html +=   '<div class="bc-score-num" style="color:'+scoreColor+'">'+score+'<span>%</span></div>';
+  html +=   '<div class="bc-score-lbl">Brand Score</div>';
+  html += '</div>';
+  html += '<div class="bc-score-meta">';
+  html +=   '<div class="bc-score-level" style="color:'+scoreColor+'">'+levelLabel+'</div>';
+  html +=   '<div class="bc-score-level-sub">'+(data.professionalLevel ? _ucFirst(data.professionalLevel)+' level brand identity' : 'Brand Intelligence Report')+'</div>';
+  html +=   '<button class="btn btn-g btn-sm bc-reanalyze-btn" onclick="startBrandCheck(true)">↺ Re-analyze</button>';
+  html += '</div>';
+  html += '</div>';
+
+  var strengths = data.strengths || [];
+  if(strengths.length){
+    html += '<div class="bc-section">';
+    html +=   '<div class="bc-section-hd"><div class="bc-section-dot bc-dot-str"></div>Strengths</div>';
+    strengths.forEach(function(s){
+      html += '<div class="bc-item">' +
+        '<svg viewBox="0 0 10 10" fill="none" stroke="#B7FF2A" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="10" height="10" style="flex-shrink:0;margin-top:3px"><path d="M2 5.5l2 2 4-4"/></svg>' +
+        '<span>'+s+'</span></div>';
+    });
+    html += '</div>';
+  }
+
+  var opps = data.opportunities || [];
+  if(!opps.length)(data.weaknesses||[]).concat(data.improvements||[]).forEach(function(x){ opps.push(x); });
+  if(opps.length){
+    html += '<div class="bc-section">';
+    html +=   '<div class="bc-section-hd"><div class="bc-section-dot bc-dot-opp"></div>Opportunities</div>';
+    opps.forEach(function(o){
+      html += '<div class="bc-item">' +
+        '<svg viewBox="0 0 10 10" fill="none" stroke="#F59E0B" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="10" height="10" style="flex-shrink:0;margin-top:3px"><path d="M5 2v4M5 8v.5"/></svg>' +
+        '<span>'+o+'</span></div>';
+    });
+    html += '</div>';
+  }
+
+  var recs = data.recommendations || [];
+  if(recs.length){
+    html += '<div class="bc-section">';
+    html +=   '<div class="bc-section-hd"><div class="bc-section-dot bc-dot-rec"></div>Strategic Recommendations</div>';
+    recs.forEach(function(r, i){
+      html += '<div class="bc-item bc-rec-item">' +
+        '<span class="bc-rec-num">'+(i+1)+'</span>' +
+        '<span>'+r+'</span></div>';
+    });
+    html += '</div>';
+  }
+
   if(data.summary){
-    html+='<div style="font-size:13px;color:var(--charcoal);line-height:1.6;margin-bottom:16px;padding:12px;background:var(--bg2);border-radius:var(--rl)">'+data.summary+"</div>";
+    html += '<div class="bc-summary">'+data.summary+'</div>';
   }
-  html+="<div class='hr'></div><div class='ck-items' style='margin-top:12px'>";
-  if(data.strengths&&data.strengths.length){
-    html+='<div style="font-size:12px;font-weight:600;color:var(--c2);margin-bottom:6px;margin-top:4px">Strengths</div>';
-    data.strengths.forEach(function(s){
-      html+='<div class="ck-row"><div class="ck-dot p"></div><div class="ck-txt"><p>'+s+"</p></div></div>";
-    });
-  }
-  if(data.weaknesses&&data.weaknesses.length){
-    html+='<div style="font-size:12px;font-weight:600;color:var(--c2);margin-bottom:6px;margin-top:12px">Weaknesses</div>';
-    data.weaknesses.forEach(function(w){
-      html+='<div class="ck-row"><div class="ck-dot w"></div><div class="ck-txt"><p>'+w+"</p></div></div>";
-    });
-  }
-  if(data.improvements&&data.improvements.length){
-    html+='<div style="font-size:12px;font-weight:600;color:var(--c2);margin-bottom:6px;margin-top:12px">Improvements</div>';
-    data.improvements.forEach(function(imp){
-      html+='<div class="ck-row"><div class="ck-dot f"></div><div class="ck-txt"><p>'+imp+"</p></div></div>";
-    });
-  }
-  if(data.consistencyCheck){
-    html+='<div style="font-size:12px;font-weight:600;color:var(--c2);margin-bottom:6px;margin-top:12px">Consistency</div>';
-    html+='<div class="ck-row"><div class="ck-txt"><p>'+data.consistencyCheck+"</p></div></div>";
-  }
-  html+="</div>";
-  card.innerHTML=html;
+
+  card.innerHTML = html;
 }
 
 // ═══ CAMPAIGNS ════════════════════════════════════════════════
@@ -625,58 +905,68 @@ function renderCardPreview(card,bc){
   return parts.join("");
 }
 
-var _inspFilter="all";
+var _idCurrentFilter="all";
+var _ID_CATS=["campaign","visual","web","text"];
 
 function renderInspiration(){
-  var grid=document.getElementById("inspGrid");
-  if(!grid) return;
-  var cards=_inspFilter==="all"?INSP_CARDS:INSP_CARDS.filter(function(x){return x.cat===_inspFilter;});
-  var bc=S.brandCore||null;
+  var feed=document.getElementById("idFeed");
+  if(!feed) return;
+
+  var cats=_idCurrentFilter==="all"?_ID_CATS:[_idCurrentFilter];
   var html="";
-  cards.forEach(function(card){
-    var cls="icard"+(card.tall?" tall":"")+(card.wide?" wide":"");
-    var bg="linear-gradient(150deg,"+card.bg+" 0%,"+card.bg2+" 100%)";
-    var preview=renderCardPreview(card,bc);
-    html+='<div class="'+cls+'" onclick="useInspiration('+card.id+')">';
-    html+='<div class="icard-visual"><div class="icard-visual-inner" style="background:'+bg+';flex-direction:column;gap:0;align-items:center;justify-content:center">'+preview+'</div>';
-    html+='<div class="icard-overlay"><div class="icard-overlay-btn"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2"><circle cx="8" cy="8" r="6.5"/><path d="M8 5v6M5 8h6"/></svg>Create this</div></div></div>';
-    html+='<div class="icard-meta"><div class="icard-cat">'+catLabel(card.cat)+'</div><div class="icard-title">'+card.title+'</div><div class="icard-desc">'+card.desc+'</div></div></div>';
+  cats.forEach(function(cat){
+    var panel=ID_PANELS[cat];
+    if(!panel||!panel.ideas) return;
+    var color=panel.color||"#B7FF2A";
+    var title=panel.title||cat;
+    panel.ideas.forEach(function(idea,idx){
+      html+='<div class="id-concept-card" onclick="idUseConcept(\''+cat+'\','+idx+')">';
+      // Thumbnail
+      html+='<div class="id-card-thumb" style="background:'+idea.bg+'">';
+      html+='<div class="id-thumb-glow" style="background:'+idea.accent+'"></div>';
+      html+='<div class="id-thumb-lbl">'+idea.lbl+'</div>';
+      html+='<div class="id-thumb-hl">'+idea.hl+'</div>';
+      html+='</div>';
+      // Body
+      html+='<div class="id-card-body">';
+      html+='<div class="id-card-cat" style="color:'+color+'">'+title+'</div>';
+      html+='<div class="id-card-title">'+idea.label+'</div>';
+      html+='<div class="id-card-desc">'+idea.desc+'</div>';
+      html+='<div class="id-card-foot">';
+      html+='<span class="id-card-use">'+idea.useLabel+'</span>';
+      html+='<svg class="id-card-arr" viewBox="0 0 14 14" fill="none" stroke-width="1.8"><path d="M4 7h6M7 4l3 3-3 3"/></svg>';
+      html+='</div>';
+      html+='</div>';
+      html+='</div>';
+    });
   });
-  grid.innerHTML=html;
+  feed.innerHTML=html;
+
+  var ct=document.getElementById("idCurationText");
+  if(ct){
+    var shown=feed.querySelectorAll(".id-concept-card").length;
+    ct.textContent=shown===36?"36 AI-curated creative concepts":shown+" concepts";
+  }
 }
 
-function catLabel(cat){
-  var m={social:"Social Media",ads:"Ad Creatives",poster:"Poster",campaign:"Campaign",identity:"Brand Identity",content:"Content Ideas"};
-  return m[cat]||cat;
-}
-
-function useInspiration(id){
-  var card=INSP_CARDS.find(function(x){return x.id===id;});
-  if(!card) return;
-  var typeMap={image:"image",text:"text",ads:"ads",campaign:"campaign"};
-  var outTypeMap={image:"poster",text:"copy",ads:"ad_copy",campaign:"campaign"};
-  var createType=typeMap[card.type]||"image";
-  var outType=outTypeMap[card.type]||"poster";
-  S._cwsHistory=[];
-  openCreateWorkspace(createType,outType);
-  setTimeout(function(){
-    var inp=document.getElementById("cwsInput");
-    if(inp){inp.value=card.prompt;inp.style.height="auto";inp.style.height=Math.min(inp.scrollHeight,120)+"px";}
-    var ctx=document.getElementById("cwsContext");
-    if(ctx) ctx.textContent="From: "+card.title;
-    toast("Ready — "+card.title);
-  },80);
-}
-
-// Filter button clicks (event delegation)
-document.addEventListener("click",function(e){
-  var btn=e.target.closest(".if-btn");
-  if(!btn) return;
-  document.querySelectorAll(".if-btn").forEach(function(b){b.classList.remove("active");});
-  btn.classList.add("active");
-  _inspFilter=btn.getAttribute("data-cat");
+function idFilter(cat,btn){
+  _idCurrentFilter=cat;
+  document.querySelectorAll(".id-filt").forEach(function(b){b.classList.remove("id-filt-active");});
+  if(btn) btn.classList.add("id-filt-active");
   renderInspiration();
-});
+}
+
+function idUseConcept(cat,idx){
+  var idea=ID_PANELS[cat]&&ID_PANELS[cat].ideas[idx];
+  if(!idea) return;
+  S._ideaPrefill=idea.label+" — "+idea.desc;
+  var dest=ID_PANELS[cat].dest||ID_DEST[cat]||"text";
+  openBuilder(dest);
+}
+
+function idUseIdea(cat,idx){
+  idUseConcept(cat,idx);
+}
 
 
 // ═══════════════════════════════════════════════════════════════

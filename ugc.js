@@ -386,8 +386,15 @@ async function ucGenerate() {
     btn.innerHTML = '<div class="spin" style="width:13px;height:13px;border-width:2px;margin:0 4px 0 0;display:inline-block;vertical-align:middle"></div>Creating…';
   }
 
-  var brandName = (typeof S !== 'undefined' && S && S.brandCore && S.brandCore.name) || '';
-  var brandDesc = (typeof S !== 'undefined' && S && S.brandCore && (S.brandCore.desc || S.brandCore.positioning)) || '';
+  var _ucBc = (typeof S !== 'undefined' && S && S.brandCore) || {};
+  var brandName = _ucBc.name || '';
+  var brandDesc = _ucBc.desc || _ucBc.positioning || '';
+  var brandToneOfVoice = _ucBc.toneOfVoice || (Array.isArray(_ucBc.tone) ? _ucBc.tone.join(', ') : '');
+  var brandPersonality = (typeof _buildBrandContext === 'function' && _buildBrandContext(_ucBc))
+    ? _buildBrandContext(_ucBc).personality : '';
+  var brandAudience    = _ucBc.audience || _ucBc.aud || '';
+  var brandPositioning = _ucBc.positioning || _ucBc.promise || '';
+  var brandVisualDir   = _ucBc.visualDirection || _ucBc.styleDirection || '';
 
   ucGoToStep(2);
   var statusMsg = _ucScriptMode === 'custom'
@@ -419,10 +426,15 @@ async function ucGenerate() {
         tone:         tone,
         background:   _ucSelectedBg || null,
         customScript: _ucScriptMode === 'custom' ? customScript.trim() : null,
-        avatarId:     _ucSelectedCreator.avatarId,
-        voiceId:      _ucSelectedCreator.voiceId,
-        brandName:    brandName,
-        brandDesc:    brandDesc,
+        avatarId:         _ucSelectedCreator.avatarId,
+        voiceId:          _ucSelectedCreator.voiceId,
+        brandName:        brandName,
+        brandDesc:        brandDesc,
+        brandToneOfVoice: brandToneOfVoice,
+        brandPersonality: brandPersonality,
+        brandAudience:    brandAudience,
+        brandPositioning: brandPositioning,
+        brandVisualDir:   brandVisualDir,
       })
     });
 
@@ -472,14 +484,19 @@ async function ucGenerateFromFlow(answers) {
   _ucSetStatus(_ucSpinRow(statusMsg));
 
   try {
-    var bc            = (typeof S !== 'undefined' && S && S.brandCore) || {};
-    var brandName     = bc.name     || '';
-    var brandDesc     = bc.desc     || bc.positioning || '';
-    var brandTone     = Array.isArray(bc.tone) ? bc.tone.join(', ') : (bc.tone || '');
-    var brandAudience = bc.audience || bc.aud || '';
-    var brandPromise  = bc.promise  || '';
-    var brandDiff     = bc.diff     || '';
-    var brandWords    = Array.isArray(bc.wordsUse) ? bc.wordsUse.join(', ') : '';
+    // Build full BrandCore context — uses helper from app.js if available, else extracts directly
+    var bc = (typeof S !== 'undefined' && S && S.brandCore) || {};
+    var brandCtx = (typeof _buildBrandContext === 'function') ? _buildBrandContext(bc) : null;
+
+    var brandName        = bc.name            || '';
+    var brandDesc        = bc.desc            || bc.positioning || '';
+    var brandTone        = Array.isArray(bc.tone) ? bc.tone.join(', ') : (bc.tone || '');
+    var brandToneOfVoice = bc.toneOfVoice     || brandTone;
+    var brandPersonality = brandCtx ? brandCtx.personality : (brandTone);
+    var brandAudience    = bc.audience        || bc.aud || '';
+    var brandPositioning = bc.positioning     || bc.promise || bc.diff || '';
+    var brandVisualDir   = bc.visualDirection || bc.styleDirection || '';
+    var brandWords       = Array.isArray(bc.wordsUse) ? bc.wordsUse.join(', ') : '';
 
     var s = await SB.auth.getSession();
     var token = s.data && s.data.session && s.data.session.access_token;
@@ -518,13 +535,15 @@ async function ucGenerateFromFlow(answers) {
         customScript:  customScript,
         avatarId:      _ucSelectedCreator.avatarId,
         voiceId:       _ucSelectedCreator.voiceId,
-        brandName:     brandName,
-        brandDesc:     brandDesc,
-        brandTone:     brandTone,
-        brandAudience: brandAudience,
-        brandPromise:  brandPromise,
-        brandDiff:     brandDiff,
-        brandWords:    brandWords,
+        brandName:        brandName,
+        brandDesc:        brandDesc,
+        brandTone:        brandTone,
+        brandToneOfVoice: brandToneOfVoice,
+        brandPersonality: brandPersonality,
+        brandAudience:    brandAudience,
+        brandPositioning: brandPositioning,
+        brandVisualDir:   brandVisualDir,
+        brandWords:       brandWords,
       })
     });
 

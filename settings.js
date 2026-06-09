@@ -11,16 +11,18 @@
 var SETTINGS_KEY = "oriven_settings";
 
 var SETTINGS_DEFAULTS = {
-  wsName:           "My Workspace",
-  brandLock:        false,
-  theme:            "light",
-  accent:           "green",
-  language:         "en",
-  notifBrandCheck:  true,
-  notifGenComplete: true,
-  notifUpdates:     true,
-  exportFormat:     "PNG",
-  autoSave:         true,
+  wsName:            "My Workspace",
+  theme:             "light",
+  accent:            "green",
+  language:          "en",
+  notifBrandCheck:   true,
+  notifGenComplete:  true,
+  notifUpdates:      true,
+  autoSave:          true,
+  aiLearning:        true,
+  brandConsistency:  true,
+  generationHistory: true,
+  generatorView:     "grid",
   // "free" is the only safe default — paid plans must be explicitly granted.
   // In production this value is overwritten on sign-in from the backend/Stripe.
   currentPlan:      "free",
@@ -29,65 +31,8 @@ var SETTINGS_DEFAULTS = {
   pendingPlanDate:  null
 };
 
-// ── Subscription plan definitions ──────────────────────────────
-var PLANS = [
-  {
-    id: "free",
-    name: "Explore",
-    price: 0,
-    features: [
-      "BrandCore creation & editing",
-      "Platform exploration",
-      "Onboarding experience",
-      "No content generation"
-    ]
-  },
-  {
-    id: "starter",
-    name: "Starter",
-    price: 19,
-    features: [
-      "50 creative generations/month",
-      "Unlimited Brand Assistant",
-      "Ads & campaign generation",
-      "Text & image generation",
-      "5 website generations/month",
-      "5 Brand Identity regenerations",
-      "Social creative workflows"
-    ]
-  },
-  {
-    id: "premium",
-    name: "Premium",
-    price: 49,
-    popular: true,
-    features: [
-      "200 creative generations/month",
-      "Unlimited Brand Assistant",
-      "Unlimited website generations",
-      "10 Brand Identity regenerations",
-      "Premium generation quality",
-      "Advanced creative workflows",
-      "Multi-brand workflows",
-      "Priority support"
-    ]
-  },
-  {
-    id: "business",
-    name: "Business",
-    price: 99,
-    features: [
-      "400 creative generations/month",
-      "Unlimited Brand Assistant",
-      "Unlimited website generations",
-      "Unlimited Brand Identity regenerations",
-      "Team collaboration systems",
-      "Shared BrandCore systems",
-      "Multi-user & agency workflows",
-      "Premium support"
-    ]
-  }
-];
+// Plan data lives in plans.js (ORIVEN_PLANS / ORIVEN_PLAN_LIST / ORIVEN_PAID_PLANS).
+// settings.js reads from those globals — do not duplicate plan definitions here.
 
 function loadSettings(){
   try {
@@ -119,10 +64,6 @@ function initSettings(){
   if(wsInp) wsInp.value = cfg.wsName || "";
   _updateSidebarName(cfg.wsName);
 
-  // Brand Lock toggle
-  var blTgl = document.getElementById("tglBrandLock");
-  if(blTgl) blTgl.classList.toggle("on", !!cfg.brandLock);
-
   // Language — set dropdown + apply strings
   CURRENT_LANG = cfg.language || "en";
   var langSel = document.getElementById("langSelect");
@@ -137,13 +78,33 @@ function initSettings(){
   if(ng) ng.classList.toggle("on", cfg.notifGenComplete !== false);
   if(nu) nu.classList.toggle("on", cfg.notifUpdates !== false);
 
-  // Export format
-  var expFmt = document.getElementById("exportFormatSel");
-  if(expFmt) expFmt.value = cfg.exportFormat || "PNG";
+  // Intelligence toggles
+  var tglAI = document.getElementById("tglAILearning");
+  if(tglAI) tglAI.classList.toggle("on", cfg.aiLearning !== false);
+  _updateHint("hintAILearning", cfg.aiLearning !== false,
+    "Future personalization active", "No history used for recommendations");
 
-  // Auto-save toggle
+  var tglBC = document.getElementById("tglBrandConsistency");
+  if(tglBC) tglBC.classList.toggle("on", cfg.brandConsistency !== false);
+  _updateHint("hintBrandConsistency", cfg.brandConsistency !== false,
+    "Maximum brand consistency", "Creative freedom enabled");
+
+  // Workspace toggles
+  var tglGH = document.getElementById("tglGenHistory");
+  if(tglGH) tglGH.classList.toggle("on", cfg.generationHistory !== false);
+  _updateHint("hintGenHistory", cfg.generationHistory !== false,
+    "History is being saved", "Generations are not stored");
+
   var tglAS = document.getElementById("tglAutoSave");
   if(tglAS) tglAS.classList.toggle("on", cfg.autoSave !== false);
+  _updateHint("hintAutoSave", cfg.autoSave !== false,
+    "BrandCore changes are saved automatically", "Save manually required");
+
+  // Default view
+  _applyGeneratorView(cfg.generatorView || "grid");
+
+  // Profile email
+  _loadProfileEmail();
 
   // Plan section
   initPlan();
@@ -151,7 +112,7 @@ function initSettings(){
 
 
 // ════════════════════════════════════════════════════════════════
-// WORKSPACE
+// WORKSPACE / PROFILE
 // ════════════════════════════════════════════════════════════════
 
 function saveWsName(){
@@ -164,17 +125,45 @@ function saveWsName(){
   toast("Workspace updated");
 }
 
-function toggleBrandLock(el){
-  el.classList.toggle("on");
-  var locked = el.classList.contains("on");
-  saveSettings({ brandLock: locked });
-  toast(locked ? "BrandCore locked" : "BrandCore unlocked");
-}
-
 function _updateSidebarName(name){
   if(!name) return;
   var el = document.getElementById("sidebarUserName");
   if(el) el.textContent = name;
+}
+
+async function _loadProfileEmail(){
+  try {
+    var res = await SB.auth.getSession();
+    var session = res && res.data && res.data.session;
+    if(session && session.user){
+      var emailEl = document.getElementById("profileEmailVal");
+      if(emailEl) emailEl.textContent = session.user.email || "—";
+      var authEl = document.getElementById("profileAuthVal");
+      if(authEl){
+        var provider = (session.user.app_metadata && session.user.app_metadata.provider) || "email";
+        authEl.textContent = provider === "google" ? "Google" : "Email & Password";
+      }
+    }
+  } catch(_){}
+}
+
+async function sendPasswordReset(){
+  try {
+    var res = await SB.auth.getSession();
+    var session = res && res.data && res.data.session;
+    if(!session || !session.user){ toast("Not signed in", "warn"); return; }
+    await SB.auth.resetPasswordForEmail(session.user.email);
+    toast("Password reset email sent");
+  } catch(err){
+    toast("Could not send reset email — try again", "err");
+  }
+}
+
+function _updateHint(id, isOn, onText, offText){
+  var el = document.getElementById(id);
+  if(!el) return;
+  el.textContent = isOn ? onText : offText;
+  el.classList.toggle("se-tgl-hint--off", !isOn);
 }
 
 
@@ -271,7 +260,7 @@ var CURRENT_LANG = "en";
 var LANG_STRINGS = {
   en:{
     // Navigation
-    dashboard:"Dashboard", create:"Create", studio:"Studio",
+    dashboard:"Dashboard", create:"Create", studio:"BrandCore",
     inspiration:"Inspiration", settings:"Settings",
     // Greetings
     goodMorning:"Good morning", goodAfternoon:"Good afternoon",
@@ -416,7 +405,7 @@ var LANG_STRINGS = {
   },
 
   nl:{
-    dashboard:"Dashboard", create:"Maken", studio:"Studio",
+    dashboard:"Dashboard", create:"Maken", studio:"BrandCore",
     inspiration:"Inspiratie", settings:"Instellingen",
     goodMorning:"Goedemorgen", goodAfternoon:"Goedemiddag",
     goodEvening:"Goedenavond", goodNight:"Goedenacht",
@@ -798,7 +787,7 @@ var LANG_STRINGS = {
   },
 
   de:{
-    dashboard:"Dashboard", create:"Erstellen", studio:"Studio",
+    dashboard:"Dashboard", create:"Erstellen", studio:"BrandCore",
     inspiration:"Inspiration", settings:"Einstellungen",
     goodMorning:"Guten Morgen", goodAfternoon:"Guten Nachmittag",
     goodEvening:"Guten Abend", goodNight:"Gute Nacht",
@@ -1102,44 +1091,62 @@ function toggleNotif(el, key){
 
 
 // ════════════════════════════════════════════════════════════════
-// EXPORT
+// INTELLIGENCE
 // ════════════════════════════════════════════════════════════════
 
-function setExportFormat(val){
-  saveSettings({ exportFormat: val });
-  toast("Export format saved");
+function toggleAILearning(el){
+  el.classList.toggle("on");
+  var on = el.classList.contains("on");
+  saveSettings({ aiLearning: on });
+  _updateHint("hintAILearning", on, "Future personalization active", "No history used for recommendations");
+  toast(on ? "AI Learning enabled" : "AI Learning disabled");
+}
+
+function toggleBrandConsistency(el){
+  el.classList.toggle("on");
+  var on = el.classList.contains("on");
+  saveSettings({ brandConsistency: on });
+  _updateHint("hintBrandConsistency", on, "Maximum brand consistency", "Creative freedom enabled");
+  toast(on ? "Brand Consistency Mode on" : "Creative freedom mode on");
+}
+
+function getBrandConsistency(){
+  return loadSettings().brandConsistency !== false;
+}
+
+
+// ════════════════════════════════════════════════════════════════
+// WORKSPACE SETTINGS
+// ════════════════════════════════════════════════════════════════
+
+function toggleGenHistory(el){
+  el.classList.toggle("on");
+  var on = el.classList.contains("on");
+  saveSettings({ generationHistory: on });
+  _updateHint("hintGenHistory", on, "History is being saved", "Generations are not stored");
+  toast(on ? "Generation history enabled" : "Generation history disabled");
 }
 
 function toggleAutoSave(el){
   el.classList.toggle("on");
   var on = el.classList.contains("on");
   saveSettings({ autoSave: on });
-  toast(on ? "Auto-save enabled" : "Auto-save disabled");
+  _updateHint("hintAutoSave", on, "BrandCore changes are saved automatically", "Save manually required");
+  toast(on ? "Auto-save enabled" : "Auto-save disabled — save manually");
 }
 
+function setGeneratorView(view){
+  saveSettings({ generatorView: view });
+  _applyGeneratorView(view);
+  toast(view === "compact" ? "Compact view enabled" : "Grid view enabled");
+}
 
-// ════════════════════════════════════════════════════════════════
-// BRAND RESET
-// ════════════════════════════════════════════════════════════════
-
-function confirmReset(){
-  if(!confirm(
-    "Reset Brand Core?\n\n" +
-    "This will permanently erase all your brand setup — colors, tone, positioning, and identity.\n\n" +
-    "Your generated assets in Studio will not be affected.\n\n" +
-    "This cannot be undone."
-  )) return;
-
-  S.brandCore = null;
-
-  if(typeof deleteBCFromDB === "function") deleteBCFromDB();
-
-  if(typeof refreshBC     === "function") refreshBC();
-  if(typeof refreshDash   === "function") refreshDash();
-  if(typeof refreshStudio === "function") refreshStudio();
-
-  toast("Brand Core has been reset");
-  navigate("studio");
+function _applyGeneratorView(view){
+  var grid = document.querySelector(".cr-grid");
+  if(grid) grid.classList.toggle("cr-compact", view === "compact");
+  document.querySelectorAll(".view-opt").forEach(function(el){
+    el.classList.toggle("active", el.dataset.view === view);
+  });
 }
 
 
@@ -1191,7 +1198,7 @@ async function switchPlan(planId){
     return;
   }
 
-  var planData = PLANS.find(function(p){ return p.id === planId; });
+  var planData = ORIVEN_PLAN_LIST.find(function(p){ return p.id === planId; });
   var name = planData ? planData.name : planId;
 
   // Disable buttons during async call
@@ -1210,8 +1217,8 @@ async function switchPlan(planId){
       return;
     }
 
-    // Free-to-paid upgrade — use Stripe checkout
-    if(cfg.currentPlan === "free" && planId !== "free"){
+    // Unsubscribed → paid: use Stripe checkout instead of schedule-plan-change
+    if(!ORIVEN_PLANS[cfg.currentPlan] && ORIVEN_PLANS[planId]){
       if(typeof selectPlan === "function") selectPlan(planId);
       return;
     }
@@ -1287,10 +1294,13 @@ function renderPlanPanel(){
   if(!container) return;
 
   var cfg         = loadSettings();
-  var currentId   = cfg.currentPlan || "free";
-  var pendingId   = cfg.pendingPlan || null;
+  // S.currentPlan (live session state) is authoritative — it's written by the auth
+  // sync immediately after login and is always at least as fresh as localStorage.
+  var currentId   = (typeof S !== "undefined" && S && S.currentPlan) ? S.currentPlan : (cfg.currentPlan || "free");
+  var pendingId   = (typeof S !== "undefined" && S && S.pendingPlan !== undefined) ? S.pendingPlan : (cfg.pendingPlan || null);
   var renewalStr  = _formatPlanDate(cfg.planRenewalDate);
-  var currentData = PLANS.find(function(p){ return p.id === currentId; });
+  var currentData = ORIVEN_PLAN_LIST.find(function(p){ return p.id === currentId; });
+  var currentRank = ORIVEN_PLAN_LIST.findIndex(function(p){ return p.id === currentId; });
 
   // Keep sidebar label in sync
   _updateSidebarPlan(currentId);
@@ -1298,15 +1308,15 @@ function renderPlanPanel(){
   // ── Status bar ────────────────────────────────────────────────
   var html = '<div class="plan-status-bar">';
   html += '<div class="plan-status-left">';
-  html += '<span class="plan-status-badge">' + (currentData ? currentData.name : currentId) + '</span>';
-  if(currentId === "free"){
-    html += '<span class="plan-status-renew">Explore mode — upgrade to generate content</span>';
+  html += '<span class="plan-status-badge">' + (currentData ? currentData.name : "No Subscription") + '</span>';
+  if(!currentData){
+    html += '<span class="plan-status-renew">No active subscription — choose a plan to start creating</span>';
   } else {
     html += '<span class="plan-status-renew">Renews on ' + renewalStr + '</span>';
   }
   html += '</div>';
   if(pendingId){
-    var pendingData = PLANS.find(function(p){ return p.id === pendingId; });
+    var pendingData = ORIVEN_PLAN_LIST.find(function(p){ return p.id === pendingId; });
     var pendingName = pendingData ? pendingData.name : pendingId;
     var pendingDate = _formatPlanDate(cfg.pendingPlanDate || cfg.planRenewalDate);
     var isCancellation = pendingId === "free";
@@ -1323,8 +1333,25 @@ function renderPlanPanel(){
   }
   html += '</div>';
 
+  // ── Credits usage block ───────────────────────────────────────
+  if(currentData){
+    var usedCr  = (typeof _getCounts === "function") ? (_getCounts().monthlyCount || 0) : 0;
+    var totalCr = currentData.credits || currentData.limit || 0;
+    var remCr   = Math.max(0, totalCr - usedCr);
+    var pctCr   = totalCr > 0 ? Math.min(100, Math.round((usedCr / totalCr) * 100)) : 0;
+    var barClr  = pctCr >= 90 ? "#EF4444" : pctCr >= 70 ? "#F59E0B" : "var(--gm)";
+    html += '<div class="plan-credits-block">';
+    html +=   '<div class="plan-credits-hd">';
+    html +=     '<span class="plan-credits-label">Creative Credits</span>';
+    html +=     '<span class="plan-credits-count">' + remCr + ' / ' + totalCr + '</span>';
+    html +=   '</div>';
+    html +=   '<div class="plan-credits-bar"><div class="plan-credits-fill" style="width:'+pctCr+'%;background:'+barClr+'"></div></div>';
+    html +=   '<div class="plan-credits-sub">' + remCr + ' credits remaining · ' + (100 - pctCr) + '% of monthly quota · resets on billing date</div>';
+    html += '</div>';
+  }
+
   // ── Paid plan cards (Starter · Premium · Business) ────────────
-  var paidPlans = PLANS.filter(function(p){ return p.id !== "free"; });
+  var paidPlans = ORIVEN_PAID_PLANS;
   html += '<div class="plan-cards">';
   paidPlans.forEach(function(plan){
     var isCurrent = plan.id === currentId;
@@ -1357,11 +1384,13 @@ function renderPlanPanel(){
 
     html += '<div class="plan-card-action">';
     if(isCurrent){
-      html += '<button class="btn btn-g btn-sm" disabled>Current Plan</button>';
+      html += '<button class="btn btn-g btn-sm" disabled>Your Current Plan</button>';
     } else if(isPending){
       html += '<button class="btn btn-g btn-sm" disabled>Scheduled</button>';
     } else {
-      html += '<button class="btn btn-p btn-sm" onclick="switchPlan(\'' + plan.id + '\')">Switch to ' + plan.name + '</button>';
+      var planRank  = ORIVEN_PLAN_LIST.findIndex(function(p){ return p.id === plan.id; });
+      var actionLabel = planRank > currentRank ? 'Upgrade' : 'Downgrade';
+      html += '<button class="btn btn-p btn-sm" onclick="switchPlan(\'' + plan.id + '\')">' + actionLabel + '</button>';
     }
     html += '</div>';
 
@@ -1369,33 +1398,17 @@ function renderPlanPanel(){
   });
   html += '</div>';
 
-  // ── Explore (free) tier row ───────────────────────────────────
-  var freePlan = PLANS.find(function(p){ return p.id === "free"; });
-  if(freePlan && currentId === "free"){
-    var fCls = 'plan-free-row plan-free-row--current';
-    html += '<div class="' + fCls + '">';
-    html += '<div class="plan-free-info">';
-    html += '<div class="plan-free-name">Explore&ensp;<span class="plan-badge plan-badge--current" style="vertical-align:2px">Current Plan</span></div>';
-    html += '<div class="plan-free-feats">BrandCore creation &middot; Platform exploration &middot; No content generation</div>';
-    html += '</div>';
-    html += '<div class="plan-free-right">';
-    html += '<span class="plan-free-price">Free</span>';
-    html += '<button class="btn btn-g btn-sm" disabled>Current Plan</button>';
-    html += '</div>';
-    html += '</div>';
-  }
-
   // ── Cancel Plan section (paid users, no cancellation already pending) ──
-  if(currentId !== "free" && pendingId !== "free"){
+  if(currentData && pendingId !== "free"){
     html += '<div class="plan-cancel-section">';
     html += '<div class="plan-cancel-section-info">';
     html += '<div class="plan-cancel-section-title">Cancel Plan</div>';
-    html += '<div class="plan-cancel-section-sub">Your access stays active until ' + renewalStr + '. After that your account moves to Explore (no generation access).</div>';
+    html += '<div class="plan-cancel-section-sub">Your access stays active until ' + renewalStr + '. After that, generation access will be disabled.</div>';
     html += '</div>';
     html += '<button class="btn btn-g btn-sm" onclick="_showCancelConfirm()">Cancel Plan</button>';
     html += '</div>';
     html += '<div class="plan-cancel-confirm" id="planCancelConfirm" style="display:none">';
-    html += '<div class="plan-cancel-confirm-text">Cancel your <strong>' + (currentData ? currentData.name : currentId) + '</strong> plan? You\'ll keep full access until <strong>' + renewalStr + '</strong>, then move to Explore mode (no generation access).</div>';
+    html += '<div class="plan-cancel-confirm-text">Cancel your <strong>' + (currentData ? currentData.name : "") + '</strong> plan? You\'ll keep full access until <strong>' + renewalStr + '</strong>. After that, generation access will be disabled.</div>';
     html += '<div class="plan-cancel-confirm-btns">';
     html += '<button class="btn btn-danger btn-sm" onclick="switchPlan(\'free\')">Yes, Cancel Plan</button>';
     html += '<button class="btn btn-g btn-sm" onclick="_hideCancelConfirm()">Keep Plan</button>';
@@ -1419,10 +1432,10 @@ function _hideCancelConfirm(){
 function _updateSidebarPlan(planId){
   var el = document.getElementById("sbPlanLabel");
   if(!el) return;
-  var plan = PLANS.find(function(p){ return p.id === planId; });
-  var name = plan ? plan.name : (planId || "Free");
+  var plan = ORIVEN_PLANS[planId];
+  var name = plan ? plan.name : "No Subscription";
   el.textContent = name;
-  el.className = "sb-plan-label sb-plan-" + (planId || "free");
+  el.className = "sb-plan-label sb-plan-" + (plan ? planId : "free");
 }
 
 function _formatPlanDate(iso){

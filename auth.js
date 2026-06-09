@@ -4,6 +4,7 @@
 
 var _currentUser     = null;
 var _onboardingShown = false;
+var _postPayment     = false; // True when landing from Stripe ?success=true — suppresses subscription gate
 
 // ── Route helpers ─────────────────────────────────────────────
 
@@ -200,9 +201,10 @@ async function authSignOut(){
 
 async function syncSubscriptionFromDB(){
   if(typeof ORIVEN_DEV !== "undefined" && ORIVEN_DEV){
-    if(typeof S !== "undefined" && S) S.currentPlan = "business";
-    if(typeof _updateSidebarPlan === "function") _updateSidebarPlan("business");
+    if(typeof S !== "undefined" && S) S.currentPlan = "professional";
+    if(typeof _updateSidebarPlan === "function") _updateSidebarPlan("professional");
     if(typeof invalidatePlanCache === "function") invalidatePlanCache();
+    if(typeof renderPlanPanel === "function") renderPlanPanel();
     return;
   }
   try {
@@ -229,6 +231,7 @@ async function syncSubscriptionFromDB(){
     saveSettings(patch);
     if(typeof _updateSidebarPlan === "function") _updateSidebarPlan(S.currentPlan);
     if(typeof invalidatePlanCache === "function") invalidatePlanCache();
+    if(typeof renderPlanPanel === "function") renderPlanPanel();
   } catch(err){
     console.warn("[Subscription] Sync error (non-fatal):", err.message);
   }
@@ -270,27 +273,28 @@ async function _loadUserProfile(user){
 
     // Subscription sync from DB — dev mode always wins
     if(typeof ORIVEN_DEV !== "undefined" && ORIVEN_DEV){
-      S.currentPlan = "business";
-      if(typeof _updateSidebarPlan === "function") _updateSidebarPlan("business");
+      S.currentPlan = "professional";
+      if(typeof _updateSidebarPlan === "function") _updateSidebarPlan("professional");
       if(typeof invalidatePlanCache === "function") invalidatePlanCache();
-    } else if(data && data.subscription_status){
-      S.currentPlan = data.subscription_status;
-      saveSettings({ currentPlan: data.subscription_status });
-      if(typeof _updateSidebarPlan === "function") _updateSidebarPlan(S.currentPlan);
-      if(typeof invalidatePlanCache === "function") invalidatePlanCache();
-    }
-
-    // Onboarding — only show once per session
-    if(!_onboardingShown){
-      var completed = data ? data.onboarding_completed === true : false;
-      if(!completed){
-        _onboardingShown = true;
-        console.log("[Onboarding] First login — showing onboarding flow");
-        showOnboarding();
-      } else {
-        console.log("[Onboarding] Already completed — going straight to dashboard");
+      if(typeof renderPlanPanel === "function") renderPlanPanel();
+    } else {
+      var _dbPlan = data && data.subscription_status;
+      var _isPaid = _dbPlan && typeof ORIVEN_PLANS !== "undefined" && ORIVEN_PLANS[_dbPlan];
+      if(_isPaid){
+        S.currentPlan = _dbPlan;
+        saveSettings({ currentPlan: _dbPlan });
+        if(typeof _updateSidebarPlan === "function") _updateSidebarPlan(S.currentPlan);
+        if(typeof invalidatePlanCache === "function") invalidatePlanCache();
+        if(typeof renderPlanPanel === "function") renderPlanPanel();
+      } else if(!_postPayment){
+        // No valid paid subscription — redirect to plan selection
+        window.location.href = "/plan";
+        return;
       }
     }
+
+    var completed = data ? data.onboarding_completed === true : false;
+    console.log("[Onboarding] Status:", completed ? "completed" : "pending (awaits payment)");
   } catch(err){
     console.error("[Profile] Load error (non-fatal):", err.message);
   }
@@ -314,16 +318,30 @@ async function markOnboardingComplete(){
 // ── Onboarding: UI ────────────────────────────────────────────
 // 2-step mini onboarding: intro → feature highlights → Enter ORIVEN
 
-var _obStep = 1;
+var _obStep       = 1;
+var _obTotalSteps = 5; // 5 for Starter/Creator, 6 for Professional (Team step)
+
+function _obConfigureSteps(){
+  var plan = (typeof S !== "undefined" && S && S.currentPlan) ? S.currentPlan : "free";
+  var isProfessionalPlan = (plan === "professional");
+  _obTotalSteps = isProfessionalPlan ? 6 : 5;
+
+  // Show/hide Team step and its dot
+  var teamStep = document.getElementById("obStep6");
+  var teamDot  = document.getElementById("obDot6");
+  if(teamStep) teamStep.style.display = isProfessionalPlan ? ""  : "none";
+  if(teamDot)  teamDot.style.display  = isProfessionalPlan ? ""  : "none";
+}
 
 function showOnboarding(){
   var el = document.getElementById("onboardingOverlay");
   if(!el) return;
 
+  _obConfigureSteps();
   _obStep = 1;
 
-  // Reset steps
-  for(var i = 1; i <= 2; i++){
+  // Reset all steps
+  for(var i = 1; i <= 6; i++){
     var s = document.getElementById("obStep" + i);
     if(s){ s.classList.remove("ob-active","ob-exit"); }
   }
@@ -331,45 +349,66 @@ function showOnboarding(){
   // Show overlay
   el.style.opacity = "0";
   el.style.display = "flex";
-  el.style.transition = "opacity 0.45s ease";
+  el.style.transition = "opacity 0.4s ease";
   requestAnimationFrame(function(){
     requestAnimationFrame(function(){
       el.style.opacity = "1";
       setTimeout(function(){
         var s1 = document.getElementById("obStep1");
         if(s1) s1.classList.add("ob-active");
-      }, 120);
+        _obUpdateNav();
+      }, 100);
     });
   });
 
   _obSetDots(1);
-  console.log("[Onboarding] Mini onboarding shown — Step 1");
+  console.log("[Onboarding] Tour shown — Step 1 of", _obTotalSteps);
 }
 
 function hideOnboarding(){
   var el = document.getElementById("onboardingOverlay");
   if(el){
-    el.style.transition = "opacity 0.3s ease";
+    el.style.transition = "opacity 0.28s ease";
     el.style.opacity = "0";
     setTimeout(function(){
       el.style.display = "none";
       el.style.opacity = "";
       el.style.transition = "";
-    }, 320);
+    }, 300);
   }
 }
 
 function _obSetDots(active){
-  for(var i = 1; i <= 2; i++){
+  for(var i = 1; i <= 6; i++){
     var d = document.getElementById("obDot" + i);
     if(!d) continue;
-    if(i === active){ d.classList.add("ob-dot-active"); }
-    else { d.classList.remove("ob-dot-active"); }
+    if(i === active) d.classList.add("ob-dot-active");
+    else             d.classList.remove("ob-dot-active");
+  }
+}
+
+function _obUpdateNav(){
+  var backBtn = document.getElementById("obBackBtn");
+  var nextBtn = document.getElementById("obNextBtn");
+  var isLast  = (_obStep === _obTotalSteps);
+
+  if(backBtn){
+    backBtn.style.visibility = _obStep > 1 ? "visible" : "hidden";
+  }
+  if(nextBtn){
+    nextBtn.textContent = isLast ? "Enter ORIVEN →" : "Next →";
+    if(isLast){
+      nextBtn.classList.add("ob-finish");
+      nextBtn.onclick = function(){ obFinish(); };
+    } else {
+      nextBtn.classList.remove("ob-finish");
+      nextBtn.onclick = function(){ obGoTo(_obStep + 1); };
+    }
   }
 }
 
 function obGoTo(step){
-  if(step < 1 || step > 2 || step === _obStep) return;
+  if(step < 1 || step > _obTotalSteps || step === _obStep) return;
 
   var prev   = _obStep;
   var prevEl = document.getElementById("obStep" + prev);
@@ -389,21 +428,18 @@ function obGoTo(step){
 
     _obStep = step;
     _obSetDots(step);
-    console.log("[Onboarding] Step →", step);
-  }, 300);
+    _obUpdateNav();
+    console.log("[Onboarding] Step →", step, "of", _obTotalSteps);
+  }, 250);
 }
 
 function obFinish(){
-  console.log("[Onboarding] Complete");
+  console.log("[Onboarding] Tour complete");
   markOnboardingComplete();
   hideOnboarding();
   setTimeout(function(){
-    if(typeof gtStart === "function"){
-      gtStart();
-    } else {
-      navigate("create");
-    }
-  }, 280);
+    navigate("dashboard");
+  }, 300);
 }
 
 // ── Email verification helpers ────────────────────────────────
@@ -574,8 +610,8 @@ async function deleteBCFromDB(){
 
 async function checkSubscriptionStatus(){
   if(typeof ORIVEN_DEV !== "undefined" && ORIVEN_DEV){
-    if(typeof S !== "undefined" && S) S.currentPlan = "business";
-    return "business";
+    if(typeof S !== "undefined" && S) S.currentPlan = "professional";
+    return "professional";
   }
   if(typeof SB === "undefined"){
     console.error("[Paywall] SB client not initialized — cannot check subscription");
@@ -629,7 +665,7 @@ async function checkSubscriptionStatus(){
     var status = resp.data.subscription_status;
     if(!status){
       console.warn("[Paywall] subscription_status is null/empty in DB — treating as free. " +
-        "Run the ALTER TABLE SQL, then set it to 'premium' for paid users.");
+        "Run the ALTER TABLE SQL, then set it to 'creator' or 'professional' for paid users.");
       return "free";
     }
 
@@ -671,7 +707,7 @@ async function selectPlan(plan){
     var result = await apiFetch("/api/create-checkout-session", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ plan, userId: u.id, userEmail: u.email })
+      body: JSON.stringify({ plan, userId: u.id, userEmail: u.email, source: 'app' })
     });
     if(!result.ok || !result.data.url) throw new Error(result.data.error || "No checkout URL returned");
     window.location.href = result.data.url;
@@ -694,17 +730,21 @@ document.addEventListener("DOMContentLoaded", async function(){
   await _handleVerifyToken();
 
   // Handle Stripe return URLs
-  var params = new URLSearchParams(window.location.search);
-  if(params.get("success") === "true"){
+  var params      = new URLSearchParams(window.location.search);
+  var _stripeOk   = params.get("success")  === "true";
+  var _stripeBail = params.get("canceled") === "true";
+  var _tourParam  = params.get("tour")     === "1";
+
+  if(_stripeOk){
+    _postPayment = true;
     history.replaceState(null, "", "/app");
     _loadPath = "/app";
-    setTimeout(async function(){
-      await checkSubscriptionStatus();
-      toast("Your subscription is now active — welcome!");
-    }, 1500);
-  } else if(params.get("canceled") === "true"){
+  } else if(_stripeBail){
     history.replaceState(null, "", "/app");
     toast("Checkout canceled — you can upgrade anytime.");
+  } else if(_tourParam){
+    history.replaceState(null, "", "/app");
+    _loadPath = "/app";
   }
 
   // Hide app immediately — show only after auth confirmed
@@ -717,14 +757,43 @@ document.addEventListener("DOMContentLoaded", async function(){
 
   if(session && session.user){
     console.log("[Auth] Session restored for:", session.user.id);
-    onUserSignedIn(session.user); // sets route to /app
+    await onUserSignedIn(session.user);
+
+    // Fire onboarding tour after payment or dev ?tour=1
+    if(_stripeOk){
+      setTimeout(async function(){
+        await syncSubscriptionFromDB();
+        var plan = typeof S !== "undefined" && S && S.currentPlan;
+        var hasPaid = plan && typeof ORIVEN_PLANS !== "undefined" && ORIVEN_PLANS[plan];
+        if(hasPaid){
+          toast("Your subscription is now active — welcome to ORIVEN!");
+          setTimeout(function(){ showOnboarding(); }, 600);
+        } else {
+          // Webhook may not have arrived yet — retry once after a short delay
+          toast("Payment received — activating your account...");
+          setTimeout(async function(){
+            await syncSubscriptionFromDB();
+            plan = typeof S !== "undefined" && S && S.currentPlan;
+            if(plan && typeof ORIVEN_PLANS !== "undefined" && ORIVEN_PLANS[plan]){
+              toast("Your subscription is now active — welcome to ORIVEN!");
+              setTimeout(function(){ showOnboarding(); }, 400);
+            } else {
+              toast("Subscription pending — please refresh in a moment.");
+            }
+          }, 3000);
+        }
+      }, 800);
+    } else if(_tourParam){
+      // Only show tour for users with an active paid subscription
+      setTimeout(async function(){
+        await syncSubscriptionFromDB();
+        var plan = typeof S !== "undefined" && S && S.currentPlan;
+        if(plan && typeof ORIVEN_PLANS !== "undefined" && ORIVEN_PLANS[plan]) showOnboarding();
+      }, 500);
+    }
   } else {
     console.log("[Auth] No session — showing guest landing");
-    // If someone bookmarked /app without a session, redirect to /onboarding
-    if(_loadPath === "/app"){
-      history.replaceState(null, "", "/onboarding");
-    }
-    showGuestLanding(); // sets route to /onboarding
+    showGuestLanding();
   }
 
   // React to future auth changes (e.g. session expiry)
