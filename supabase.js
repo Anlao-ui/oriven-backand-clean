@@ -1,3 +1,5 @@
+alert("SUPABASE TEST 2026");
+
 // ═══ SUPABASE CLIENT ══════════════════════════════════════════
 // Initialized once — available globally as SB across all scripts.
 // The anon key is intentionally public (publishable key).
@@ -20,7 +22,7 @@ if (ORIVEN_DEV) console.log("[ORIVEN] Dev mode active — subscription and usage
 // Frontend (orivenai.com) and Express backend (Render) are separately hosted,
 // so we cannot use window.location.origin — it would point to the static host.
 //   Local:      http://localhost:5500
-//   Production: https://oriven-backand.onrender.com
+//   Production: https://oriven-backand-clean.onrender.com
 var API_BASE_URL = ORIVEN_DEV
   ? "http://localhost:5500"
   : "https://oriven-backand-clean.onrender.com";
