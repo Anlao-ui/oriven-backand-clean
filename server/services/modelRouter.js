@@ -97,6 +97,12 @@ const TASKS = {
     model:    MODELS.aiml.text,
     label:    'Brand Core',
   },
+  'competitor-intel': {
+    provider: 'aiml',
+    type:     'text',
+    model:    MODELS.aiml.text,
+    label:    'Competitor Intelligence',
+  },
 
   // ── Image Prompt Building ─────────────────────────────────────
   'visuals-copy': {

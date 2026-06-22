@@ -6,12 +6,12 @@ const nodemailer = require('nodemailer');
 const crypto     = require('crypto');
 const path       = require('path');
 const cron       = require('node-cron');
-// Resolve .env from the project root (parent of this server/ dir) so the key is
-// found whether the server is started from c:\files\ OR c:\files\server\
+// Resolve .env from the frontend root (two levels up: server/ → oriven-backand-clean/ → C:\files).
+// Frontend is the single source of truth for .env.
 // NOTE: dotenv does NOT override variables already present in the process
 // environment (e.g. set by Render dashboard). If a key shows the wrong value
 // at runtime, update it in the Render dashboard — not just in .env.
-const _dotenvPath = path.resolve(__dirname, '..', '.env');
+const _dotenvPath = path.resolve(__dirname, '..', '..', '.env');
 const _dotenvResult = require('dotenv').config({ path: _dotenvPath });
 console.log(
   '[dotenv] Loaded from:', _dotenvPath,
@@ -139,7 +139,7 @@ app.use(cors());
 // so relative /api/... URLs from the browser resolve to this process.
 // Must come before express.json() but after cors() so CORS headers
 // are present on static responses too.
-app.use(express.static(path.resolve(__dirname, '..')));
+app.use(express.static(path.resolve(__dirname, '..', '..')));
 
 // ── Stripe webhook — must be registered BEFORE express.json() ──
 app.post('/api/stripe-webhook', express.raw({ type: 'application/json' }), async (req, res) => {
@@ -319,7 +319,7 @@ app.use(express.json({ limit: '20mb' }));
 app.use(express.urlencoded({ limit: '20mb', extended: true }));
 
 // ── Web generator — registered immediately after json middleware ──
-app.post('/api/generate-web', async (req, res) => {
+app.post('/api/generate-web', requireSubIfAuthed, async (req, res) => {
   const {
     brand_name, product, goal,
     style, animations, sections,
@@ -441,6 +441,53 @@ async function getUserFromToken(req) {
     if (error || !data.user) return null;
     return data.user;
   } catch (_) { return null; }
+}
+
+// ── Subscription enforcement middleware ───────────────────────────
+// Two tiers:
+//
+// requireSubscription     — strict: auth token required AND subscription required.
+//                           Use for account-management routes (plan change, invite).
+//
+// requireSubIfAuthed      — lenient: no-auth requests pass through (guest demo);
+//                           authenticated-but-unpaid requests are blocked with 403.
+//                           Use for all generation routes shared with the guest demo.
+
+const PAID_PLANS = ['starter', 'creator', 'professional'];
+
+async function requireSubscription(req, res, next) {
+  const auth = req.headers.authorization || '';
+  if (!auth) return res.status(401).json({ error: 'Authentication required', code: 'AUTH_REQUIRED' });
+  const user = await getUserFromToken(req);
+  if (!user) return res.status(401).json({ error: 'Invalid or expired session', code: 'AUTH_INVALID' });
+  try {
+    const { data } = await supabaseAdmin
+      .from('profiles').select('subscription_status').eq('id', user.id).maybeSingle();
+    if (!PAID_PLANS.includes((data && data.subscription_status) || '')) {
+      return res.status(403).json({ error: 'Active subscription required', code: 'SUBSCRIPTION_REQUIRED' });
+    }
+    req.user = user;
+    next();
+  } catch (err) {
+    console.error('[Auth] Subscription check error:', err.message);
+    return res.status(500).json({ error: 'Could not verify subscription' });
+  }
+}
+
+async function requireSubIfAuthed(req, res, next) {
+  const auth = req.headers.authorization || '';
+  if (!auth) return next(); // unauthenticated — guest demo, pass through
+  const user = await getUserFromToken(req);
+  if (!user) return next(); // bad token — pass through gracefully
+  try {
+    const { data } = await supabaseAdmin
+      .from('profiles').select('subscription_status').eq('id', user.id).maybeSingle();
+    if (!PAID_PLANS.includes((data && data.subscription_status) || '')) {
+      return res.status(403).json({ error: 'Active subscription required', code: 'SUBSCRIPTION_REQUIRED' });
+    }
+    req.user = user;
+    next();
+  } catch (_) { next(); } // fail open for generation routes
 }
 
 // ── Shared SMTP transporter factory ─────────────────────────────
@@ -596,7 +643,7 @@ async function _briefToImagePrompt(brief, contextHint, taskType) {
   return _aimlText(taskType || 'visuals-copy', system, user, { max_tokens: 300 });
 }
 
-app.post('/api/generate-text', async (req, res) => {
+app.post('/api/generate-text', requireSubIfAuthed, async (req, res) => {
   const { prompt, type, brandContext } = req.body;
   if (!prompt) return res.status(400).json({ error: 'prompt is required' });
 
@@ -637,7 +684,7 @@ Be specific and direct. No preamble or filler.${hasBrand ? `\n\nBRAND CONTEXT:\n
 // ── Email Designer — Anthropic ─────────────────────────────────
 // Used by: Email Designer generator
 // Receives: { prompt }  Returns: { html }
-app.post('/api/generate-email', async (req, res) => {
+app.post('/api/generate-email', requireSubIfAuthed, async (req, res) => {
   const { prompt } = req.body;
   if (!prompt) return res.status(400).json({ error: 'prompt is required' });
 
@@ -670,7 +717,7 @@ DESIGN REQUIREMENTS:
 // ── Presentation Generator — Anthropic ─────────────────────────
 // Used by: Presentation Generator
 // Receives: { prompt }  Returns: { slides: [{slide, title, content, notes}] }
-app.post('/api/generate-deck', async (req, res) => {
+app.post('/api/generate-deck', requireSubIfAuthed, async (req, res) => {
   const { prompt } = req.body;
   if (!prompt) return res.status(400).json({ error: 'prompt is required' });
 
@@ -734,7 +781,7 @@ RULES:
 // ── Poster Generator — Anthropic ───────────────────────────────
 // Used by: Poster Generator
 // Receives: { prompt }  Returns: { html }
-app.post('/api/generate-poster', async (req, res) => {
+app.post('/api/generate-poster', requireSubIfAuthed, async (req, res) => {
   const { prompt } = req.body;
   if (!prompt) return res.status(400).json({ error: 'prompt is required' });
 
@@ -793,7 +840,7 @@ POSTER MUST INCLUDE ALL OF THESE SECTIONS:
   }
 });
 
-app.post('/api/generate-infographic', async (req, res) => {
+app.post('/api/generate-infographic', requireSubIfAuthed, async (req, res) => {
   const { prompt } = req.body;
   if (!prompt) return res.status(400).json({ error: 'prompt is required' });
 
@@ -852,7 +899,7 @@ INFOGRAPHIC MUST INCLUDE ALL OF THESE:
 // Receives: { prompt, size, imageType, imageFormat, refImageData? }
 // If refImageData is provided, Anthropic vision extracts style cues
 // which are appended to the DALL-E prompt as a style guide.
-app.post('/api/generate-image', async (req, res) => {
+app.post('/api/generate-image', requireSubIfAuthed, async (req, res) => {
   const { prompt, size, imageType, imageFormat, refImageData, uploadType } = req.body;
   if (!prompt) return res.status(400).json({ error: 'prompt is required' });
 
@@ -921,7 +968,7 @@ app.post('/api/generate-image', async (req, res) => {
 // Receives: { prompt, size, adFormat }
 // Steps 1 and 2 (copy + visual prompt) run in parallel via Promise.all
 // to minimise total latency before DALL-E is called.
-app.post('/api/generate-ad', async (req, res) => {
+app.post('/api/generate-ad', requireSubIfAuthed, async (req, res) => {
   const { prompt, size, adFormat } = req.body;
   if (!prompt) return res.status(400).json({ error: 'prompt is required' });
 
@@ -986,7 +1033,7 @@ Reply ONLY with valid JSON (no markdown fences, no extra text):
 // Step 1: Anthropic generates N variation objects (title/headline/body/cta/imagePrompt)
 // Step 2: All N DALL-E images generated in parallel
 // Returns: { variations: [{title,headline,body,cta,imageUrl},...] }
-app.post('/api/generate-campaign', async (req, res) => {
+app.post('/api/generate-campaign', requireSubIfAuthed, async (req, res) => {
   const { prompt, size } = req.body;
   if (!prompt) return res.status(400).json({ error: 'prompt is required' });
 
@@ -1059,7 +1106,7 @@ Rules:
 // The frontend handles this locally; no route needed.
 
 // ── BrandCore — AI Generate ─────────────────────────────────────
-app.post('/api/generate-brandcore', async (req, res) => {
+app.post('/api/generate-brandcore', requireSubIfAuthed, async (req, res) => {
   const {
     brandName, description, industry, targetAudience,
     brandType, visualStyle, colorDir, brandFeeling,
@@ -1182,7 +1229,7 @@ Generate the complete BrandCore JSON now. Every field must be specific to this b
 });
 
 // ── Brand Check — OpenAI Quality Analysis ────────────────────────
-app.post('/api/brand-check', async (req, res) => {
+app.post('/api/brand-check', requireSubIfAuthed, async (req, res) => {
   const {
     brandName, tagline, colors, fonts, brandPromise, description,
     targetAudience, styleDirection, colorMood, mission, vision,
@@ -1278,6 +1325,106 @@ Rules:
   }
 });
 
+// ── Competitor Intelligence v2 ──────────────────────────────────
+app.post('/api/competitor-intelligence', requireSubIfAuthed, async (req, res) => {
+  const { competitor, brandCore } = req.body;
+
+  if (!competitor || typeof competitor !== 'string' || !competitor.trim()) {
+    return res.status(400).json({ error: 'A competitor URL is required' });
+  }
+
+  const url = competitor.trim();
+  console.log('[CompetitorIntel] Analyzing:', url);
+
+  const bcLines = [];
+  if (brandCore) {
+    if (brandCore.name)        bcLines.push(`Brand Name: ${brandCore.name}`);
+    if (brandCore.tagline)     bcLines.push(`Tagline: ${brandCore.tagline}`);
+    if (brandCore.positioning) bcLines.push(`Positioning: ${brandCore.positioning}`);
+    if (brandCore.audience)    bcLines.push(`Target Audience: ${brandCore.audience}`);
+    if (brandCore.toneOfVoice) bcLines.push(`Tone of Voice: ${brandCore.toneOfVoice}`);
+    if (brandCore.personality) bcLines.push(`Personality: ${Array.isArray(brandCore.personality) ? brandCore.personality.join(', ') : brandCore.personality}`);
+    if (brandCore.mission)     bcLines.push(`Mission: ${brandCore.mission}`);
+    if (brandCore.desc)        bcLines.push(`Description: ${brandCore.desc}`);
+    if (brandCore.ind)         bcLines.push(`Industry: ${brandCore.ind}`);
+    if (brandCore.colors)      bcLines.push(`Colors: ${Array.isArray(brandCore.colors) ? brandCore.colors.join(', ') : brandCore.colors}`);
+    if (brandCore.fonts)       bcLines.push(`Typography: ${Array.isArray(brandCore.fonts) ? brandCore.fonts.join(', ') : brandCore.fonts}`);
+  }
+
+  const system = `You are a world-class brand strategist and competitive intelligence analyst.
+
+Analyze the competitor brand at the given URL using your comprehensive knowledge of that brand. Compare it to the user's brand to produce a visual brand intelligence dashboard.
+
+For colors: return accurate HEX codes. For major brands (Apple, Nike, Google, etc.) use their real brand colors. For less-known brands, make a reasonable inference.
+For typography: name the actual typeface the brand uses.
+Keep every label short — 2–6 words max. Only the "insight" field may be longer (3–4 sentences).
+
+Return ONLY valid JSON with zero markdown, matching this exact structure:
+
+{
+  "competitor": {
+    "name": "Brand Name",
+    "industry": "Short industry label",
+    "positioning": "3–5 word positioning statement",
+    "tone": "Single word",
+    "audience": "2–4 word description",
+    "visualStyle": "Single word",
+    "colors": ["#hex1", "#hex2", "#hex3"],
+    "typography": "Font family name",
+    "designAdjectives": ["word1", "word2", "word3", "word4"],
+    "toneWords": ["word1", "word2", "word3", "word4"]
+  },
+  "userBrand": {
+    "designAdjectives": ["word1", "word2", "word3", "word4"],
+    "toneWords": ["word1", "word2", "word3", "word4"]
+  },
+  "positioning": {
+    "competitorOwns": "2–5 word phrase",
+    "userOwns": "2–5 word phrase",
+    "overlap": ["word1", "word2", "word3"]
+  },
+  "differentiation": {
+    "theyOwn": "2–5 word phrase",
+    "youOwn": "2–5 word phrase",
+    "opportunity": "2–5 word phrase",
+    "risk": "2–5 word phrase"
+  },
+  "insight": "3–4 sentence strategic insight. Direct, specific, and actionable.",
+  "verdict": {
+    "strength": "2–4 word phrase",
+    "weakness": "2–4 word phrase",
+    "advantage": "2–4 word phrase",
+    "position": "2–5 word phrase"
+  }
+}
+
+Rules:
+- userBrand fields must reflect the provided Brand Core data. If no data: use strategic defaults.
+- Be specific to the actual brand — no generic filler.
+- All values are scannable at a glance.`;
+
+  const userMsg = `Competitor URL: ${url}\n\n${bcLines.length ? `User's Brand Core:\n${bcLines.join('\n')}` : 'No brand core provided — use strategic defaults for the user brand.'}`;
+
+  try {
+    const raw = await _aimlText('competitor-intel', system, userMsg, { max_tokens: 1800 });
+    const cleaned = raw.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '').trim();
+
+    let report;
+    try {
+      report = JSON.parse(cleaned);
+    } catch {
+      console.error('[CompetitorIntel] JSON parse failed:', cleaned.slice(0, 200));
+      return res.status(500).json({ error: 'Failed to parse competitor analysis' });
+    }
+
+    console.log('[CompetitorIntel] Analysis complete for:', url);
+    res.json(report);
+  } catch (err) {
+    console.error('[CompetitorIntel] AIML error:', err.message);
+    res.status(500).json({ error: 'Failed to run competitor intelligence analysis' });
+  }
+});
+
 // ── Stripe checkout session ─────────────────────────────────────
 app.post('/api/create-checkout-session', async (req, res) => {
   const { plan, userId, userEmail, source } = req.body;
@@ -1304,9 +1451,8 @@ app.post('/api/create-checkout-session', async (req, res) => {
   }
 
   const frontendUrl = FRONTEND_URL;
-  // Plan-page checkout returns to /plan on cancel (new user hasn't entered the app yet).
-  // In-app paywall checkout returns to /app on cancel (existing user stays in the app).
-  const cancelPath = source === 'plan' ? '/plan?canceled=true' : '/app?canceled=true';
+  // All checkout cancels return to /app — hard paywall will re-appear for unpaid users.
+  const cancelPath = '/app?canceled=true';
 
   try {
     const session = await stripe.checkout.sessions.create({
@@ -1368,7 +1514,7 @@ app.get('/api/get-subscription', async (req, res) => {
 });
 
 // ── POST /api/schedule-plan-change ──────────────────────────────
-app.post('/api/schedule-plan-change', async (req, res) => {
+app.post('/api/schedule-plan-change', requireSubscription, async (req, res) => {
   const user = await getUserFromToken(req);
   if (!user) return res.status(401).json({ error: 'Unauthorized' });
 
@@ -1464,7 +1610,7 @@ app.post('/api/schedule-plan-change', async (req, res) => {
 });
 
 // ── POST /api/cancel-plan-change ────────────────────────────────
-app.post('/api/cancel-plan-change', async (req, res) => {
+app.post('/api/cancel-plan-change', requireSubscription, async (req, res) => {
   const user = await getUserFromToken(req);
   if (!user) return res.status(401).json({ error: 'Unauthorized' });
 
@@ -1518,7 +1664,7 @@ app.get('/api/get-usage', async (req, res) => {
 
 // ── POST /api/increment-usage ────────────────────────────────────
 // Body: { count?: number }  — credits consumed (default 1, capped at 20)
-app.post('/api/increment-usage', async (req, res) => {
+app.post('/api/increment-usage', requireSubscription, async (req, res) => {
   const user = await getUserFromToken(req);
   if (!user) return res.status(401).json({ error: 'Unauthorized' });
   const amount       = Math.min(Math.max(parseInt(req.body.count) || 1, 1), 20);
@@ -1680,7 +1826,7 @@ app.post('/api/resend-verification', async (req, res) => {
 // ── POST /api/send-invite ────────────────────────────────────────
 // Sends a team invite email via Outlook SMTP.
 // Body: { name, email, role, message, workspaceName }
-app.post('/api/send-invite', async (req, res) => {
+app.post('/api/send-invite', requireSubscription, async (req, res) => {
   const { name, email, role, message, workspaceName } = req.body || {};
 
   if (!email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
@@ -1767,7 +1913,7 @@ app.post('/api/send-invite', async (req, res) => {
 // ── AI Logo Generation ──────────────────────────────────────────
 // Receives: { brandName, description, logoStyle, styleDirection, colorPalette }
 // Returns: { imageUrl, prompt }
-app.post('/api/generate-logo', async (req, res) => {
+app.post('/api/generate-logo', requireSubIfAuthed, async (req, res) => {
   const { brandName, description, logoStyle, styleDirection, colorPalette } = req.body;
   if (!brandName) return res.status(400).json({ error: 'brandName is required' });
 
@@ -1849,7 +1995,7 @@ console.log("UGC ROUTE REGISTERED");
 // ── POST /api/generate-ugc ──────────────────────────────────────
 // AIML writes the script, Kling (via AIML) generates the video.
 // Frontend calls one endpoint, gets back a videoId to poll.
-app.post('/api/generate-ugc', async (req, res) => {
+app.post('/api/generate-ugc', requireSubIfAuthed, async (req, res) => {
   const user = await getUserFromToken(req);
 
   if (!user) {
@@ -2020,7 +2166,7 @@ Script rules:
 // ── POST /api/generate-ugc-script ───────────────────────────────
 // Standalone script-only endpoint (used by test page / direct integrations).
 // Aligned with the simplified UGC flow — no product/niche/audience required.
-app.post('/api/generate-ugc-script', async (req, res) => {
+app.post('/api/generate-ugc-script', requireSubIfAuthed, async (req, res) => {
   const user = await getUserFromToken(req);
   if (!user) return res.status(401).json({ error: 'Unauthorized' });
 
@@ -2086,7 +2232,7 @@ Rules: first-person only, no stage directions, no brackets, output ONLY the spok
 // ── POST /api/generate-ugc-video ─────────────────────────────────
 // Generates a video from a script via AIML (Kling text-to-video).
 // avatarId and voiceId are accepted for API compatibility but unused.
-app.post('/api/generate-ugc-video', async (req, res) => {
+app.post('/api/generate-ugc-video', requireSubIfAuthed, async (req, res) => {
   const user = await getUserFromToken(req);
   if (!user) return res.status(401).json({ error: 'Unauthorized' });
 
@@ -2138,7 +2284,7 @@ app.get('/api/ugc-video-status/:videoId', async (req, res) => {
 // Three modes: 'ai' (Anthropic builds prompt) | 'script' (user prompt) | 'image' (image-to-video)
 // Provider: AIML API via aimlProvider (AIML_API_KEY).
 // API key is read from env only — never hardcoded or sent to frontend.
-app.post('/api/video-ads/generate', async (req, res) => {
+app.post('/api/video-ads/generate', requireSubIfAuthed, async (req, res) => {
   const user = await getUserFromToken(req);
   if (!user) return res.status(401).json({ error: 'Unauthorized' });
 
@@ -2270,7 +2416,7 @@ app.get('/api/video-ads/status/:generationId', async (req, res) => {
 // Generates branded motion graphic videos via AIML API (kling-video).
 // Anthropic writes a cinematic video prompt with Brand Core injection.
 // Returns { generationId, status: 'queued' } — client polls /status/:id.
-app.post('/api/motion-graphics/generate', async (req, res) => {
+app.post('/api/motion-graphics/generate', requireSubIfAuthed, async (req, res) => {
   const user = await getUserFromToken(req);
   if (!user) return res.status(401).json({ error: 'Unauthorized' });
 
@@ -2388,7 +2534,7 @@ app.get('/api/motion-graphics/status/:generationId', async (req, res) => {
 // ── POST /api/product-shoots/generate ─────────────────────────────
 // Professional product photography via gpt-image-1 (same stack as Visuals/Logos).
 // Anthropic builds the photography prompt from product + style + goal.
-app.post('/api/product-shoots/generate', async (req, res) => {
+app.post('/api/product-shoots/generate', requireSubIfAuthed, async (req, res) => {
   const user = await getUserFromToken(req);
   if (!user) return res.status(401).json({ error: 'Unauthorized' });
 
@@ -2460,14 +2606,14 @@ Output ONLY the prompt. 2–3 sentences. No quotes, no preamble.`;
 });
 
 // ── Public routes — all served by index.html (router handles view) ──
-app.get('/signup',     function(req, res) { res.sendFile(path.resolve(__dirname, '..', 'index.html')); });
-app.get('/login',      function(req, res) { res.sendFile(path.resolve(__dirname, '..', 'index.html')); });
-app.get('/plan',       function(req, res) { res.sendFile(path.resolve(__dirname, '..', 'index.html')); });
+app.get('/signup',     function(req, res) { res.sendFile(path.resolve(__dirname, '..', '..', 'index.html')); });
+app.get('/login',      function(req, res) { res.sendFile(path.resolve(__dirname, '..', '..', 'index.html')); });
+app.get('/plan',       function(req, res) { res.redirect(302, '/app'); });
 app.get('/onboarding', function(req, res) { res.redirect(302, '/app?tour=1'); });
 
 // ── /app → ORIVEN application ─────────────────────────────────────
 app.get('/app', function(req, res) {
-  res.sendFile(path.resolve(__dirname, '..', 'app.html'));
+  res.sendFile(path.resolve(__dirname, '..', '..', 'app.html'));
 });
 
 // ── Fallback — after all routes ──────────────────────────────────
@@ -2479,7 +2625,7 @@ app.use(function(req, res) {
     console.warn('[404]', req.method, req.url);
     return res.status(404).json({ error: 'Route not found: ' + req.method + ' ' + req.url });
   }
-  res.sendFile(path.resolve(__dirname, '..', 'index.html'));
+  res.sendFile(path.resolve(__dirname, '..', '..', 'index.html'));
 });
 
 // ── Global error handler — catches unhandled errors in routes ───
