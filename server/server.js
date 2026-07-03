@@ -2961,7 +2961,7 @@ async function _fetchGoogleAdsAccounts(accessToken) {
   // Step 1 — list all customer resource names the token can access
   let resourceNames;
   try {
-    const listUrl = 'https://googleads.googleapis.com/v17/customers:listAccessibleCustomers';
+    const listUrl = 'https://googleads.googleapis.com/v24/customers:listAccessibleCustomers';
     console.log('[Google Ads] GET', listUrl);
     const listRes  = await _fetchWithTimeout(listUrl, { headers });
 
@@ -3002,7 +3002,7 @@ async function _fetchGoogleAdsAccounts(accessToken) {
   const accounts = [];
   for (const customerId of customerIds.slice(0, 20)) {
     try {
-      const searchUrl = 'https://googleads.googleapis.com/v17/customers/' + customerId + '/googleAds:search';
+      const searchUrl = 'https://googleads.googleapis.com/v24/customers/' + customerId + '/googleAds:search';
       console.log('[Google Ads] POST', searchUrl);
       const searchRes = await _fetchWithTimeout(
         searchUrl,
