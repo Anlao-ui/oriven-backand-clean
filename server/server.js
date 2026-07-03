@@ -3095,15 +3095,31 @@ app.post('/api/google/disconnect', async (req, res) => {
 });
 
 // GET /api/debug/routes — list all registered Express routes
+// Express 5 stores the router at app.router; Express 4 uses app._router.
 app.get('/api/debug/routes', function(req, res) {
-  const routes = [];
-  app._router.stack.forEach(function(layer) {
-    if (layer.route) {
-      const methods = Object.keys(layer.route.methods).map(function(m) { return m.toUpperCase(); });
-      routes.push(methods.join(',') + ' ' + layer.route.path);
+  try {
+    const router = app.router || app._router;
+    if (!router) {
+      return res.status(500).json({
+        error: 'Router not accessible',
+        _routerDefined: !!app._router,
+        routerDefined:  !!app.router
+      });
     }
-  });
-  res.json({ count: routes.length, routes: routes });
+    const stack = router.stack || [];
+    const routes = [];
+    stack.forEach(function(layer) {
+      if (layer.route) {
+        const methods = Object.keys(layer.route.methods)
+          .filter(function(m) { return layer.route.methods[m]; })
+          .map(function(m) { return m.toUpperCase(); });
+        routes.push(methods.join(',') + ' ' + layer.route.path);
+      }
+    });
+    res.json({ count: routes.length, routes: routes });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
 });
 
 // ── Fallback — after all routes ──────────────────────────────────
@@ -3159,6 +3175,25 @@ cron.schedule('0 2 * * *', async () => {
 
 app.listen(PORT, async () => {
   console.log(`Server running on http://localhost:${PORT}`);
+
+  // Google OAuth route registration check
+  console.log('[Startup] GOOGLE_CLIENT_ID loaded:',     !!GOOGLE_CLIENT_ID);
+  console.log('[Startup] GOOGLE_CLIENT_SECRET loaded:',  !!GOOGLE_CLIENT_SECRET);
+  const _checkRouter = app.router || app._router;
+  const _checkStack  = (_checkRouter && _checkRouter.stack) ? _checkRouter.stack : [];
+  const _googleRoutes = [
+    'GET /api/google/auth-url',
+    'GET /api/google/status',
+    'POST /api/google/disconnect',
+    'GET /auth/google/callback'
+  ];
+  _googleRoutes.forEach(function(sig) {
+    const [method, path] = sig.split(' ');
+    const found = _checkStack.some(function(l) {
+      return l.route && l.route.path === path && l.route.methods[method.toLowerCase()];
+    });
+    console.log('[Startup] Route', sig, found ? '✅ registered' : '❌ NOT FOUND');
+  });
 
   // Live Supabase admin connectivity test — runs every server start
   console.log('[Startup] Testing Supabase admin client...');
