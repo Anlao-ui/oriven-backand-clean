@@ -2961,21 +2961,36 @@ async function _fetchGoogleAdsAccounts(accessToken) {
   // Step 1 — list all customer resource names the token can access
   let resourceNames;
   try {
-    console.log('[Google Ads] calling listAccessibleCustomers…');
-    const listRes  = await _fetchWithTimeout(
-      'https://googleads.googleapis.com/v17/customers:listAccessibleCustomers',
-      { headers }
-    );
-    const listData = await listRes.json();
-    console.log('[Google Ads] listAccessibleCustomers status:', listRes.status, '| body:', JSON.stringify(listData).slice(0, 300));
+    const listUrl = 'https://googleads.googleapis.com/v17/customers:listAccessibleCustomers';
+    console.log('[Google Ads] GET', listUrl);
+    const listRes  = await _fetchWithTimeout(listUrl, { headers });
+
+    const listCT   = listRes.headers.get('content-type') || '';
+    const listText = await listRes.text();
+    console.log('[Google Ads] listAccessibleCustomers status:', listRes.status);
+    console.log('[Google Ads] listAccessibleCustomers content-type:', listCT);
+    console.log('[Google Ads] listAccessibleCustomers body:', listText.slice(0, 500));
+
     if (!listRes.ok) {
-      const msg = (listData.error && listData.error.message) ? listData.error.message : 'Google Ads API error ' + listRes.status;
+      let msg = 'Google Ads API error ' + listRes.status;
+      if (listCT.includes('application/json')) {
+        try { const j = JSON.parse(listText); msg = (j.error && j.error.message) ? j.error.message : msg; } catch (_) {}
+      }
       return { accounts: [], error: msg };
+    }
+
+    if (!listCT.includes('application/json')) {
+      return { accounts: [], error: 'Unexpected content-type from Google Ads API: ' + listCT + ' | body: ' + listText.slice(0, 200) };
+    }
+
+    let listData;
+    try { listData = JSON.parse(listText); } catch (parseErr) {
+      return { accounts: [], error: 'JSON parse failed: ' + parseErr.message + ' | body: ' + listText.slice(0, 200) };
     }
     resourceNames = listData.resourceNames || [];
   } catch (err) {
     const msg = err.name === 'AbortError' ? 'Google Ads API timed out (>10 s)' : 'Network error: ' + err.message;
-    console.error('[Google Ads] listAccessibleCustomers threw:', msg);
+    console.error('[Google Ads] listAccessibleCustomers threw:', err.name, msg);
     return { accounts: [], error: msg };
   }
 
@@ -2987,8 +3002,10 @@ async function _fetchGoogleAdsAccounts(accessToken) {
   const accounts = [];
   for (const customerId of customerIds.slice(0, 20)) {
     try {
+      const searchUrl = 'https://googleads.googleapis.com/v17/customers/' + customerId + '/googleAds:search';
+      console.log('[Google Ads] POST', searchUrl);
       const searchRes = await _fetchWithTimeout(
-        'https://googleads.googleapis.com/v17/customers/' + customerId + '/googleAds:search',
+        searchUrl,
         {
           method:  'POST',
           headers: Object.assign({ 'Content-Type': 'application/json', 'login-customer-id': customerId }, headers),
@@ -2997,23 +3014,29 @@ async function _fetchGoogleAdsAccounts(accessToken) {
           })
         }
       );
-      if (searchRes.ok) {
-        const sd      = await searchRes.json();
-        const results = sd.results || [];
-        const c       = (results.length > 0 && results[0].customer) ? results[0].customer : null;
-        accounts.push({
-          customer_id: customerId,
-          name:        (c && c.descriptiveName) ? c.descriptiveName : customerId,
-          currency:    (c && c.currencyCode)    ? c.currencyCode    : null,
-          timezone:    (c && c.timeZone)        ? c.timeZone        : null
-        });
+      const searchCT   = searchRes.headers.get('content-type') || '';
+      const searchText = await searchRes.text();
+      console.log('[Google Ads] search', customerId, 'status:', searchRes.status, '| ct:', searchCT, '| body:', searchText.slice(0, 300));
+
+      if (searchRes.ok && searchCT.includes('application/json')) {
+        try {
+          const sd      = JSON.parse(searchText);
+          const results = sd.results || [];
+          const c       = (results.length > 0 && results[0].customer) ? results[0].customer : null;
+          accounts.push({
+            customer_id: customerId,
+            name:        (c && c.descriptiveName) ? c.descriptiveName : customerId,
+            currency:    (c && c.currencyCode)    ? c.currencyCode    : null,
+            timezone:    (c && c.timeZone)        ? c.timeZone        : null
+          });
+        } catch (_) {
+          accounts.push({ customer_id: customerId, name: customerId, currency: null, timezone: null });
+        }
       } else {
-        const errBody = await searchRes.text().catch(function() { return ''; });
-        console.warn('[Google Ads] search failed for', customerId, ':', searchRes.status, errBody.slice(0, 200));
         accounts.push({ customer_id: customerId, name: customerId, currency: null, timezone: null });
       }
     } catch (err) {
-      console.warn('[Google Ads] search threw for', customerId, ':', err.message);
+      console.warn('[Google Ads] search threw for', customerId, ':', err.name, err.message);
       accounts.push({ customer_id: customerId, name: customerId, currency: null, timezone: null });
     }
   }
