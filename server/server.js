@@ -2941,35 +2941,53 @@ const GOOGLE_ADS_DEVELOPER_TOKEN = process.env.GOOGLE_ADS_DEVELOPER_TOKEN || '';
 // Returns { accounts: [{customer_id, name, currency, timezone}], error }
 async function _fetchGoogleAdsAccounts(accessToken) {
   if (!GOOGLE_ADS_DEVELOPER_TOKEN) {
+    console.warn('[Google Ads] GOOGLE_ADS_DEVELOPER_TOKEN not set — skipping account fetch');
     return { accounts: [], error: 'GOOGLE_ADS_DEVELOPER_TOKEN not configured' };
   }
+
+  const GADS_TIMEOUT_MS = 10000; // 10 s — well inside Render's 30 s limit
   const headers = {
-    'Authorization':  'Bearer ' + accessToken,
+    'Authorization':   'Bearer ' + accessToken,
     'developer-token': GOOGLE_ADS_DEVELOPER_TOKEN
   };
+
+  function _fetchWithTimeout(url, opts) {
+    const ctrl = new AbortController();
+    const tid   = setTimeout(function() { ctrl.abort(); }, GADS_TIMEOUT_MS);
+    return fetch(url, Object.assign({}, opts, { signal: ctrl.signal }))
+      .finally(function() { clearTimeout(tid); });
+  }
 
   // Step 1 — list all customer resource names the token can access
   let resourceNames;
   try {
-    const listRes  = await fetch('https://googleads.googleapis.com/v17/customers:listAccessibleCustomers', { headers });
+    console.log('[Google Ads] calling listAccessibleCustomers…');
+    const listRes  = await _fetchWithTimeout(
+      'https://googleads.googleapis.com/v17/customers:listAccessibleCustomers',
+      { headers }
+    );
     const listData = await listRes.json();
+    console.log('[Google Ads] listAccessibleCustomers status:', listRes.status, '| body:', JSON.stringify(listData).slice(0, 300));
     if (!listRes.ok) {
-      console.error('[Google Ads] listAccessibleCustomers error:', JSON.stringify(listData));
-      return { accounts: [], error: listData.error?.message || 'Google Ads API error' };
+      const msg = (listData.error && listData.error.message) ? listData.error.message : 'Google Ads API error ' + listRes.status;
+      return { accounts: [], error: msg };
     }
     resourceNames = listData.resourceNames || [];
   } catch (err) {
-    return { accounts: [], error: 'Network error: ' + err.message };
+    const msg = err.name === 'AbortError' ? 'Google Ads API timed out (>10 s)' : 'Network error: ' + err.message;
+    console.error('[Google Ads] listAccessibleCustomers threw:', msg);
+    return { accounts: [], error: msg };
   }
 
   const customerIds = resourceNames.map(function(r) { return r.replace('customers/', ''); });
+  console.log('[Google Ads] accessible customer IDs:', customerIds);
   if (customerIds.length === 0) return { accounts: [], error: null };
 
-  // Step 2 — fetch name + currency for each customer (up to 20)
+  // Step 2 — fetch descriptive name + currency for each customer (up to 20)
   const accounts = [];
   for (const customerId of customerIds.slice(0, 20)) {
     try {
-      const searchRes = await fetch(
+      const searchRes = await _fetchWithTimeout(
         'https://googleads.googleapis.com/v17/customers/' + customerId + '/googleAds:search',
         {
           method:  'POST',
@@ -2982,7 +3000,7 @@ async function _fetchGoogleAdsAccounts(accessToken) {
       if (searchRes.ok) {
         const sd      = await searchRes.json();
         const results = sd.results || [];
-        const c       = results.length > 0 ? results[0].customer : null;
+        const c       = (results.length > 0 && results[0].customer) ? results[0].customer : null;
         accounts.push({
           customer_id: customerId,
           name:        (c && c.descriptiveName) ? c.descriptiveName : customerId,
@@ -2990,14 +3008,17 @@ async function _fetchGoogleAdsAccounts(accessToken) {
           timezone:    (c && c.timeZone)        ? c.timeZone        : null
         });
       } else {
+        const errBody = await searchRes.text().catch(function() { return ''; });
+        console.warn('[Google Ads] search failed for', customerId, ':', searchRes.status, errBody.slice(0, 200));
         accounts.push({ customer_id: customerId, name: customerId, currency: null, timezone: null });
       }
-    } catch (_) {
+    } catch (err) {
+      console.warn('[Google Ads] search threw for', customerId, ':', err.message);
       accounts.push({ customer_id: customerId, name: customerId, currency: null, timezone: null });
     }
   }
 
-  console.log('[Google Ads] Fetched', accounts.length, 'accounts for', customerIds.length, 'customer IDs');
+  console.log('[Google Ads] final accounts:', JSON.stringify(accounts));
   return { accounts, error: null };
 }
 
@@ -3146,58 +3167,79 @@ app.get('/api/google/status', async (req, res) => {
 
 // GET /api/google/accounts — re-fetch accessible Google Ads accounts and store them
 app.get('/api/google/accounts', async (req, res) => {
-  const user = await getUserFromToken(req);
-  if (!user) return res.status(401).json({ error: 'Authentication required' });
+  console.log('[Accounts] request received');
+  try {
+    const user = await getUserFromToken(req);
+    if (!user) return res.status(401).json({ error: 'Authentication required' });
+    console.log('[Accounts] user:', user.id);
 
-  const { data: integration, error: fetchErr } = await supabaseAdmin
-    .from('integrations')
-    .select('access_token, refresh_token, token_expiry')
-    .eq('user_id', user.id)
-    .eq('provider', 'google_ads')
-    .maybeSingle();
+    const { data: integration, error: fetchErr } = await supabaseAdmin
+      .from('integrations')
+      .select('access_token, refresh_token, token_expiry')
+      .eq('user_id', user.id)
+      .eq('provider', 'google_ads')
+      .maybeSingle();
 
-  if (fetchErr) return res.status(500).json({ error: 'Database error' });
-  if (!integration) return res.status(404).json({ error: 'Google Ads not connected' });
-
-  // Refresh access token if expired
-  let accessToken = integration.access_token;
-  if (integration.token_expiry && new Date(integration.token_expiry) < new Date()) {
-    if (!integration.refresh_token) return res.status(401).json({ error: 'Token expired — reconnect Google Ads' });
-    try {
-      const refreshRes  = await fetch('https://oauth2.googleapis.com/token', {
-        method:  'POST',
-        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-        body:    new URLSearchParams({
-          client_id:     GOOGLE_CLIENT_ID,
-          client_secret: GOOGLE_CLIENT_SECRET,
-          refresh_token: integration.refresh_token,
-          grant_type:    'refresh_token'
-        }).toString()
-      });
-      const refreshed = await refreshRes.json();
-      if (refreshed.error) return res.status(401).json({ error: 'Token refresh failed — reconnect Google Ads' });
-      accessToken = refreshed.access_token;
-      await supabaseAdmin.from('integrations').update({
-        access_token: refreshed.access_token,
-        token_expiry: new Date(Date.now() + (refreshed.expires_in || 3600) * 1000).toISOString()
-      }).eq('user_id', user.id).eq('provider', 'google_ads');
-    } catch (err) {
-      return res.status(500).json({ error: 'Token refresh network error' });
+    if (fetchErr) {
+      console.error('[Accounts] DB fetch error:', fetchErr.message);
+      return res.status(500).json({ error: 'Database error', detail: fetchErr.message });
     }
+    if (!integration) return res.status(404).json({ error: 'Google Ads not connected' });
+    console.log('[Accounts] integration found, token_expiry:', integration.token_expiry);
+
+    // Refresh access token if expired
+    let accessToken = integration.access_token;
+    if (integration.token_expiry && new Date(integration.token_expiry) < new Date()) {
+      if (!integration.refresh_token) return res.status(401).json({ error: 'Token expired — reconnect Google Ads' });
+      console.log('[Accounts] token expired, refreshing…');
+      try {
+        const refreshRes = await fetch('https://oauth2.googleapis.com/token', {
+          method:  'POST',
+          headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+          body:    new URLSearchParams({
+            client_id:     GOOGLE_CLIENT_ID,
+            client_secret: GOOGLE_CLIENT_SECRET,
+            refresh_token: integration.refresh_token,
+            grant_type:    'refresh_token'
+          }).toString()
+        });
+        const refreshed = await refreshRes.json();
+        if (refreshed.error) {
+          console.error('[Accounts] token refresh failed:', refreshed.error);
+          return res.status(401).json({ error: 'Token refresh failed — reconnect Google Ads' });
+        }
+        accessToken = refreshed.access_token;
+        await supabaseAdmin.from('integrations').update({
+          access_token: refreshed.access_token,
+          token_expiry: new Date(Date.now() + (refreshed.expires_in || 3600) * 1000).toISOString()
+        }).eq('user_id', user.id).eq('provider', 'google_ads');
+        console.log('[Accounts] token refreshed OK');
+      } catch (err) {
+        console.error('[Accounts] token refresh threw:', err.message);
+        return res.status(500).json({ error: 'Token refresh network error' });
+      }
+    }
+
+    console.log('[Accounts] calling _fetchGoogleAdsAccounts…');
+    const { accounts, error: gadsErr } = await _fetchGoogleAdsAccounts(accessToken);
+    console.log('[Accounts] result — accounts:', accounts.length, '| error:', gadsErr);
+
+    if (gadsErr && accounts.length === 0) {
+      return res.status(503).json({ error: gadsErr });
+    }
+
+    // Persist updated account list (non-fatal if column not yet migrated)
+    const { error: updateErr } = await supabaseAdmin.from('integrations')
+      .update({ google_ads_accounts: accounts })
+      .eq('user_id', user.id)
+      .eq('provider', 'google_ads');
+    if (updateErr) console.warn('[Accounts] update warning (column missing?):', updateErr.message);
+
+    res.json({ accounts });
+  } catch (err) {
+    console.error('[Accounts] unexpected error:', err.message, err.stack);
+    res.status(500).json({ error: 'Internal server error', detail: err.message });
   }
-
-  const { accounts, error: gadsErr } = await _fetchGoogleAdsAccounts(accessToken);
-  if (gadsErr && accounts.length === 0) {
-    return res.status(503).json({ error: gadsErr });
-  }
-
-  // Persist updated account list
-  await supabaseAdmin.from('integrations')
-    .update({ google_ads_accounts: accounts })
-    .eq('user_id', user.id)
-    .eq('provider', 'google_ads');
-
-  res.json({ accounts });
 });
 
 // POST /api/google/disconnect — revoke and delete integration
@@ -3227,6 +3269,34 @@ app.post('/api/google/disconnect', async (req, res) => {
 
   console.log('[Google OAuth] Disconnected | user:', user.id);
   res.json({ success: true });
+});
+
+// GET /api/google/diag — non-destructive diagnostic: token state + dev token presence
+app.get('/api/google/diag', async (req, res) => {
+  try {
+    const user = await getUserFromToken(req);
+    if (!user) return res.status(401).json({ error: 'Authentication required' });
+
+    const { data, error } = await supabaseAdmin
+      .from('integrations')
+      .select('google_email, token_expiry, refresh_token, google_ads_accounts')
+      .eq('user_id', user.id)
+      .eq('provider', 'google_ads')
+      .maybeSingle();
+
+    res.json({
+      dev_token_set:        !!GOOGLE_ADS_DEVELOPER_TOKEN,
+      connected:            !!data && !error,
+      db_error:             error ? error.message : null,
+      google_email:         data ? data.google_email : null,
+      token_expired:        data && data.token_expiry ? new Date(data.token_expiry) < new Date() : null,
+      has_refresh_token:    data ? !!data.refresh_token : null,
+      stored_accounts:      data ? (data.google_ads_accounts || []) : [],
+      google_ads_col_exists: error ? false : data !== undefined
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
 });
 
 // GET /api/debug/routes — list all registered Express routes
