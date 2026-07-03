@@ -123,6 +123,13 @@ const supabaseAdmin = createClient(
     console.log('✅ [ENV] SMTP configured for', process.env.SMTP_USER);
   }
 
+  // ── Google OAuth ──────────────────────────────────────────────────
+  if (!process.env.GOOGLE_CLIENT_ID || !process.env.GOOGLE_CLIENT_SECRET) {
+    console.warn('⚠️  [ENV] GOOGLE_CLIENT_ID / GOOGLE_CLIENT_SECRET not set — Google Ads OAuth disabled');
+  } else {
+    console.log('✅ [ENV] Google OAuth configured | redirect:', process.env.GOOGLE_REDIRECT_URI || '(GOOGLE_REDIRECT_URI not set)');
+  }
+
   console.log('═══════════════════════════════════════════════════\n');
 })();
 
@@ -319,7 +326,7 @@ app.use(express.json({ limit: '20mb' }));
 app.use(express.urlencoded({ limit: '20mb', extended: true }));
 
 // ── Web generator — registered immediately after json middleware ──
-app.post('/api/generate-web', requireSubIfAuthed, async (req, res) => {
+app.post('/api/generate-web', async (req, res) => {
   const {
     brand_name, product, goal,
     style, animations, sections,
@@ -643,7 +650,7 @@ async function _briefToImagePrompt(brief, contextHint, taskType) {
   return _aimlText(taskType || 'visuals-copy', system, user, { max_tokens: 300 });
 }
 
-app.post('/api/generate-text', requireSubIfAuthed, async (req, res) => {
+app.post('/api/generate-text', async (req, res) => {
   const { prompt, type, brandContext } = req.body;
   if (!prompt) return res.status(400).json({ error: 'prompt is required' });
 
@@ -684,7 +691,7 @@ Be specific and direct. No preamble or filler.${hasBrand ? `\n\nBRAND CONTEXT:\n
 // ── Email Designer — Anthropic ─────────────────────────────────
 // Used by: Email Designer generator
 // Receives: { prompt }  Returns: { html }
-app.post('/api/generate-email', requireSubIfAuthed, async (req, res) => {
+app.post('/api/generate-email', async (req, res) => {
   const { prompt } = req.body;
   if (!prompt) return res.status(400).json({ error: 'prompt is required' });
 
@@ -968,7 +975,7 @@ app.post('/api/generate-image', requireSubIfAuthed, async (req, res) => {
 // Receives: { prompt, size, adFormat }
 // Steps 1 and 2 (copy + visual prompt) run in parallel via Promise.all
 // to minimise total latency before DALL-E is called.
-app.post('/api/generate-ad', requireSubIfAuthed, async (req, res) => {
+app.post('/api/generate-ad', async (req, res) => {
   const { prompt, size, adFormat } = req.body;
   if (!prompt) return res.status(400).json({ error: 'prompt is required' });
 
@@ -1719,19 +1726,22 @@ app.post('/api/signup', async (req, res) => {
   const user = authData.user;
   const verificationToken = crypto.randomBytes(32).toString('hex');
 
-  // Create profile row (email_verified: false — user must confirm within 14 days)
-  const { error: profileError } = await supabaseAdmin.from('profiles').insert({
+  // Upsert profile row — using upsert (not insert) so a Supabase auth trigger that
+  // pre-creates the row cannot block the write or leave a stale subscription_status.
+  const { error: profileError } = await supabaseAdmin.from('profiles').upsert({
     id:                   user.id,
     first_name:           firstName,
     last_name:            lastName || null,
     email,
     phone:                phone || null,
+    subscription_status:  'free',
     email_verified:        false,
     onboarding_completed:  false,
     verification_token:    verificationToken,
     verification_sent_at:  new Date().toISOString()
-  });
-  if (profileError) console.warn('[Signup] Profile insert warning:', profileError.message);
+  }, { onConflict: 'id' });
+  if (profileError) console.error('[Signup] Profile upsert error:', profileError.message);
+  else console.log('[Signup] Profile upserted with subscription_status=free for user:', user.id);
 
   // Send verification email (best-effort — signup succeeds even if email fails)
   const smtpUser = process.env.SMTP_USER;
@@ -2605,6 +2615,294 @@ Output ONLY the prompt. 2–3 sentences. No quotes, no preamble.`;
   }
 });
 
+// ── POST /api/daily-brief ─────────────────────────────────────────
+app.post('/api/daily-brief', requireSubIfAuthed, async (req, res) => {
+  const { brandCore, marketContext, competitorContext, opportunityContext } = req.body;
+
+  const ctxLines = [];
+  if (brandCore) {
+    if (brandCore.name)        ctxLines.push(`Brand: ${brandCore.name}`);
+    if (brandCore.ind)         ctxLines.push(`Industry: ${brandCore.ind}`);
+    if (brandCore.positioning || brandCore.promise) ctxLines.push(`Positioning: ${brandCore.positioning || brandCore.promise}`);
+    if (brandCore.audience)    ctxLines.push(`Audience: ${brandCore.audience}`);
+    if (brandCore.tagline)     ctxLines.push(`Tagline: ${brandCore.tagline}`);
+  }
+  if (marketContext)     ctxLines.push(`Market context: ${marketContext}`);
+  if (competitorContext) ctxLines.push(`Competitor insight: ${competitorContext}`);
+  if (opportunityContext) ctxLines.push(`Top opportunity: ${opportunityContext}`);
+
+  const today = new Date().toLocaleDateString('en-US', { weekday:'long', year:'numeric', month:'long', day:'numeric' });
+
+  const system = `You are the Brand Brain daily intelligence system for a brand strategist.
+
+Today is ${today}. Generate a concise morning brief for this brand — a strategic starting point for the day.
+
+Return ONLY valid JSON with zero markdown:
+
+{
+  "date": "${today}",
+  "headline": "One punchy sentence that captures the brand's most important focus today (max 12 words)",
+  "items": [
+    { "type": "insight | action | alert", "title": "Short title (4-6 words)", "body": "1-2 sentences. Specific and actionable." },
+    { "type": "insight | action | alert", "title": "...", "body": "..." },
+    { "type": "insight | action | alert", "title": "...", "body": "..." },
+    { "type": "action", "title": "...", "body": "..." }
+  ],
+  "focus": "One strategic sentence: the single most important thing for this brand to focus on today"
+}
+
+Rules:
+- Include exactly 4 items. Mix types: at least 1 insight, 1 action, 1 alert
+- Be specific to this brand — no generic advice
+- If limited context: focus on brand-building fundamentals appropriate to their stage
+- The focus line should feel like a clear directive, not a question`;
+
+  const userMsg = ctxLines.length
+    ? `Brand context:\n${ctxLines.join('\n')}`
+    : 'No brand context provided — generate a brief for an early-stage brand getting started.';
+
+  try {
+    const raw = await _aimlText('daily-brief', system, userMsg, { max_tokens: 800 });
+    const cleaned = raw.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '').trim();
+    let brief;
+    try {
+      brief = JSON.parse(cleaned);
+    } catch {
+      console.error('[DailyBrief] JSON parse failed:', cleaned.slice(0, 200));
+      return res.status(500).json({ error: 'Failed to parse daily brief' });
+    }
+    console.log('[DailyBrief] Generated for:', brandCore && brandCore.name);
+    res.json(brief);
+  } catch (err) {
+    console.error('[DailyBrief] AIML error:', err.message);
+    res.status(500).json({ error: 'Failed to generate daily brief' });
+  }
+});
+
+// ── POST /api/website-monitor ─────────────────────────────────────
+app.post('/api/website-monitor', requireSubIfAuthed, async (req, res) => {
+  const { url, brandCore } = req.body;
+
+  if (!url || typeof url !== 'string' || !url.trim()) {
+    return res.status(400).json({ error: 'A website URL is required' });
+  }
+
+  const bcLines = [];
+  if (brandCore) {
+    if (brandCore.name)        bcLines.push(`Brand Name: ${brandCore.name}`);
+    if (brandCore.tagline)     bcLines.push(`Tagline: ${brandCore.tagline}`);
+    if (brandCore.positioning || brandCore.promise) bcLines.push(`Positioning: ${brandCore.positioning || brandCore.promise}`);
+    if (brandCore.audience)    bcLines.push(`Target Audience: ${brandCore.audience}`);
+    if (brandCore.toneOfVoice) bcLines.push(`Tone of Voice: ${brandCore.toneOfVoice}`);
+    if (brandCore.personality) bcLines.push(`Personality: ${Array.isArray(brandCore.personality) ? brandCore.personality.join(', ') : brandCore.personality}`);
+    if (brandCore.ind)         bcLines.push(`Industry: ${brandCore.ind}`);
+  }
+
+  const system = `You are a senior brand consistency analyst.
+
+Analyze the website at the given URL using your knowledge of that brand's public web presence and messaging. Compare it against the provided Brand Core to assess brand consistency.
+
+Return ONLY valid JSON with zero markdown:
+
+{
+  "url": "cleaned URL",
+  "score": 0-100,
+  "grade": "A | B | C | D | F",
+  "summary": "2-3 sentence overall assessment",
+  "strengths": [
+    "Specific strength (1 sentence each)",
+    "...",
+    "..."
+  ],
+  "issues": [
+    { "area": "Area name (e.g. Messaging, Visual, Tone)", "severity": "high | medium | low", "desc": "What the issue is and why it matters (1-2 sentences)" },
+    { "area": "...", "severity": "...", "desc": "..." }
+  ],
+  "recommendations": [
+    "Specific, actionable recommendation (1 sentence)",
+    "...",
+    "..."
+  ]
+}
+
+Rules:
+- Score reflects how consistently the website reflects the Brand Core values and positioning
+- If no Brand Core: assess against general brand best practices and the brand's own implied identity
+- Identify 2-4 strengths and 2-5 issues
+- Issues should be ordered by severity (high first)
+- Recommendations should be concrete and prioritized`;
+
+  const userMsg = `Website URL: ${url.trim()}\n\n${bcLines.length ? `Brand Core:\n${bcLines.join('\n')}` : 'No brand core — assess against best practices.'}`;
+
+  try {
+    const raw = await _aimlText('website-monitor', system, userMsg, { max_tokens: 1200 });
+    const cleaned = raw.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '').trim();
+    let report;
+    try {
+      report = JSON.parse(cleaned);
+    } catch {
+      console.error('[WebsiteMonitor] JSON parse failed:', cleaned.slice(0, 200));
+      return res.status(500).json({ error: 'Failed to parse website report' });
+    }
+    console.log('[WebsiteMonitor] Analysis complete for:', url);
+    res.json(report);
+  } catch (err) {
+    console.error('[WebsiteMonitor] AIML error:', err.message);
+    res.status(500).json({ error: 'Failed to monitor website' });
+  }
+});
+
+// ── POST /api/market-research ─────────────────────────────────────
+app.post('/api/market-research', requireSubIfAuthed, async (req, res) => {
+  const { brandCore } = req.body;
+
+  const bcLines = [];
+  if (brandCore) {
+    if (brandCore.name)        bcLines.push(`Brand Name: ${brandCore.name}`);
+    if (brandCore.ind)         bcLines.push(`Industry: ${brandCore.ind}`);
+    if (brandCore.desc)        bcLines.push(`Description: ${brandCore.desc}`);
+    if (brandCore.positioning) bcLines.push(`Positioning: ${brandCore.positioning}`);
+    if (brandCore.promise)     bcLines.push(`Promise: ${brandCore.promise}`);
+    if (brandCore.audience)    bcLines.push(`Target Audience: ${brandCore.audience}`);
+    if (brandCore.tagline)     bcLines.push(`Tagline: ${brandCore.tagline}`);
+  }
+
+  const system = `You are a world-class market research analyst and brand strategist.
+
+Analyze the market the provided brand operates in. Produce a structured intelligence report covering market dynamics, key trends, audience segments, and competitive landscape.
+
+Return ONLY valid JSON with zero markdown, matching this exact structure:
+
+{
+  "market": {
+    "name": "Market / industry name (3–5 words)",
+    "size": "Market scale description (e.g. '$12B global market')",
+    "growth": "Growth trajectory (e.g. 'Growing 18% YoY')",
+    "maturity": "emerging | growing | mature | declining"
+  },
+  "trends": [
+    { "title": "Short trend name (3–5 words)", "desc": "2–3 sentence explanation of the trend and its relevance", "impact": "high | medium | low" },
+    { "title": "...", "desc": "...", "impact": "..." },
+    { "title": "...", "desc": "...", "impact": "..." },
+    { "title": "...", "desc": "...", "impact": "..." }
+  ],
+  "segments": [
+    { "name": "Segment name", "desc": "2-sentence description of this audience segment", "fit": "Strong fit | Medium fit | Weak fit" },
+    { "name": "...", "desc": "...", "fit": "..." },
+    { "name": "...", "desc": "...", "fit": "..." }
+  ],
+  "competitive": {
+    "intensity": "high | medium | low",
+    "dynamics": "3–4 sentence summary of the competitive landscape",
+    "whitespace": "Key underserved gap or opportunity area (1 sentence)"
+  },
+  "summary": "3–4 sentence strategic summary of the market and the brand's position within it"
+}
+
+Rules:
+- Be specific to the actual industry — no generic boilerplate
+- All trend, segment, and competitive data should be actionable
+- Tailor segments and whitespace to the brand's specific positioning`;
+
+  const userMsg = bcLines.length
+    ? `Brand Core:\n${bcLines.join('\n')}`
+    : 'No brand core provided — analyze a general D2C brand in a competitive consumer market.';
+
+  try {
+    const raw = await _aimlText('market-research', system, userMsg, { max_tokens: 1800 });
+    const cleaned = raw.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '').trim();
+    let report;
+    try {
+      report = JSON.parse(cleaned);
+    } catch {
+      console.error('[MarketResearch] JSON parse failed:', cleaned.slice(0, 200));
+      return res.status(500).json({ error: 'Failed to parse market research' });
+    }
+    console.log('[MarketResearch] Complete for:', brandCore && brandCore.name);
+    res.json(report);
+  } catch (err) {
+    console.error('[MarketResearch] AIML error:', err.message);
+    res.status(500).json({ error: 'Failed to generate market research' });
+  }
+});
+
+// ── POST /api/opportunities ────────────────────────────────────────
+app.post('/api/opportunities', requireSubIfAuthed, async (req, res) => {
+  const { brandCore, marketResearch, competitorReport } = req.body;
+
+  const ctxLines = [];
+  if (brandCore) {
+    if (brandCore.name)        ctxLines.push(`Brand: ${brandCore.name}`);
+    if (brandCore.ind)         ctxLines.push(`Industry: ${brandCore.ind}`);
+    if (brandCore.positioning) ctxLines.push(`Positioning: ${brandCore.positioning}`);
+    if (brandCore.promise)     ctxLines.push(`Promise: ${brandCore.promise}`);
+    if (brandCore.audience)    ctxLines.push(`Audience: ${brandCore.audience}`);
+    if (brandCore.tagline)     ctxLines.push(`Tagline: ${brandCore.tagline}`);
+    if (brandCore.personality) ctxLines.push(`Personality: ${Array.isArray(brandCore.personality) ? brandCore.personality.join(', ') : brandCore.personality}`);
+  }
+  if (marketResearch && marketResearch.competitive && marketResearch.competitive.whitespace) {
+    ctxLines.push(`Market Whitespace: ${marketResearch.competitive.whitespace}`);
+  }
+  if (marketResearch && marketResearch.market) {
+    ctxLines.push(`Market Maturity: ${marketResearch.market.maturity}`);
+  }
+  if (competitorReport && competitorReport.differentiation) {
+    ctxLines.push(`Competitor Advantage: ${competitorReport.differentiation.theyOwn}`);
+    ctxLines.push(`Brand Advantage vs Competitor: ${competitorReport.differentiation.youOwn}`);
+    if (competitorReport.differentiation.opportunity) {
+      ctxLines.push(`Competitor Gap: ${competitorReport.differentiation.opportunity}`);
+    }
+  }
+
+  const system = `You are a world-class brand strategist and growth advisor.
+
+Identify 5 high-leverage strategic opportunities for the provided brand. Base your analysis on their positioning, market context, competitive landscape, and audience fit.
+
+Return ONLY valid JSON with zero markdown, matching this exact structure:
+
+{
+  "opportunities": [
+    {
+      "title": "Short opportunity title (4–7 words)",
+      "category": "content | product | market | partnership | positioning | community",
+      "desc": "2–3 sentences describing the opportunity and why it exists now",
+      "why": "1 sentence: why this specific brand is positioned to capture it",
+      "effort": "low | medium | high",
+      "impact": "low | medium | high",
+      "action": "Specific, actionable first step (1 sentence starting with a verb)"
+    }
+  ],
+  "summary": "2–3 sentence strategic overview of the opportunity landscape for this brand"
+}
+
+Rules:
+- All 5 opportunities must be distinct categories
+- Be specific to this brand — no generic 'improve your social media' suggestions
+- Rank opportunities from highest impact to lowest in the array
+- Every 'action' must be a concrete, executable next step`;
+
+  const userMsg = ctxLines.length
+    ? `Context:\n${ctxLines.join('\n')}`
+    : 'No context provided — identify opportunities for an early-stage consumer brand in a competitive market.';
+
+  try {
+    const raw = await _aimlText('opportunities', system, userMsg, { max_tokens: 1600 });
+    const cleaned = raw.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '').trim();
+    let report;
+    try {
+      report = JSON.parse(cleaned);
+    } catch {
+      console.error('[Opportunities] JSON parse failed:', cleaned.slice(0, 200));
+      return res.status(500).json({ error: 'Failed to parse opportunities' });
+    }
+    console.log('[Opportunities] Complete for:', brandCore && brandCore.name);
+    res.json(report);
+  } catch (err) {
+    console.error('[Opportunities] AIML error:', err.message);
+    res.status(500).json({ error: 'Failed to generate opportunities' });
+  }
+});
+
 // ── Public routes — all served by index.html (router handles view) ──
 app.get('/signup',     function(req, res) { res.sendFile(path.resolve(__dirname, '..', '..', 'index.html')); });
 app.get('/login',      function(req, res) { res.sendFile(path.resolve(__dirname, '..', '..', 'index.html')); });
@@ -2665,6 +2963,192 @@ cron.schedule('0 2 * * *', async () => {
     console.error('[Cron] Unexpected error:', err.message);
   }
 }, { timezone: 'UTC' });
+
+
+// ════════════════════════════════════════════════════════════════
+// GOOGLE ADS OAUTH
+// ════════════════════════════════════════════════════════════════
+
+const GOOGLE_CLIENT_ID     = process.env.GOOGLE_CLIENT_ID     || '';
+const GOOGLE_CLIENT_SECRET = process.env.GOOGLE_CLIENT_SECRET || '';
+const GOOGLE_REDIRECT_URI  = process.env.GOOGLE_REDIRECT_URI  || 'http://localhost:5500/auth/google/callback';
+
+const GOOGLE_SCOPES = [
+  'openid',
+  'email',
+  'profile',
+  'https://www.googleapis.com/auth/adwords'
+].join(' ');
+
+// State store: random hex → { userId, expires }. Expires after 10 min.
+const _googleOAuthStates = new Map();
+setInterval(function() {
+  const now = Date.now();
+  for (const [k, v] of _googleOAuthStates.entries()) {
+    if (v.expires < now) _googleOAuthStates.delete(k);
+  }
+}, 5 * 60 * 1000);
+
+// GET /api/google/auth-url — authenticated, returns the Google OAuth URL
+app.get('/api/google/auth-url', async (req, res) => {
+  const user = await getUserFromToken(req);
+  if (!user) return res.status(401).json({ error: 'Authentication required' });
+  if (!GOOGLE_CLIENT_ID || !GOOGLE_CLIENT_SECRET) {
+    return res.status(503).json({ error: 'Google OAuth not configured on server' });
+  }
+  const state = crypto.randomBytes(16).toString('hex');
+  _googleOAuthStates.set(state, { userId: user.id, expires: Date.now() + 10 * 60 * 1000 });
+  const params = new URLSearchParams({
+    client_id:     GOOGLE_CLIENT_ID,
+    redirect_uri:  GOOGLE_REDIRECT_URI,
+    response_type: 'code',
+    scope:         GOOGLE_SCOPES,
+    access_type:   'offline',
+    prompt:        'consent',
+    state:         state
+  });
+  res.json({ url: 'https://accounts.google.com/o/oauth2/v2/auth?' + params.toString() });
+});
+
+// GET /auth/google/callback — OAuth callback from Google
+app.get('/auth/google/callback', async (req, res) => {
+  const { code, state, error } = req.query;
+  const frontendBase = process.env.FRONTEND_URL || 'https://orivenai.com';
+
+  if (error) {
+    console.error('[Google OAuth] Denied or error:', error);
+    return res.redirect(frontendBase + '/app.html?google_error=' + encodeURIComponent(error));
+  }
+  if (!code || !state) {
+    return res.redirect(frontendBase + '/app.html?google_error=missing_params');
+  }
+
+  // Validate state
+  const stateData = _googleOAuthStates.get(state);
+  if (!stateData || stateData.expires < Date.now()) {
+    _googleOAuthStates.delete(state);
+    return res.redirect(frontendBase + '/app.html?google_error=invalid_state');
+  }
+  _googleOAuthStates.delete(state);
+  const userId = stateData.userId;
+
+  // Exchange authorization code for tokens
+  let tokens;
+  try {
+    const tokenRes = await fetch('https://oauth2.googleapis.com/token', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({
+        code,
+        client_id:     GOOGLE_CLIENT_ID,
+        client_secret: GOOGLE_CLIENT_SECRET,
+        redirect_uri:  GOOGLE_REDIRECT_URI,
+        grant_type:    'authorization_code'
+      }).toString()
+    });
+    tokens = await tokenRes.json();
+    if (tokens.error) {
+      console.error('[Google OAuth] Token exchange error:', tokens.error, tokens.error_description);
+      return res.redirect(frontendBase + '/app.html?google_error=token_exchange');
+    }
+  } catch (err) {
+    console.error('[Google OAuth] Token exchange network error:', err.message);
+    return res.redirect(frontendBase + '/app.html?google_error=network');
+  }
+
+  // Fetch Google profile email
+  let googleEmail = null;
+  try {
+    const profileRes = await fetch('https://www.googleapis.com/oauth2/v3/userinfo', {
+      headers: { Authorization: 'Bearer ' + tokens.access_token }
+    });
+    const profile = await profileRes.json();
+    googleEmail = profile.email || null;
+  } catch (_) {}
+
+  // Store tokens in Supabase integrations table
+  const tokenExpiry = tokens.expires_in
+    ? new Date(Date.now() + tokens.expires_in * 1000).toISOString()
+    : null;
+
+  const { error: dbError } = await supabaseAdmin
+    .from('integrations')
+    .upsert({
+      user_id:       userId,
+      provider:      'google_ads',
+      google_email:  googleEmail,
+      access_token:  tokens.access_token,
+      refresh_token: tokens.refresh_token || null,
+      token_expiry:  tokenExpiry,
+      connected_at:  new Date().toISOString()
+    }, { onConflict: 'user_id,provider' });
+
+  if (dbError) {
+    console.error('[Google OAuth] DB upsert error:', dbError.message);
+    return res.redirect(frontendBase + '/app.html?google_error=db');
+  }
+
+  console.log('[Google OAuth] ✅ Connected | user:', userId, '| email:', googleEmail);
+  return res.redirect(frontendBase + '/app.html?google_connected=1');
+});
+
+// GET /api/google/status — return connection status for the authenticated user
+app.get('/api/google/status', async (req, res) => {
+  const user = await getUserFromToken(req);
+  if (!user) return res.status(401).json({ error: 'Authentication required' });
+
+  const { data, error } = await supabaseAdmin
+    .from('integrations')
+    .select('google_email, connected_at, token_expiry, refresh_token')
+    .eq('user_id', user.id)
+    .eq('provider', 'google_ads')
+    .maybeSingle();
+
+  if (error) return res.status(500).json({ error: 'Database error' });
+  if (!data)  return res.json({ connected: false });
+
+  let status = 'connected';
+  if (data.token_expiry && new Date(data.token_expiry) < new Date()) {
+    status = data.refresh_token ? 'expired' : 'disconnected';
+  }
+
+  res.json({
+    connected:    true,
+    status,
+    google_email: data.google_email,
+    connected_at: data.connected_at
+  });
+});
+
+// POST /api/google/disconnect — revoke and delete integration
+app.post('/api/google/disconnect', async (req, res) => {
+  const user = await getUserFromToken(req);
+  if (!user) return res.status(401).json({ error: 'Authentication required' });
+
+  // Attempt to revoke the access token at Google (non-fatal if it fails)
+  try {
+    const { data } = await supabaseAdmin
+      .from('integrations')
+      .select('access_token')
+      .eq('user_id', user.id)
+      .eq('provider', 'google_ads')
+      .maybeSingle();
+    if (data && data.access_token) {
+      await fetch('https://oauth2.googleapis.com/revoke?token=' + encodeURIComponent(data.access_token), { method: 'POST' });
+    }
+  } catch (_) {}
+
+  const { error } = await supabaseAdmin
+    .from('integrations')
+    .delete()
+    .eq('user_id', user.id)
+    .eq('provider', 'google_ads');
+
+  if (error) return res.status(500).json({ error: 'Database error' });
+
+  console.log('[Google OAuth] Disconnected | user:', user.id);
+  res.json({ success: true });
+});
 
 
 app.listen(PORT, async () => {
