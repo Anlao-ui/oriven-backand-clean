@@ -2914,57 +2914,6 @@ app.get('/app', function(req, res) {
   res.sendFile(path.resolve(__dirname, '..', '..', 'app.html'));
 });
 
-// ── Fallback — after all routes ──────────────────────────────────
-// /api/* paths return a JSON 404 so the frontend fetch wrapper gets
-// parseable JSON instead of an HTML error page.
-// All other paths return index.html (public landing page).
-app.use(function(req, res) {
-  if (req.path.startsWith('/api/')) {
-    console.warn('[404]', req.method, req.url);
-    return res.status(404).json({ error: 'Route not found: ' + req.method + ' ' + req.url });
-  }
-  res.sendFile(path.resolve(__dirname, '..', '..', 'index.html'));
-});
-
-// ── Global error handler — catches unhandled errors in routes ───
-// Express requires exactly 4 arguments for error handlers.
-app.use(function(err, req, res, _next) {
-  console.error('[ServerError]', req.method, req.url, err.message);
-  res.status(err.status || 500).json({ error: err.message || 'Internal server error' });
-});
-
-// ── Daily cron: delete unverified accounts older than 14 days ───
-// Runs at 02:00 UTC every day. Safe to re-run — only targets accounts
-// where email_verified = false AND created_at < 14 days ago.
-cron.schedule('0 2 * * *', async () => {
-  const cutoff = new Date(Date.now() - 14 * 24 * 60 * 60 * 1000).toISOString();
-  console.log(`[Cron] Cleanup run — cutoff: ${cutoff}`);
-  try {
-    const { data: stale, error } = await supabaseAdmin
-      .from('profiles')
-      .select('id, email')
-      .eq('email_verified', false)
-      .lt('created_at', cutoff);
-
-    if (error) { console.error('[Cron] Query error:', error.message); return; }
-    if (!stale || stale.length === 0) { console.log('[Cron] No stale unverified accounts'); return; }
-
-    console.log(`[Cron] Deleting ${stale.length} unverified account(s)...`);
-    for (const row of stale) {
-      try {
-        const { error: delErr } = await supabaseAdmin.auth.admin.deleteUser(row.id);
-        if (delErr) console.error('[Cron] Delete failed for', row.id, ':', delErr.message);
-        else        console.log('[Cron] Deleted:', row.id, row.email);
-      } catch (e) {
-        console.error('[Cron] Exception deleting', row.id, ':', e.message);
-      }
-    }
-  } catch (err) {
-    console.error('[Cron] Unexpected error:', err.message);
-  }
-}, { timezone: 'UTC' });
-
-
 // ════════════════════════════════════════════════════════════════
 // GOOGLE ADS OAUTH
 // ════════════════════════════════════════════════════════════════
@@ -3023,7 +2972,6 @@ app.get('/auth/google/callback', async (req, res) => {
     return res.redirect(frontendBase + '/app.html?google_error=missing_params');
   }
 
-  // Validate state
   const stateData = _googleOAuthStates.get(state);
   if (!stateData || stateData.expires < Date.now()) {
     _googleOAuthStates.delete(state);
@@ -3032,7 +2980,6 @@ app.get('/auth/google/callback', async (req, res) => {
   _googleOAuthStates.delete(state);
   const userId = stateData.userId;
 
-  // Exchange authorization code for tokens
   let tokens;
   try {
     const tokenRes = await fetch('https://oauth2.googleapis.com/token', {
@@ -3056,7 +3003,6 @@ app.get('/auth/google/callback', async (req, res) => {
     return res.redirect(frontendBase + '/app.html?google_error=network');
   }
 
-  // Fetch Google profile email
   let googleEmail = null;
   try {
     const profileRes = await fetch('https://www.googleapis.com/oauth2/v3/userinfo', {
@@ -3066,7 +3012,6 @@ app.get('/auth/google/callback', async (req, res) => {
     googleEmail = profile.email || null;
   } catch (_) {}
 
-  // Store tokens in Supabase integrations table
   const tokenExpiry = tokens.expires_in
     ? new Date(Date.now() + tokens.expires_in * 1000).toISOString()
     : null;
@@ -3125,7 +3070,6 @@ app.post('/api/google/disconnect', async (req, res) => {
   const user = await getUserFromToken(req);
   if (!user) return res.status(401).json({ error: 'Authentication required' });
 
-  // Attempt to revoke the access token at Google (non-fatal if it fails)
   try {
     const { data } = await supabaseAdmin
       .from('integrations')
@@ -3149,6 +3093,68 @@ app.post('/api/google/disconnect', async (req, res) => {
   console.log('[Google OAuth] Disconnected | user:', user.id);
   res.json({ success: true });
 });
+
+// GET /api/debug/routes — list all registered Express routes
+app.get('/api/debug/routes', function(req, res) {
+  const routes = [];
+  app._router.stack.forEach(function(layer) {
+    if (layer.route) {
+      const methods = Object.keys(layer.route.methods).map(function(m) { return m.toUpperCase(); });
+      routes.push(methods.join(',') + ' ' + layer.route.path);
+    }
+  });
+  res.json({ count: routes.length, routes: routes });
+});
+
+// ── Fallback — after all routes ──────────────────────────────────
+// /api/* paths return a JSON 404 so the frontend fetch wrapper gets
+// parseable JSON instead of an HTML error page.
+// All other paths return index.html (public landing page).
+app.use(function(req, res) {
+  if (req.path.startsWith('/api/')) {
+    console.warn('[404]', req.method, req.url);
+    return res.status(404).json({ error: 'Route not found: ' + req.method + ' ' + req.url });
+  }
+  res.sendFile(path.resolve(__dirname, '..', '..', 'index.html'));
+});
+
+// ── Global error handler — catches unhandled errors in routes ───
+// Express requires exactly 4 arguments for error handlers.
+app.use(function(err, req, res, _next) {
+  console.error('[ServerError]', req.method, req.url, err.message);
+  res.status(err.status || 500).json({ error: err.message || 'Internal server error' });
+});
+
+// ── Daily cron: delete unverified accounts older than 14 days ───
+// Runs at 02:00 UTC every day. Safe to re-run — only targets accounts
+// where email_verified = false AND created_at < 14 days ago.
+cron.schedule('0 2 * * *', async () => {
+  const cutoff = new Date(Date.now() - 14 * 24 * 60 * 60 * 1000).toISOString();
+  console.log(`[Cron] Cleanup run — cutoff: ${cutoff}`);
+  try {
+    const { data: stale, error } = await supabaseAdmin
+      .from('profiles')
+      .select('id, email')
+      .eq('email_verified', false)
+      .lt('created_at', cutoff);
+
+    if (error) { console.error('[Cron] Query error:', error.message); return; }
+    if (!stale || stale.length === 0) { console.log('[Cron] No stale unverified accounts'); return; }
+
+    console.log(`[Cron] Deleting ${stale.length} unverified account(s)...`);
+    for (const row of stale) {
+      try {
+        const { error: delErr } = await supabaseAdmin.auth.admin.deleteUser(row.id);
+        if (delErr) console.error('[Cron] Delete failed for', row.id, ':', delErr.message);
+        else        console.log('[Cron] Deleted:', row.id, row.email);
+      } catch (e) {
+        console.error('[Cron] Exception deleting', row.id, ':', e.message);
+      }
+    }
+  } catch (err) {
+    console.error('[Cron] Unexpected error:', err.message);
+  }
+}, { timezone: 'UTC' });
 
 
 app.listen(PORT, async () => {
