@@ -127,7 +127,10 @@ const supabaseAdmin = createClient(
   if (!process.env.GOOGLE_CLIENT_ID || !process.env.GOOGLE_CLIENT_SECRET) {
     console.warn('⚠️  [ENV] GOOGLE_CLIENT_ID / GOOGLE_CLIENT_SECRET not set — Google Ads OAuth disabled');
   } else {
-    console.log('✅ [ENV] Google OAuth configured | redirect:', process.env.GOOGLE_REDIRECT_URI || '(GOOGLE_REDIRECT_URI not set)');
+    const _resolvedRedirect = process.env.GOOGLE_REDIRECT_URI
+      || (process.env.RENDER ? 'https://oriven-backand-clean.onrender.com/auth/google/callback' : 'http://localhost:5500/auth/google/callback');
+    console.log('✅ [ENV] Google OAuth configured | redirect:', _resolvedRedirect,
+      process.env.GOOGLE_REDIRECT_URI ? '(from env)' : process.env.RENDER ? '(Render default)' : '(localhost default)');
   }
 
   console.log('═══════════════════════════════════════════════════\n');
@@ -2920,7 +2923,10 @@ app.get('/app', function(req, res) {
 
 const GOOGLE_CLIENT_ID     = process.env.GOOGLE_CLIENT_ID     || '';
 const GOOGLE_CLIENT_SECRET = process.env.GOOGLE_CLIENT_SECRET || '';
-const GOOGLE_REDIRECT_URI  = process.env.GOOGLE_REDIRECT_URI  || 'http://localhost:5500/auth/google/callback';
+const GOOGLE_REDIRECT_URI  = process.env.GOOGLE_REDIRECT_URI
+  || (process.env.RENDER
+      ? 'https://oriven-backand-clean.onrender.com/auth/google/callback'
+      : 'http://localhost:5500/auth/google/callback');
 
 const GOOGLE_SCOPES = [
   'openid',
