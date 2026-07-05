@@ -3078,7 +3078,10 @@ app.get('/api/google/auth-url', async (req, res) => {
 // GET /auth/google/callback — OAuth callback from Google
 app.get('/auth/google/callback', async (req, res) => {
   const { code, state, error } = req.query;
-  const frontendBase = process.env.FRONTEND_URL || 'https://orivenai.com';
+  // Mirror the GOOGLE_REDIRECT_URI detection logic: explicit env var wins,
+  // then fall back to Render (production) vs localhost (local dev).
+  const frontendBase = process.env.FRONTEND_URL
+    || (process.env.RENDER ? 'https://orivenai.com' : 'http://localhost:5500');
 
   if (error) {
     console.error('[Google OAuth] Denied or error:', error);
@@ -3166,7 +3169,7 @@ app.get('/api/google/status', async (req, res) => {
 
   const { data, error } = await supabaseAdmin
     .from('integrations')
-    .select('google_email, connected_at, token_expiry, refresh_token, google_ads_accounts')
+    .select('google_email, connected_at, token_expiry, refresh_token, google_ads_accounts, active_ad_account')
     .eq('user_id', user.id)
     .eq('provider', 'google_ads')
     .maybeSingle();
@@ -3175,8 +3178,8 @@ app.get('/api/google/status', async (req, res) => {
   if (!data)  return res.json({ connected: false });
 
   let status = 'connected';
-  if (data.token_expiry && new Date(data.token_expiry) < new Date()) {
-    status = data.refresh_token ? 'expired' : 'disconnected';
+  if (data.token_expiry && new Date(data.token_expiry) < new Date() && !data.refresh_token) {
+    status = 'disconnected';
   }
 
   res.json({
@@ -3184,7 +3187,8 @@ app.get('/api/google/status', async (req, res) => {
     status,
     google_email:        data.google_email,
     connected_at:        data.connected_at,
-    google_ads_accounts: data.google_ads_accounts || []
+    google_ads_accounts: data.google_ads_accounts || [],
+    active_ad_account:   data.active_ad_account   || null
   });
 });
 
@@ -3292,6 +3296,922 @@ app.post('/api/google/disconnect', async (req, res) => {
 
   console.log('[Google OAuth] Disconnected | user:', user.id);
   res.json({ success: true });
+});
+
+// POST /api/google/active-account — set the active Google Ads account for a user
+app.post('/api/google/active-account', async (req, res) => {
+  try {
+    const user = await getUserFromToken(req);
+    if (!user) return res.status(401).json({ error: 'Authentication required' });
+
+    const { account_id, account_name } = req.body || {};
+    if (!account_id) return res.status(400).json({ error: 'account_id is required' });
+
+    const active_ad_account = {
+      platform:     'google_ads',
+      account_id:   String(account_id),
+      account_name: String(account_name || '')
+    };
+
+    const { error } = await supabaseAdmin
+      .from('integrations')
+      .update({ active_ad_account })
+      .eq('user_id', user.id)
+      .eq('provider', 'google_ads');
+
+    if (error) {
+      console.error('[ActiveAccount] DB error:', error.message);
+      return res.status(500).json({ error: 'Database error' });
+    }
+
+    console.log('[ActiveAccount] Set | user:', user.id, '| account:', account_id, account_name);
+    res.json({ ok: true, active_ad_account });
+  } catch (err) {
+    console.error('[ActiveAccount] unexpected error:', err.message);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// ════════════════════════════════════════════════════════════════
+// ADS DASHBOARD — campaign data, AI analysis, recommendations
+// ════════════════════════════════════════════════════════════════
+
+// Resolve a valid Google Ads access token + active account for a user.
+// Refreshes token if expired. Throws with .status set for HTTP codes.
+async function _getGadsAccess(user) {
+  const { data: intg, error } = await supabaseAdmin
+    .from('integrations')
+    .select('access_token, refresh_token, token_expiry, active_ad_account')
+    .eq('user_id', user.id)
+    .eq('provider', 'google_ads')
+    .maybeSingle();
+
+  if (error || !intg) {
+    const e = new Error('Google Ads not connected'); e.status = 400; throw e;
+  }
+
+  let accessToken = intg.access_token;
+
+  if (intg.token_expiry && new Date(intg.token_expiry) < new Date()) {
+    if (!intg.refresh_token) {
+      const e = new Error('Token expired — reconnect Google Ads'); e.status = 401; throw e;
+    }
+    const rfRes  = await fetch('https://oauth2.googleapis.com/token', {
+      method:  'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body:    new URLSearchParams({
+        client_id:     GOOGLE_CLIENT_ID,
+        client_secret: GOOGLE_CLIENT_SECRET,
+        refresh_token: intg.refresh_token,
+        grant_type:    'refresh_token'
+      })
+    });
+    const rfData = await rfRes.json();
+    if (!rfRes.ok || !rfData.access_token) {
+      const e = new Error('Token refresh failed — reconnect Google Ads'); e.status = 401; throw e;
+    }
+    accessToken = rfData.access_token;
+    await supabaseAdmin.from('integrations').update({
+      access_token: accessToken,
+      token_expiry: new Date(Date.now() + (rfData.expires_in || 3600) * 1000).toISOString()
+    }).eq('user_id', user.id).eq('provider', 'google_ads');
+  }
+
+  const active = intg.active_ad_account;
+  if (!active || !active.account_id) {
+    const e = new Error('No active Google Ads account selected'); e.status = 400; throw e;
+  }
+
+  return { accessToken, customerId: active.account_id, accountName: active.account_name || active.account_id };
+}
+
+// Execute a GAQL search query against the Ads API. Returns results[].
+async function _gadsQuery(accessToken, customerId, query) {
+  const TIMEOUT_MS = 20000;
+  const ctrl = new AbortController();
+  const tid  = setTimeout(() => ctrl.abort(), TIMEOUT_MS);
+
+  const url     = 'https://googleads.googleapis.com/v24/customers/' + customerId + '/googleAds:search';
+  const headers = {
+    'Authorization':     'Bearer ' + accessToken,
+    'developer-token':   GOOGLE_ADS_DEVELOPER_TOKEN,
+    'Content-Type':      'application/json',
+    'login-customer-id': customerId
+  };
+
+  try {
+    const res  = await fetch(url, { method: 'POST', headers, body: JSON.stringify({ query }), signal: ctrl.signal })
+      .finally(() => clearTimeout(tid));
+    const text = await res.text();
+
+    if (!res.ok) {
+      let msg = 'Google Ads API error ' + res.status;
+      try { const j = JSON.parse(text); msg = (j.error && j.error.message) ? j.error.message : msg; } catch (_) {}
+      throw new Error(msg);
+    }
+    const data = JSON.parse(text);
+    return data.results || [];
+  } catch (err) {
+    if (err.name === 'AbortError') throw new Error('Google Ads API timed out (>20 s)');
+    throw err;
+  }
+}
+
+// ── GET /api/ads/overview — account KPIs + campaign list ─────────
+app.get('/api/ads/overview', async (req, res) => {
+  try {
+    const user = await getUserFromToken(req);
+    if (!user) return res.status(401).json({ error: 'Authentication required' });
+
+    const { accessToken, customerId, accountName } = await _getGadsAccess(user);
+
+    const VALID_RANGES = ['LAST_7_DAYS', 'LAST_14_DAYS', 'LAST_30_DAYS', 'LAST_90_DAYS'];
+    const range = VALID_RANGES.includes(req.query.date_range) ? req.query.date_range : 'LAST_30_DAYS';
+
+    const results = await _gadsQuery(accessToken, customerId, `
+      SELECT
+        campaign.id,
+        campaign.name,
+        campaign.status,
+        campaign.advertising_channel_type,
+        metrics.cost_micros,
+        metrics.impressions,
+        metrics.clicks,
+        metrics.ctr,
+        metrics.conversions,
+        metrics.cost_per_conversion,
+        metrics.conversions_value
+      FROM campaign
+      WHERE segments.date DURING ${range}
+        AND campaign.status != 'REMOVED'
+      ORDER BY metrics.cost_micros DESC
+      LIMIT 100
+    `);
+
+    let totalCostMicros = 0, totalImpr = 0, totalClicks = 0, totalConv = 0, totalConvVal = 0;
+
+    const campaigns = results.map(r => {
+      const c  = r.campaign || {};
+      const m  = r.metrics  || {};
+      const cm = m.costMicros     ? Number(m.costMicros)     : 0;
+      const im = m.impressions    ? Number(m.impressions)    : 0;
+      const cl = m.clicks         ? Number(m.clicks)         : 0;
+      const cv = m.conversions    ? Number(m.conversions)    : 0;
+      const vl = m.conversionsValue ? Number(m.conversionsValue) : 0;
+      const sp = cm / 1e6;
+
+      totalCostMicros += cm;
+      totalImpr       += im;
+      totalClicks     += cl;
+      totalConv       += cv;
+      totalConvVal    += vl;
+
+      return {
+        id:               c.id     || '',
+        name:             c.name   || 'Unnamed',
+        status:           c.status || 'UNKNOWN',
+        type:             c.advertisingChannelType || '',
+        spend:            sp,
+        impressions:      im,
+        clicks:           cl,
+        ctr:              im > 0 ? (cl / im) * 100 : 0,
+        conversions:      cv,
+        cpa:              cv > 0 ? sp / cv : 0,
+        roas:             sp > 0 ? vl / sp : 0,
+        conversions_value: vl
+      };
+    });
+
+    const totalSpend = totalCostMicros / 1e6;
+    res.json({
+      account:    { id: customerId, name: accountName },
+      date_range: range,
+      overview: {
+        spend:             totalSpend,
+        impressions:       totalImpr,
+        clicks:            totalClicks,
+        ctr:               totalImpr > 0 ? (totalClicks / totalImpr) * 100 : 0,
+        conversions:       totalConv,
+        cpa:               totalConv > 0 ? totalSpend / totalConv : 0,
+        roas:              totalSpend > 0 ? totalConvVal / totalSpend : 0,
+        conversions_value: totalConvVal
+      },
+      campaigns
+    });
+  } catch (err) {
+    console.error('[Ads/overview]', err.message);
+    res.status(err.status || 500).json({ error: err.message || 'Internal server error' });
+  }
+});
+
+// ── GET /api/ads/campaigns — dedicated campaigns list endpoint ────
+app.get('/api/ads/campaigns', async (req, res) => {
+  try {
+    const user = await getUserFromToken(req);
+    if (!user) return res.status(401).json({ error: 'Authentication required' });
+
+    const { accessToken, customerId, accountName } = await _getGadsAccess(user);
+
+    const VALID_RANGES = ['LAST_7_DAYS', 'LAST_14_DAYS', 'LAST_30_DAYS', 'LAST_90_DAYS'];
+    const range = VALID_RANGES.includes(req.query.date_range) ? req.query.date_range : 'LAST_30_DAYS';
+
+    const results = await _gadsQuery(accessToken, customerId, `
+      SELECT
+        campaign.id,
+        campaign.name,
+        campaign.status,
+        campaign.advertising_channel_type,
+        campaign.bidding_strategy_type,
+        metrics.cost_micros,
+        metrics.impressions,
+        metrics.clicks,
+        metrics.ctr,
+        metrics.conversions,
+        metrics.cost_per_conversion,
+        metrics.conversions_value
+      FROM campaign
+      WHERE segments.date DURING ${range}
+        AND campaign.status != 'REMOVED'
+      ORDER BY metrics.cost_micros DESC
+      LIMIT 100
+    `);
+
+    let totalSpend = 0, totalImpr = 0, totalClicks = 0, totalConv = 0, totalConvVal = 0;
+    const campaigns = results.map(r => {
+      const c = r.campaign || {}, m = r.metrics || {};
+      const cm = Number(m.costMicros || 0), im = Number(m.impressions || 0);
+      const cl = Number(m.clicks || 0), cv = Number(m.conversions || 0), vl = Number(m.conversionsValue || 0);
+      const sp = cm / 1e6;
+      totalSpend += sp; totalImpr += im; totalClicks += cl; totalConv += cv; totalConvVal += vl;
+      return {
+        id:          c.id     || '',
+        name:        c.name   || 'Unnamed',
+        status:      c.status || 'UNKNOWN',
+        type:        c.advertisingChannelType  || '',
+        bidding:     c.biddingStrategyType     || '',
+        spend:       sp,
+        impressions: im,
+        clicks:      cl,
+        ctr:         im > 0 ? (cl / im) * 100 : 0,
+        conversions: cv,
+        cpa:         cv > 0 ? sp / cv : 0,
+        roas:        sp > 0 ? vl / sp : 0,
+        conversions_value: vl
+      };
+    });
+
+    res.json({
+      account:    { id: customerId, name: accountName },
+      date_range: range,
+      overview: {
+        spend:       totalSpend,
+        impressions: totalImpr,
+        clicks:      totalClicks,
+        ctr:         totalImpr > 0 ? (totalClicks / totalImpr) * 100 : 0,
+        conversions: totalConv,
+        cpa:         totalConv > 0 ? totalSpend / totalConv : 0,
+        roas:        totalSpend > 0 ? totalConvVal / totalSpend : 0,
+        conversions_value: totalConvVal
+      },
+      campaigns
+    });
+  } catch (err) {
+    console.error('[Ads/campaigns]', err.message);
+    res.status(err.status || 500).json({ error: err.message || 'Internal server error' });
+  }
+});
+
+// ── GET /api/ads/campaign/:id — ads + keywords for one campaign ──
+app.get('/api/ads/campaign/:id', async (req, res) => {
+  try {
+    const user = await getUserFromToken(req);
+    if (!user) return res.status(401).json({ error: 'Authentication required' });
+
+    const { accessToken, customerId } = await _getGadsAccess(user);
+    const campaignId = req.params.id.replace(/\D/g, ''); // digits only
+    if (!campaignId) return res.status(400).json({ error: 'Invalid campaign id' });
+
+    const VALID_RANGES = ['LAST_7_DAYS', 'LAST_14_DAYS', 'LAST_30_DAYS', 'LAST_90_DAYS'];
+    const range = VALID_RANGES.includes(req.query.date_range) ? req.query.date_range : 'LAST_30_DAYS';
+
+    const [adsRows, kwRows, stRows, agRows, campInfoRows] = await Promise.all([
+      _gadsQuery(accessToken, customerId, `
+        SELECT
+          ad_group_ad.ad.id,
+          ad_group_ad.ad.type,
+          ad_group_ad.status,
+          ad_group.name,
+          ad_group_ad.ad.final_urls,
+          ad_group_ad.ad.display_url,
+          ad_group_ad.ad.responsive_search_ad.headlines,
+          ad_group_ad.ad.responsive_search_ad.descriptions,
+          ad_group_ad.ad.expanded_text_ad.headline_part1,
+          ad_group_ad.ad.expanded_text_ad.headline_part2,
+          ad_group_ad.ad.expanded_text_ad.headline_part3,
+          ad_group_ad.ad.expanded_text_ad.description,
+          ad_group_ad.ad.expanded_text_ad.description2,
+          ad_group_ad.ad.responsive_display_ad.headlines,
+          ad_group_ad.ad.responsive_display_ad.descriptions,
+          ad_group_ad.ad.responsive_display_ad.business_name,
+          ad_group_ad.ad.responsive_display_ad.long_headline,
+          ad_group_ad.ad.responsive_display_ad.marketing_images,
+          ad_group_ad.ad.responsive_display_ad.logo_images,
+          metrics.impressions,
+          metrics.clicks,
+          metrics.ctr,
+          metrics.conversions,
+          metrics.cost_micros
+        FROM ad_group_ad
+        WHERE campaign.id = ${campaignId}
+          AND segments.date DURING ${range}
+          AND ad_group_ad.status != 'REMOVED'
+        ORDER BY metrics.impressions DESC
+        LIMIT 50
+      `),
+      _gadsQuery(accessToken, customerId, `
+        SELECT
+          ad_group_criterion.keyword.text,
+          ad_group_criterion.keyword.match_type,
+          ad_group_criterion.status,
+          metrics.impressions,
+          metrics.clicks,
+          metrics.conversions,
+          metrics.cost_micros
+        FROM keyword_view
+        WHERE campaign.id = ${campaignId}
+          AND segments.date DURING ${range}
+          AND ad_group_criterion.status != 'REMOVED'
+        ORDER BY metrics.cost_micros DESC
+        LIMIT 50
+      `).catch(() => []),
+      _gadsQuery(accessToken, customerId, `
+        SELECT
+          search_term_view.search_term,
+          search_term_view.status,
+          ad_group.name,
+          metrics.impressions,
+          metrics.clicks,
+          metrics.conversions,
+          metrics.cost_micros
+        FROM search_term_view
+        WHERE campaign.id = ${campaignId}
+          AND segments.date DURING ${range}
+          AND metrics.impressions > 0
+        ORDER BY metrics.cost_micros DESC
+        LIMIT 50
+      `).catch(() => []),
+      _gadsQuery(accessToken, customerId, `
+        SELECT
+          ad_group.id,
+          ad_group.name,
+          ad_group.status,
+          metrics.impressions,
+          metrics.clicks,
+          metrics.conversions,
+          metrics.cost_micros
+        FROM ad_group
+        WHERE campaign.id = ${campaignId}
+          AND segments.date DURING ${range}
+          AND ad_group.status != 'REMOVED'
+        ORDER BY metrics.cost_micros DESC
+        LIMIT 30
+      `).catch(() => []),
+
+      // Campaign budget + channel info
+      _gadsQuery(accessToken, customerId, `
+        SELECT
+          campaign.id,
+          campaign.name,
+          campaign.status,
+          campaign.advertising_channel_type,
+          campaign.bidding_strategy_type,
+          campaign_budget.amount_micros,
+          campaign_budget.delivery_method,
+          campaign_budget.type
+        FROM campaign
+        WHERE campaign.id = ${campaignId}
+        LIMIT 1
+      `).catch(() => [])
+    ]);
+
+    // Extract budget from campaign info query
+    const campInfo = campInfoRows[0] || {};
+    const budget = campInfo.campaignBudget ? {
+      daily_micros:    Number(campInfo.campaignBudget.amountMicros || 0),
+      daily_euros:     Number(campInfo.campaignBudget.amountMicros || 0) / 1e6,
+      delivery_method: campInfo.campaignBudget.deliveryMethod || '',
+      type:            campInfo.campaignBudget.type || ''
+    } : null;
+
+    const camp = campInfo.campaign || {};
+    const campaign_info = {
+      name:     camp.name    || '',
+      status:   camp.status  || '',
+      type:     camp.advertisingChannelType || '',
+      bidding:  camp.biddingStrategyType    || '',
+      budget
+    };
+
+    const ads = adsRows.map(r => {
+      const aga = r.adGroupAd  || {};
+      const a   = aga.ad       || {};
+      const ag  = r.adGroup    || {};
+      const m   = r.metrics    || {};
+      const rsa = a.responsiveSearchAd  || {};
+      const eta = a.expandedTextAd      || {};
+      const rda = a.responsiveDisplayAd || {};
+
+      // All headlines (for preview)
+      const rsaHeadlines = (rsa.headlines || []).map(h => h && h.text ? h.text : '').filter(Boolean);
+      const etaHeadlines = [eta.headlinePart1, eta.headlinePart2, eta.headlinePart3].filter(Boolean);
+      const rdaHeadlines = (rda.headlines || []).map(h => h && h.text ? h.text : '').filter(Boolean);
+      const headlines_all = rsaHeadlines.length ? rsaHeadlines : (etaHeadlines.length ? etaHeadlines : rdaHeadlines);
+
+      // Headline for table (first two joined)
+      let headline = '';
+      if (headlines_all.length > 0) {
+        headline = headlines_all[0] + (headlines_all[1] ? ' | ' + headlines_all[1] : '');
+      }
+
+      // All descriptions
+      const rsaDescs = (rsa.descriptions || []).map(d => d && d.text ? d.text : '').filter(Boolean);
+      const etaDescs = [eta.description, eta.description2].filter(Boolean);
+      const rdaDescs = (rda.descriptions || []).map(d => d && d.text ? d.text : '').filter(Boolean);
+      const descriptions_all = rsaDescs.length ? rsaDescs : (etaDescs.length ? etaDescs : rdaDescs);
+
+      // Final URL + display URL
+      const final_url    = (a.finalUrls && a.finalUrls[0]) ? a.finalUrls[0] : '';
+      const display_url  = a.displayUrl || '';
+
+      // Display ad specific
+      const business_name   = rda.businessName  || '';
+      const long_headline   = rda.longHeadline && rda.longHeadline.text ? rda.longHeadline.text : '';
+
+      // Image asset resource names (resolve via /assets endpoint)
+      const marketing_images = (rda.marketingImages || []).map(img => img && img.asset ? img.asset : '').filter(Boolean);
+      const logo_images      = (rda.logoImages      || []).map(img => img && img.asset ? img.asset : '').filter(Boolean);
+
+      const cl = Number(m.clicks      || 0);
+      const im = Number(m.impressions || 0);
+      return {
+        id:               a.id       || '',
+        type:             a.type     || '',
+        status:           aga.status || 'UNKNOWN',
+        ad_group:         ag.name    || '',
+        headline,
+        headlines_all,
+        descriptions_all,
+        final_url,
+        display_url,
+        business_name,
+        long_headline,
+        marketing_images,
+        logo_images,
+        impressions: im,
+        clicks:      cl,
+        ctr:         im > 0 ? (cl / im) * 100 : 0,
+        conversions: Number(m.conversions || 0),
+        spend:       Number(m.costMicros  || 0) / 1e6
+      };
+    });
+
+    const keywords = kwRows.map(r => {
+      const agc = r.adGroupCriterion || {};
+      const kw  = agc.keyword        || {};
+      const m   = r.metrics          || {};
+      const cl  = Number(m.clicks      || 0);
+      const im  = Number(m.impressions || 0);
+      return {
+        text:        kw.text      || '',
+        match_type:  kw.matchType || '',
+        status:      agc.status   || 'UNKNOWN',
+        impressions: im,
+        clicks:      cl,
+        ctr:         im > 0 ? (cl / im) * 100 : 0,
+        conversions: Number(m.conversions || 0),
+        spend:       Number(m.costMicros  || 0) / 1e6
+      };
+    });
+
+    const search_terms = stRows.map(r => {
+      const st = r.searchTermView || {};
+      const m  = r.metrics        || {};
+      const cl = Number(m.clicks      || 0);
+      const im = Number(m.impressions || 0);
+      return {
+        term:        st.searchTerm  || '',
+        status:      st.status      || 'UNKNOWN',
+        ad_group:    (r.adGroup && r.adGroup.name) || '',
+        impressions: im,
+        clicks:      cl,
+        ctr:         im > 0 ? (cl / im) * 100 : 0,
+        conversions: Number(m.conversions || 0),
+        spend:       Number(m.costMicros  || 0) / 1e6
+      };
+    });
+
+    const ad_groups = agRows.map(r => {
+      const ag = r.adGroup  || {};
+      const m  = r.metrics  || {};
+      const cl = Number(m.clicks      || 0);
+      const im = Number(m.impressions || 0);
+      return {
+        id:          ag.id     || '',
+        name:        ag.name   || '',
+        status:      ag.status || 'UNKNOWN',
+        impressions: im,
+        clicks:      cl,
+        ctr:         im > 0 ? (cl / im) * 100 : 0,
+        conversions: Number(m.conversions || 0),
+        spend:       Number(m.costMicros  || 0) / 1e6
+      };
+    });
+
+    res.json({ campaign_info, ads, keywords, search_terms, ad_groups, date_range: range });
+  } catch (err) {
+    console.error('[Ads/campaign]', err.message);
+    res.status(err.status || 500).json({ error: err.message || 'Internal server error' });
+  }
+});
+
+// ── GET /api/ads/campaign/:id/assets — resolve image asset URLs ──
+// Fetches actual image URLs for asset resource names returned in the
+// responsive_display_ad.marketing_images / logo_images arrays.
+app.get('/api/ads/campaign/:id/assets', async (req, res) => {
+  try {
+    const user = await getUserFromToken(req);
+    if (!user) return res.status(401).json({ error: 'Authentication required' });
+
+    const { accessToken, customerId } = await _getGadsAccess(user);
+    const campaignId = req.params.id.replace(/\D/g, '');
+    if (!campaignId) return res.status(400).json({ error: 'Invalid campaign id' });
+
+    const rows = await _gadsQuery(accessToken, customerId, `
+      SELECT
+        asset.resource_name,
+        asset.id,
+        asset.type,
+        asset.image_asset.full_size.url,
+        asset.image_asset.full_size.width_pixels,
+        asset.image_asset.full_size.height_pixels
+      FROM ad_group_ad_asset_view
+      WHERE campaign.id = ${campaignId}
+        AND asset.type = 'IMAGE'
+      ORDER BY asset.id
+      LIMIT 50
+    `).catch(() => []);
+
+    const assets = rows.map(r => {
+      const a  = r.asset || {};
+      const ia = a.imageAsset && a.imageAsset.fullSize ? a.imageAsset.fullSize : {};
+      return {
+        resource_name: a.resourceName || '',
+        id:            a.id           || '',
+        url:           ia.url         || '',
+        width:         ia.widthPixels  || 0,
+        height:        ia.heightPixels || 0
+      };
+    }).filter(a => a.url);
+
+    res.json({ assets });
+  } catch (err) {
+    console.error('[Ads/assets]', err.message);
+    res.status(err.status || 500).json({ error: err.message || 'Internal server error' });
+  }
+});
+
+// ── POST /api/ads/analyze — self-contained AI analysis ──────────
+// Fetches fresh data directly from Google Ads API. Accepts only
+// { date_range } from the request body — no client data passthrough.
+app.post('/api/ads/analyze', async (req, res) => {
+  try {
+    const user = await getUserFromToken(req);
+    if (!user) return res.status(401).json({ error: 'Authentication required' });
+
+    const { accessToken, customerId, accountName } = await _getGadsAccess(user);
+
+    const VALID_RANGES = ['LAST_7_DAYS', 'LAST_14_DAYS', 'LAST_30_DAYS', 'LAST_90_DAYS'];
+    const range = VALID_RANGES.includes(req.body && req.body.date_range) ? req.body.date_range : 'LAST_30_DAYS';
+
+    // Fetch all data in parallel from Google Ads API
+    const [campResults, kwResults, stResults, adResults] = await Promise.all([
+
+      // Campaigns — performance totals
+      _gadsQuery(accessToken, customerId, `
+        SELECT
+          campaign.id, campaign.name, campaign.status,
+          campaign.advertising_channel_type,
+          metrics.cost_micros, metrics.impressions, metrics.clicks,
+          metrics.ctr, metrics.conversions, metrics.conversions_value
+        FROM campaign
+        WHERE segments.date DURING ${range}
+          AND campaign.status != 'REMOVED'
+        ORDER BY metrics.cost_micros DESC
+        LIMIT 50
+      `),
+
+      // Keywords — top spenders for quality analysis
+      _gadsQuery(accessToken, customerId, `
+        SELECT
+          ad_group_criterion.keyword.text,
+          ad_group_criterion.keyword.match_type,
+          campaign.name,
+          metrics.cost_micros, metrics.clicks, metrics.impressions,
+          metrics.ctr, metrics.conversions
+        FROM keyword_view
+        WHERE segments.date DURING ${range}
+          AND metrics.impressions > 0
+        ORDER BY metrics.cost_micros DESC
+        LIMIT 50
+      `).catch(() => []),
+
+      // Search terms — detect irrelevant queries and wasted spend
+      _gadsQuery(accessToken, customerId, `
+        SELECT
+          search_term_view.search_term,
+          search_term_view.status,
+          campaign.name,
+          ad_group.name,
+          metrics.cost_micros, metrics.clicks, metrics.conversions,
+          metrics.impressions
+        FROM search_term_view
+        WHERE segments.date DURING ${range}
+          AND metrics.impressions > 0
+        ORDER BY metrics.cost_micros DESC
+        LIMIT 50
+      `).catch(() => []),
+
+      // Ads — detect low-performing creatives
+      _gadsQuery(accessToken, customerId, `
+        SELECT
+          ad_group_ad.status,
+          ad_group_ad.ad.responsive_search_ad.headlines,
+          ad_group_ad.ad.expanded_text_ad.headline_part1,
+          campaign.name,
+          ad_group.name,
+          metrics.impressions, metrics.clicks, metrics.ctr,
+          metrics.conversions, metrics.cost_micros
+        FROM ad_group_ad
+        WHERE segments.date DURING ${range}
+          AND ad_group_ad.status != 'REMOVED'
+          AND metrics.impressions > 0
+        ORDER BY metrics.impressions DESC
+        LIMIT 30
+      `).catch(() => [])
+    ]);
+
+    const f = (n, d = 2) => (typeof n === 'number' ? n.toFixed(d) : '0');
+
+    // Process campaigns into summary rows
+    let totalSpend = 0, totalImpr = 0, totalClicks = 0, totalConv = 0, totalConvVal = 0;
+    const campaigns = campResults.map(r => {
+      const c = r.campaign || {}, m = r.metrics || {};
+      const cm = Number(m.costMicros || 0), im = Number(m.impressions || 0);
+      const cl = Number(m.clicks || 0), cv = Number(m.conversions || 0), vl = Number(m.conversionsValue || 0);
+      const sp = cm / 1e6;
+      totalSpend += sp; totalImpr += im; totalClicks += cl; totalConv += cv; totalConvVal += vl;
+      return { name: c.name || '', status: c.status || '', type: c.advertisingChannelType || '',
+        spend: sp, impressions: im, clicks: cl, ctr: im > 0 ? (cl / im) * 100 : 0,
+        conversions: cv, cpa: cv > 0 ? sp / cv : 0, roas: sp > 0 ? vl / sp : 0 };
+    });
+
+    // Keywords summary — top 15 by spend
+    const kwLines = kwResults.slice(0, 15).map(r => {
+      const agc = r.adGroupCriterion || {}, kw = agc.keyword || {}, m = r.metrics || {};
+      const sp = Number(m.costMicros || 0) / 1e6;
+      const im = Number(m.impressions || 0), cl = Number(m.clicks || 0);
+      const cv = Number(m.conversions || 0);
+      return `[${kw.matchType || '?'}] "${kw.text}" | ${r.campaign?.name || ''} | €${f(sp)} spend | CTR: ${im > 0 ? f((cl/im)*100) : '0.00'}% | Conv: ${f(cv)}`;
+    });
+
+    // Search terms with spend but zero conversions (wasted spend candidates)
+    const wastedLines = stResults.filter(r => {
+      const m = r.metrics || {};
+      return Number(m.costMicros || 0) > 500000 && Number(m.conversions || 0) === 0; // >€0.50
+    }).slice(0, 10).map(r => {
+      const st = r.searchTermView || {}, m = r.metrics || {};
+      return `"${st.searchTerm}" | ${r.campaign?.name || ''} | €${f(Number(m.costMicros || 0)/1e6)} | ${m.clicks || 0} clicks | 0 conv`;
+    });
+
+    // Campaigns with high spend and zero conversions (budget efficiency)
+    const zeroCampLines = campaigns.filter(c => c.spend > 5 && c.conversions === 0).map(c =>
+      `${c.name} | €${f(c.spend)} spend | ${c.clicks} clicks | 0 conversions`
+    );
+
+    const campSummary = campaigns.map(c =>
+      `${c.name} | ${c.status} | €${f(c.spend)} | ${c.impressions} impr | ${c.clicks} clicks | CTR: ${f(c.ctr)}% | Conv: ${f(c.conversions)} | CPA: €${c.cpa > 0 ? f(c.cpa) : 'N/A'} | ROAS: ${f(c.roas)}x`
+    ).join('\n');
+
+    const system = `You are a senior Google Ads performance analyst. Analyze this account data and return ONLY valid JSON — no markdown, no code fences, no explanation. Start your response with {.
+
+Return exactly this structure:
+{
+  "score": <integer 0-100>,
+  "findings": [
+    {
+      "type": "wasted_spend|low_ctr|conversion_issue|scaling_opportunity|keyword_opportunity|budget|landing_page",
+      "severity": "high|medium|low",
+      "title": "Short specific title (max 8 words)",
+      "detail": "Specific insight with real numbers and campaign/keyword names from the data",
+      "action": "Concrete action the advertiser should take right now"
+    }
+  ],
+  "recommendations": [
+    {
+      "type": "budget|keyword|negative|bid|copy|structure",
+      "campaign": "exact campaign name or 'Account-wide'",
+      "title": "Short recommendation title",
+      "detail": "Specific action with numbers",
+      "priority": "high|medium|low"
+    }
+  ],
+  "strengths": ["specific one-liner with real metric or campaign name"],
+  "weaknesses": ["specific one-liner with real metric or campaign name"],
+  "opportunities": ["specific one-liner with real metric or campaign name"]
+}
+
+Score guide: 70+ good, 45-69 average, below 45 poor. Weight: CTR quality 25%, conversion rate 35%, ROAS 25%, spend efficiency 15%.
+Rules: max 6 findings, max 6 recommendations, 3 strengths, 3 weaknesses, 3 opportunities. High severity = major spend impact. Reference real names and numbers. If minimal data, score conservatively and note it.`;
+
+    const userMsg = `Account: ${accountName} (ID: ${customerId}) | Period: ${range}
+
+TOTALS — Spend: €${f(totalSpend)} | Impressions: ${totalImpr} | Clicks: ${totalClicks} | CTR: ${totalImpr > 0 ? f((totalClicks/totalImpr)*100) : '0.00'}% | Conversions: ${f(totalConv)} | CPA: €${totalConv > 0 ? f(totalSpend/totalConv) : 'N/A'} | ROAS: ${totalSpend > 0 ? f(totalConvVal/totalSpend) : '0.00'}x | Revenue: €${f(totalConvVal)}
+
+CAMPAIGNS (by spend):
+${campSummary || 'No campaign spend in this period'}
+
+TOP KEYWORDS BY SPEND:
+${kwLines.length > 0 ? kwLines.join('\n') : 'No keyword data'}
+
+SEARCH TERMS WITH SPEND BUT ZERO CONVERSIONS (potential wasted spend):
+${wastedLines.length > 0 ? wastedLines.join('\n') : 'None identified'}
+
+HIGH-SPEND CAMPAIGNS WITH ZERO CONVERSIONS:
+${zeroCampLines.length > 0 ? zeroCampLines.join('\n') : 'None — all campaigns with spend have conversions'}`;
+
+    const raw = await _aimlText('text-copy', system, userMsg, { max_tokens: 2200 });
+
+    let parsed;
+    try {
+      parsed = JSON.parse(raw.replace(/^```json\s*/i, '').replace(/```\s*$/, '').trim());
+    } catch (_) {
+      const m = raw.match(/\{[\s\S]*\}/);
+      if (!m) { console.error('[Ads/analyze] unparseable AI response:', raw.slice(0, 300)); return res.status(500).json({ error: 'AI response could not be parsed — try again' }); }
+      parsed = JSON.parse(m[0]);
+    }
+
+    console.log('[Ads/analyze] score:', parsed.score, '| findings:', parsed.findings?.length, '| recs:', parsed.recommendations?.length);
+    res.json({
+      score:           parsed.score           || 0,
+      findings:        parsed.findings        || [],
+      recommendations: parsed.recommendations || [],
+      strengths:       parsed.strengths       || [],
+      weaknesses:      parsed.weaknesses      || [],
+      opportunities:   parsed.opportunities   || [],
+      account:   { id: customerId, name: accountName },
+      date_range: range
+    });
+  } catch (err) {
+    console.error('[Ads/analyze]', err.message);
+    res.status(err.status || 500).json({ error: err.message || 'Internal server error' });
+  }
+});
+
+// ── POST /api/ads/recommend — self-contained AI copy + keyword recs
+// Fetches fresh campaign and keyword data directly from Google Ads.
+// Accepts only { date_range } from the request body.
+app.post('/api/ads/recommend', async (req, res) => {
+  try {
+    const user = await getUserFromToken(req);
+    if (!user) return res.status(401).json({ error: 'Authentication required' });
+
+    const { accessToken, customerId, accountName } = await _getGadsAccess(user);
+
+    const VALID_RANGES = ['LAST_7_DAYS', 'LAST_14_DAYS', 'LAST_30_DAYS', 'LAST_90_DAYS'];
+    const range = VALID_RANGES.includes(req.body && req.body.date_range) ? req.body.date_range : 'LAST_30_DAYS';
+
+    const [campResults, kwResults, stResults] = await Promise.all([
+
+      _gadsQuery(accessToken, customerId, `
+        SELECT
+          campaign.id, campaign.name, campaign.status,
+          campaign.advertising_channel_type,
+          metrics.cost_micros, metrics.impressions, metrics.clicks,
+          metrics.ctr, metrics.conversions, metrics.conversions_value
+        FROM campaign
+        WHERE segments.date DURING ${range}
+          AND campaign.status != 'REMOVED'
+        ORDER BY metrics.cost_micros DESC
+        LIMIT 20
+      `),
+
+      _gadsQuery(accessToken, customerId, `
+        SELECT
+          ad_group_criterion.keyword.text,
+          ad_group_criterion.keyword.match_type,
+          campaign.name,
+          metrics.cost_micros, metrics.clicks, metrics.ctr,
+          metrics.conversions, metrics.impressions
+        FROM keyword_view
+        WHERE segments.date DURING ${range}
+          AND metrics.impressions > 0
+        ORDER BY metrics.cost_micros DESC
+        LIMIT 30
+      `).catch(() => []),
+
+      // Search terms with spend but no conversions → negative keyword candidates
+      _gadsQuery(accessToken, customerId, `
+        SELECT
+          search_term_view.search_term,
+          campaign.name,
+          metrics.cost_micros, metrics.clicks, metrics.conversions
+        FROM search_term_view
+        WHERE segments.date DURING ${range}
+          AND metrics.cost_micros > 1000000
+        ORDER BY metrics.cost_micros DESC
+        LIMIT 30
+      `).catch(() => [])
+    ]);
+
+    const f = (n, d = 2) => (typeof n === 'number' ? n.toFixed(d) : '0');
+
+    let totalSpend = 0, totalImpr = 0, totalClicks = 0, totalConv = 0, totalConvVal = 0;
+    const campSummary = campResults.map(r => {
+      const c = r.campaign || {}, m = r.metrics || {};
+      const sp = Number(m.costMicros || 0) / 1e6;
+      const im = Number(m.impressions || 0), cl = Number(m.clicks || 0);
+      const cv = Number(m.conversions || 0), vl = Number(m.conversionsValue || 0);
+      totalSpend += sp; totalImpr += im; totalClicks += cl; totalConv += cv; totalConvVal += vl;
+      return `${c.name} | ${c.status || ''} | ${c.advertisingChannelType || ''} | Spend: €${f(sp)} | CTR: ${im > 0 ? f((cl/im)*100) : '0.00'}% | Conv: ${f(cv)} | CPA: €${cv > 0 ? f(sp/cv) : 'N/A'} | ROAS: ${sp > 0 ? f(vl/sp) : '0.00'}x`;
+    }).join('\n');
+
+    const kwSummary = kwResults.slice(0, 20).map(r => {
+      const agc = r.adGroupCriterion || {}, kw = agc.keyword || {}, m = r.metrics || {};
+      const sp = Number(m.costMicros || 0) / 1e6;
+      const im = Number(m.impressions || 0), cl = Number(m.clicks || 0);
+      return `[${kw.matchType || '?'}] "${kw.text}" | ${r.campaign?.name || ''} | €${f(sp)} | CTR: ${im > 0 ? f((cl/im)*100) : '0.00'}% | Conv: ${f(Number(m.conversions || 0))}`;
+    }).join('\n');
+
+    // Search terms with spend but no conversions = negative keyword candidates
+    const negCandidates = stResults.filter(r => Number(r.metrics?.conversions || 0) === 0).slice(0, 15).map(r => {
+      const st = r.searchTermView || {}, m = r.metrics || {};
+      return `"${st.searchTerm}" | ${r.campaign?.name || ''} | €${f(Number(m.costMicros || 0)/1e6)} | ${m.clicks || 0} clicks | 0 conv`;
+    }).join('\n');
+
+    const system = `You are an expert Google Ads copywriter and performance strategist. Return ONLY valid JSON — no markdown, no code fences, no explanation. Start your response with {.
+
+Return exactly this structure:
+{
+  "headlines": ["headline 1", "headline 2", ...],
+  "descriptions": ["desc 1", "desc 2", ...],
+  "keywords": [
+    { "keyword": "...", "match_type": "BROAD|PHRASE|EXACT", "rationale": "one sentence why" }
+  ],
+  "negative_keywords": [
+    { "keyword": "...", "rationale": "one sentence why to exclude" }
+  ],
+  "budget_recommendations": [
+    { "campaign": "exact campaign name", "action": "increase|decrease|pause", "rationale": "one sentence with specific numbers" }
+  ]
+}
+
+Rules:
+- 15 headlines (benefit-focused, ≤30 chars each, varied angles)
+- 10 descriptions (include a CTA, ≤90 chars each, specific to this business)
+- 10 keyword suggestions based on gaps in existing keyword coverage
+- 10 negative keywords (use the search term data provided to identify irrelevant queries)
+- One budget recommendation per campaign with actual numbers`;
+
+    const userMsg = `Account: ${accountName} | Period: ${range}
+
+TOTALS — Spend: €${f(totalSpend)} | CTR: ${totalImpr > 0 ? f((totalClicks/totalImpr)*100) : '0.00'}% | Conv: ${f(totalConv)} | CPA: €${totalConv > 0 ? f(totalSpend/totalConv) : 'N/A'} | ROAS: ${totalSpend > 0 ? f(totalConvVal/totalSpend) : '0.00'}x
+
+CAMPAIGNS:
+${campSummary || 'No campaign spend in this period'}
+
+CURRENT KEYWORDS (top by spend):
+${kwSummary || 'No keyword data'}
+
+SEARCH TERMS WITH SPEND BUT NO CONVERSIONS (negative keyword candidates):
+${negCandidates || 'None with significant spend'}`;
+
+    const raw = await _aimlText('text-copy', system, userMsg, { max_tokens: 2400 });
+
+    let parsed;
+    try {
+      parsed = JSON.parse(raw.replace(/^```json\s*/i, '').replace(/```\s*$/, '').trim());
+    } catch (_) {
+      const m = raw.match(/\{[\s\S]*\}/);
+      if (!m) { console.error('[Ads/recommend] unparseable AI response:', raw.slice(0, 300)); return res.status(500).json({ error: 'AI response could not be parsed — try again' }); }
+      parsed = JSON.parse(m[0]);
+    }
+
+    console.log('[Ads/recommend] headlines:', parsed.headlines?.length, '| negatives:', parsed.negative_keywords?.length);
+    res.json(parsed);
+  } catch (err) {
+    console.error('[Ads/recommend]', err.message);
+    res.status(err.status || 500).json({ error: err.message || 'Internal server error' });
+  }
 });
 
 // GET /api/google/diag — non-destructive diagnostic: token state + dev token presence
