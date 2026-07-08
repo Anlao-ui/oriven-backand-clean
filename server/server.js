@@ -3451,7 +3451,7 @@ async function _getGadsAccess(user) {
 
   console.log('[GadsAccess] customerId:', customerId, '| loginCustomerId:', loginCustomerId, '| via MCC:', !!active.parent_manager_id);
 
-  return { accessToken, customerId, accountName: active.account_name || customerId, loginCustomerId };
+  return { accessToken, customerId, accountName: active.account_name || customerId, loginCustomerId, activeAccount: active };
 }
 
 // Execute a GAQL search query against the Ads API. Returns results[].
@@ -3471,20 +3471,22 @@ async function _gadsQuery(accessToken, customerId, query, loginCustomerId) {
     'login-customer-id': effectiveLoginId
   };
 
+  const requestBody = JSON.stringify({ query });
   console.log('[GAQL] ▶ POST', url);
   console.log('[GAQL]   customer_id (URL)   :', customerId);
   console.log('[GAQL]   login-customer-id    :', effectiveLoginId);
   console.log('[GAQL]   query               :', query.trim().replace(/\s+/g, ' '));
+  console.log('[GAQL]   request body        :', requestBody);
 
   try {
-    const res  = await fetch(url, { method: 'POST', headers, body: JSON.stringify({ query }), signal: ctrl.signal })
+    const res  = await fetch(url, { method: 'POST', headers, body: requestBody, signal: ctrl.signal })
       .finally(() => clearTimeout(tid));
     const text = await res.text();
 
     console.log('[GAQL] ◀ HTTP', res.status, url);
 
     if (!res.ok) {
-      // Parse and log the full Google Ads error payload
+      // Parse and log the full Google Ads error payload — no truncation
       let parsed = null;
       try { parsed = JSON.parse(text); } catch (_) {}
 
@@ -3492,29 +3494,33 @@ async function _gadsQuery(accessToken, customerId, query, loginCustomerId) {
       const statusCode = gadsErr && gadsErr.status;
       const message    = (gadsErr && gadsErr.message) || ('Google Ads API error ' + res.status);
 
-      // Extract granular error codes from details array
+      // Extract granular error codes + triggers from GoogleAdsFailure details
       let errorCodes = [];
+      let triggers   = [];
       if (gadsErr && Array.isArray(gadsErr.details)) {
         gadsErr.details.forEach(function(detail) {
           if (Array.isArray(detail.errors)) {
             detail.errors.forEach(function(e) {
               if (e.errorCode) errorCodes.push(JSON.stringify(e.errorCode));
               if (e.message)   errorCodes.push('msg:' + e.message);
+              if (e.trigger)   triggers.push(JSON.stringify(e.trigger));
             });
           }
         });
       }
 
-      console.error('[GAQL] ✗ Error details:');
+      console.error('[GAQL] ✗ FULL ERROR BODY:', text);
       console.error('[GAQL]   status       :', statusCode);
       console.error('[GAQL]   message      :', message);
       console.error('[GAQL]   errorCodes   :', errorCodes.join(' | '));
-      console.error('[GAQL]   full body    :', text.slice(0, 1000));
+      console.error('[GAQL]   triggers     :', triggers.join(' | '));
 
       const detail = errorCodes.length ? ' [' + errorCodes.join('; ') + ']' : '';
       const err = new Error(message + detail);
-      err.gadsStatus = statusCode;
+      err.gadsStatus     = statusCode;
       err.gadsErrorCodes = errorCodes;
+      err.gadsTriggers   = triggers;
+      err.gadsRawBody    = text;
       throw err;
     }
 
@@ -3529,14 +3535,20 @@ async function _gadsQuery(accessToken, customerId, query, loginCustomerId) {
 
 // ── GET /api/ads/overview — account KPIs + campaign list ─────────
 app.get('/api/ads/overview', async (req, res) => {
+  let _diagCustomerId = null, _diagLoginId = null, _diagActive = null, _diagQuery = null;
   try {
     const user = await getUserFromToken(req);
     if (!user) return res.status(401).json({ error: 'Authentication required' });
 
-    const { accessToken, customerId, accountName, loginCustomerId } = await _getGadsAccess(user);
+    const { accessToken, customerId, accountName, loginCustomerId, activeAccount } = await _getGadsAccess(user);
+    _diagCustomerId = customerId;
+    _diagLoginId    = loginCustomerId;
+    _diagActive     = activeAccount;
 
     const VALID_RANGES = ['LAST_7_DAYS', 'LAST_14_DAYS', 'LAST_30_DAYS', 'LAST_90_DAYS'];
     const range = VALID_RANGES.includes(req.query.date_range) ? req.query.date_range : 'LAST_30_DAYS';
+
+    _diagQuery = `SELECT campaign.id, campaign.name, campaign.status, campaign.advertising_channel_type, metrics.cost_micros, metrics.impressions, metrics.clicks, metrics.ctr, metrics.conversions, metrics.cost_per_conversion, metrics.conversions_value FROM campaign WHERE segments.date DURING ${range} AND campaign.status != 'REMOVED' ORDER BY metrics.cost_micros DESC LIMIT 100`;
 
     const results = await _gadsQuery(accessToken, customerId, `
       SELECT
@@ -3609,11 +3621,29 @@ app.get('/api/ads/overview', async (req, res) => {
       campaigns
     });
   } catch (err) {
-    console.error('[Ads/overview]', err.message);
+    let rawError = null;
+    try { rawError = err.gadsRawBody ? JSON.parse(err.gadsRawBody) : null; } catch (_) {}
+    console.error('[Ads/overview] DIAGNOSTIC DUMP:');
+    console.error('  active_ad_account :', JSON.stringify(_diagActive));
+    console.error('  customer_id       :', _diagCustomerId);
+    console.error('  login_customer_id :', _diagLoginId);
+    console.error('  parent_manager_id :', _diagActive && _diagActive.parent_manager_id);
+    console.error('  gaql              :', _diagQuery);
+    console.error('  gads_status       :', err.gadsStatus);
+    console.error('  gads_codes        :', JSON.stringify(err.gadsErrorCodes));
+    console.error('  triggers          :', JSON.stringify(err.gadsTriggers));
+    console.error('  raw_gads_error    :', err.gadsRawBody);
     res.status(err.status || 500).json({
-      error:          err.message || 'Internal server error',
-      gads_status:    err.gadsStatus    || null,
-      gads_codes:     err.gadsErrorCodes || null
+      error:             err.message || 'Internal server error',
+      active_ad_account: _diagActive         || null,
+      customer_id:       _diagCustomerId      || null,
+      login_customer_id: _diagLoginId         || null,
+      parent_manager_id: (_diagActive && _diagActive.parent_manager_id) || null,
+      gaql:              _diagQuery           || null,
+      gads_status:       err.gadsStatus       || null,
+      gads_codes:        err.gadsErrorCodes   || null,
+      triggers:          err.gadsTriggers     || null,
+      raw_gads_error:    rawError             || null
     });
   }
 });
