@@ -3378,38 +3378,85 @@ async function _getGadsAccess(user) {
   }
 
   const active = intg.active_ad_account;
+  console.log('[GadsAccess] active_ad_account from DB:', JSON.stringify(active));
+
   if (!active || !active.account_id) {
     const e = new Error('No active Google Ads account selected'); e.status = 400; throw e;
   }
 
-  return { accessToken, customerId: active.account_id, accountName: active.account_name || active.account_id };
+  // Strip dashes if present (Google Ads IDs must be pure digits)
+  const customerId = String(active.account_id).replace(/-/g, '');
+  console.log('[GadsAccess] account_id raw:', active.account_id, '| normalised:', customerId);
+
+  return { accessToken, customerId, accountName: active.account_name || customerId };
 }
 
 // Execute a GAQL search query against the Ads API. Returns results[].
-async function _gadsQuery(accessToken, customerId, query) {
+// loginCustomerId is the Manager Account ID when querying through MCC.
+// When absent it defaults to customerId (direct account access).
+async function _gadsQuery(accessToken, customerId, query, loginCustomerId) {
   const TIMEOUT_MS = 20000;
   const ctrl = new AbortController();
   const tid  = setTimeout(() => ctrl.abort(), TIMEOUT_MS);
 
+  const effectiveLoginId = loginCustomerId || customerId;
   const url     = 'https://googleads.googleapis.com/v24/customers/' + customerId + '/googleAds:search';
   const headers = {
     'Authorization':     'Bearer ' + accessToken,
     'developer-token':   GOOGLE_ADS_DEVELOPER_TOKEN,
     'Content-Type':      'application/json',
-    'login-customer-id': customerId
+    'login-customer-id': effectiveLoginId
   };
+
+  console.log('[GAQL] ▶ POST', url);
+  console.log('[GAQL]   customer_id (URL)   :', customerId);
+  console.log('[GAQL]   login-customer-id    :', effectiveLoginId);
+  console.log('[GAQL]   query               :', query.trim().replace(/\s+/g, ' '));
 
   try {
     const res  = await fetch(url, { method: 'POST', headers, body: JSON.stringify({ query }), signal: ctrl.signal })
       .finally(() => clearTimeout(tid));
     const text = await res.text();
 
+    console.log('[GAQL] ◀ HTTP', res.status, url);
+
     if (!res.ok) {
-      let msg = 'Google Ads API error ' + res.status;
-      try { const j = JSON.parse(text); msg = (j.error && j.error.message) ? j.error.message : msg; } catch (_) {}
-      throw new Error(msg);
+      // Parse and log the full Google Ads error payload
+      let parsed = null;
+      try { parsed = JSON.parse(text); } catch (_) {}
+
+      const gadsErr    = parsed && parsed.error;
+      const statusCode = gadsErr && gadsErr.status;
+      const message    = (gadsErr && gadsErr.message) || ('Google Ads API error ' + res.status);
+
+      // Extract granular error codes from details array
+      let errorCodes = [];
+      if (gadsErr && Array.isArray(gadsErr.details)) {
+        gadsErr.details.forEach(function(detail) {
+          if (Array.isArray(detail.errors)) {
+            detail.errors.forEach(function(e) {
+              if (e.errorCode) errorCodes.push(JSON.stringify(e.errorCode));
+              if (e.message)   errorCodes.push('msg:' + e.message);
+            });
+          }
+        });
+      }
+
+      console.error('[GAQL] ✗ Error details:');
+      console.error('[GAQL]   status       :', statusCode);
+      console.error('[GAQL]   message      :', message);
+      console.error('[GAQL]   errorCodes   :', errorCodes.join(' | '));
+      console.error('[GAQL]   full body    :', text.slice(0, 1000));
+
+      const detail = errorCodes.length ? ' [' + errorCodes.join('; ') + ']' : '';
+      const err = new Error(message + detail);
+      err.gadsStatus = statusCode;
+      err.gadsErrorCodes = errorCodes;
+      throw err;
     }
+
     const data = JSON.parse(text);
+    console.log('[GAQL] ✓ results:', (data.results || []).length);
     return data.results || [];
   } catch (err) {
     if (err.name === 'AbortError') throw new Error('Google Ads API timed out (>20 s)');
@@ -3500,7 +3547,11 @@ app.get('/api/ads/overview', async (req, res) => {
     });
   } catch (err) {
     console.error('[Ads/overview]', err.message);
-    res.status(err.status || 500).json({ error: err.message || 'Internal server error' });
+    res.status(err.status || 500).json({
+      error:          err.message || 'Internal server error',
+      gads_status:    err.gadsStatus    || null,
+      gads_codes:     err.gadsErrorCodes || null
+    });
   }
 });
 
@@ -3577,7 +3628,7 @@ app.get('/api/ads/campaigns', async (req, res) => {
     });
   } catch (err) {
     console.error('[Ads/campaigns]', err.message);
-    res.status(err.status || 500).json({ error: err.message || 'Internal server error' });
+    res.status(err.status || 500).json({ error: err.message || 'Internal server error', gads_status: err.gadsStatus || null, gads_codes: err.gadsErrorCodes || null });
   }
 });
 
@@ -3830,7 +3881,7 @@ app.get('/api/ads/campaign/:id', async (req, res) => {
     res.json({ campaign_info, ads, keywords, search_terms, ad_groups, date_range: range });
   } catch (err) {
     console.error('[Ads/campaign]', err.message);
-    res.status(err.status || 500).json({ error: err.message || 'Internal server error' });
+    res.status(err.status || 500).json({ error: err.message || 'Internal server error', gads_status: err.gadsStatus || null, gads_codes: err.gadsErrorCodes || null });
   }
 });
 
@@ -4073,7 +4124,7 @@ ${zeroCampLines.length > 0 ? zeroCampLines.join('\n') : 'None — all campaigns 
     });
   } catch (err) {
     console.error('[Ads/analyze]', err.message);
-    res.status(err.status || 500).json({ error: err.message || 'Internal server error' });
+    res.status(err.status || 500).json({ error: err.message || 'Internal server error', gads_status: err.gadsStatus || null, gads_codes: err.gadsErrorCodes || null });
   }
 });
 
@@ -4210,7 +4261,7 @@ ${negCandidates || 'None with significant spend'}`;
     res.json(parsed);
   } catch (err) {
     console.error('[Ads/recommend]', err.message);
-    res.status(err.status || 500).json({ error: err.message || 'Internal server error' });
+    res.status(err.status || 500).json({ error: err.message || 'Internal server error', gads_status: err.gadsStatus || null, gads_codes: err.gadsErrorCodes || null });
   }
 });
 
