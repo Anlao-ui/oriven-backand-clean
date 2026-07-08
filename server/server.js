@@ -4430,7 +4430,18 @@ app.use(function(req, res) {
 // Express requires exactly 4 arguments for error handlers.
 app.use(function(err, req, res, _next) {
   console.error('[ServerError]', req.method, req.url, err.message);
-  res.status(err.status || 500).json({ error: err.message || 'Internal server error' });
+  console.error('[ServerError] stack:', err.stack);
+  console.error('[ServerError] gadsRawBody:', err.gadsRawBody || '(none)');
+  let rawGadsError = null;
+  try { rawGadsError = err.gadsRawBody ? JSON.parse(err.gadsRawBody) : null; } catch (_) {}
+  res.status(err.status || 500).json({
+    error:          err.message   || 'Internal server error',
+    gads_status:    err.gadsStatus     || null,
+    gads_codes:     err.gadsErrorCodes || null,
+    triggers:       err.gadsTriggers   || null,
+    raw_gads_error: rawGadsError       || null,
+    stack:          err.stack          || null
+  });
 });
 
 // ── Daily cron: delete unverified accounts older than 14 days ───
