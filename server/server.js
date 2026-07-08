@@ -2998,46 +2998,97 @@ async function _fetchGoogleAdsAccounts(accessToken) {
   console.log('[Google Ads] accessible customer IDs:', customerIds);
   if (customerIds.length === 0) return { accounts: [], error: null };
 
-  // Step 2 — fetch descriptive name + currency for each customer (up to 20)
+  // Step 2 — fetch name, currency, manager flag, status for each direct customer (up to 20)
   const accounts = [];
   for (const customerId of customerIds.slice(0, 20)) {
+    let acctName   = customerId;
+    let acctCur    = null;
+    let acctTz     = null;
+    let isManager  = false;
+    let acctStatus = 'UNKNOWN';
+
     try {
       const searchUrl = 'https://googleads.googleapis.com/v24/customers/' + customerId + '/googleAds:search';
       console.log('[Google Ads] POST', searchUrl);
-      const searchRes = await _fetchWithTimeout(
-        searchUrl,
-        {
-          method:  'POST',
-          headers: Object.assign({ 'Content-Type': 'application/json', 'login-customer-id': customerId }, headers),
-          body:    JSON.stringify({
-            query: 'SELECT customer.id, customer.descriptive_name, customer.currency_code, customer.time_zone FROM customer LIMIT 1'
-          })
-        }
-      );
+      const searchRes = await _fetchWithTimeout(searchUrl, {
+        method:  'POST',
+        headers: Object.assign({ 'Content-Type': 'application/json', 'login-customer-id': customerId }, headers),
+        body:    JSON.stringify({
+          query: 'SELECT customer.id, customer.descriptive_name, customer.currency_code, customer.time_zone, customer.manager, customer.status FROM customer LIMIT 1'
+        })
+      });
       const searchCT   = searchRes.headers.get('content-type') || '';
       const searchText = await searchRes.text();
-      console.log('[Google Ads] search', customerId, 'status:', searchRes.status, '| ct:', searchCT, '| body:', searchText.slice(0, 300));
+      console.log('[Google Ads] customer', customerId, 'status:', searchRes.status, '| body:', searchText.slice(0, 300));
 
       if (searchRes.ok && searchCT.includes('application/json')) {
         try {
-          const sd      = JSON.parse(searchText);
-          const results = sd.results || [];
-          const c       = (results.length > 0 && results[0].customer) ? results[0].customer : null;
-          accounts.push({
-            customer_id: customerId,
-            name:        (c && c.descriptiveName) ? c.descriptiveName : customerId,
-            currency:    (c && c.currencyCode)    ? c.currencyCode    : null,
-            timezone:    (c && c.timeZone)        ? c.timeZone        : null
-          });
-        } catch (_) {
-          accounts.push({ customer_id: customerId, name: customerId, currency: null, timezone: null });
-        }
-      } else {
-        accounts.push({ customer_id: customerId, name: customerId, currency: null, timezone: null });
+          const sd = JSON.parse(searchText);
+          const c  = (sd.results && sd.results.length > 0 && sd.results[0].customer) ? sd.results[0].customer : null;
+          if (c) {
+            acctName   = c.descriptiveName || customerId;
+            acctCur    = c.currencyCode    || null;
+            acctTz     = c.timeZone        || null;
+            isManager  = c.manager === true;
+            acctStatus = c.status          || 'UNKNOWN';
+          }
+        } catch (_) {}
       }
     } catch (err) {
-      console.warn('[Google Ads] search threw for', customerId, ':', err.name, err.message);
-      accounts.push({ customer_id: customerId, name: customerId, currency: null, timezone: null });
+      console.warn('[Google Ads] customer query threw for', customerId, ':', err.message);
+    }
+
+    console.log('[Google Ads] account', customerId, '| name:', acctName, '| is_manager:', isManager, '| status:', acctStatus);
+    accounts.push({
+      customer_id: customerId,
+      name:        acctName,
+      currency:    acctCur,
+      timezone:    acctTz,
+      is_manager:  isManager,
+      status:      acctStatus
+    });
+
+    // For manager accounts — fetch direct (level=1) non-manager sub-clients
+    if (isManager) {
+      try {
+        const subUrl = 'https://googleads.googleapis.com/v24/customers/' + customerId + '/googleAds:search';
+        const subRes = await _fetchWithTimeout(subUrl, {
+          method:  'POST',
+          headers: Object.assign({ 'Content-Type': 'application/json', 'login-customer-id': customerId }, headers),
+          body:    JSON.stringify({
+            query: `SELECT customer_client.id, customer_client.descriptive_name, customer_client.manager,
+                           customer_client.status, customer_client.currency_code, customer_client.time_zone
+                    FROM customer_client
+                    WHERE customer_client.level = 1 AND customer_client.manager = false`
+          })
+        });
+        const subCT   = subRes.headers.get('content-type') || '';
+        const subText = await subRes.text();
+        console.log('[Google Ads] sub-clients for', customerId, 'status:', subRes.status, '| body:', subText.slice(0, 400));
+
+        if (subRes.ok && subCT.includes('application/json')) {
+          const subData = JSON.parse(subText);
+          (subData.results || []).forEach(function(r) {
+            const cc = r.customerClient || {};
+            if (!cc.id) return;
+            const subId = String(cc.id);
+            // Don't duplicate if already in the direct list
+            if (accounts.some(function(a) { return a.customer_id === subId; })) return;
+            console.log('[Google Ads] sub-client', subId, '| name:', cc.descriptiveName, '| status:', cc.status);
+            accounts.push({
+              customer_id:       subId,
+              name:              cc.descriptiveName || subId,
+              currency:          cc.currencyCode    || null,
+              timezone:          cc.timeZone        || null,
+              is_manager:        false,
+              status:            cc.status          || 'UNKNOWN',
+              parent_manager_id: customerId
+            });
+          });
+        }
+      } catch (subErr) {
+        console.warn('[Google Ads] sub-client fetch failed for MCC', customerId, ':', subErr.message);
+      }
     }
   }
 
@@ -3304,13 +3355,16 @@ app.post('/api/google/active-account', async (req, res) => {
     const user = await getUserFromToken(req);
     if (!user) return res.status(401).json({ error: 'Authentication required' });
 
-    const { account_id, account_name } = req.body || {};
+    const { account_id, account_name, is_manager, status, parent_manager_id } = req.body || {};
     if (!account_id) return res.status(400).json({ error: 'account_id is required' });
 
     const active_ad_account = {
-      platform:     'google_ads',
-      account_id:   String(account_id),
-      account_name: String(account_name || '')
+      platform:          'google_ads',
+      account_id:        String(account_id),
+      account_name:      String(account_name || ''),
+      is_manager:        !!is_manager,
+      status:            status            || null,
+      parent_manager_id: parent_manager_id ? String(parent_manager_id) : null
     };
 
     const { error } = await supabaseAdmin
@@ -3381,14 +3435,23 @@ async function _getGadsAccess(user) {
   console.log('[GadsAccess] active_ad_account from DB:', JSON.stringify(active));
 
   if (!active || !active.account_id) {
-    const e = new Error('No active Google Ads account selected'); e.status = 400; throw e;
+    const e = new Error('No active Google Ads account selected — go to Integrations and choose an account.'); e.status = 400; throw e;
+  }
+
+  if (active.is_manager) {
+    const e = new Error('The selected account is a Manager Account (MCC) and has no campaigns. Please select a Client Account in the Integrations page.');
+    e.status = 400; throw e;
   }
 
   // Strip dashes if present (Google Ads IDs must be pure digits)
-  const customerId = String(active.account_id).replace(/-/g, '');
-  console.log('[GadsAccess] account_id raw:', active.account_id, '| normalised:', customerId);
+  const customerId      = String(active.account_id).replace(/-/g, '');
+  const loginCustomerId = active.parent_manager_id
+    ? String(active.parent_manager_id).replace(/-/g, '')
+    : customerId;
 
-  return { accessToken, customerId, accountName: active.account_name || customerId };
+  console.log('[GadsAccess] customerId:', customerId, '| loginCustomerId:', loginCustomerId, '| via MCC:', !!active.parent_manager_id);
+
+  return { accessToken, customerId, accountName: active.account_name || customerId, loginCustomerId };
 }
 
 // Execute a GAQL search query against the Ads API. Returns results[].
@@ -3470,7 +3533,7 @@ app.get('/api/ads/overview', async (req, res) => {
     const user = await getUserFromToken(req);
     if (!user) return res.status(401).json({ error: 'Authentication required' });
 
-    const { accessToken, customerId, accountName } = await _getGadsAccess(user);
+    const { accessToken, customerId, accountName, loginCustomerId } = await _getGadsAccess(user);
 
     const VALID_RANGES = ['LAST_7_DAYS', 'LAST_14_DAYS', 'LAST_30_DAYS', 'LAST_90_DAYS'];
     const range = VALID_RANGES.includes(req.query.date_range) ? req.query.date_range : 'LAST_30_DAYS';
@@ -3493,7 +3556,7 @@ app.get('/api/ads/overview', async (req, res) => {
         AND campaign.status != 'REMOVED'
       ORDER BY metrics.cost_micros DESC
       LIMIT 100
-    `);
+    `, loginCustomerId);
 
     let totalCostMicros = 0, totalImpr = 0, totalClicks = 0, totalConv = 0, totalConvVal = 0;
 
@@ -3561,7 +3624,7 @@ app.get('/api/ads/campaigns', async (req, res) => {
     const user = await getUserFromToken(req);
     if (!user) return res.status(401).json({ error: 'Authentication required' });
 
-    const { accessToken, customerId, accountName } = await _getGadsAccess(user);
+    const { accessToken, customerId, accountName, loginCustomerId } = await _getGadsAccess(user);
 
     const VALID_RANGES = ['LAST_7_DAYS', 'LAST_14_DAYS', 'LAST_30_DAYS', 'LAST_90_DAYS'];
     const range = VALID_RANGES.includes(req.query.date_range) ? req.query.date_range : 'LAST_30_DAYS';
@@ -3585,7 +3648,7 @@ app.get('/api/ads/campaigns', async (req, res) => {
         AND campaign.status != 'REMOVED'
       ORDER BY metrics.cost_micros DESC
       LIMIT 100
-    `);
+    `, loginCustomerId);
 
     let totalSpend = 0, totalImpr = 0, totalClicks = 0, totalConv = 0, totalConvVal = 0;
     const campaigns = results.map(r => {
@@ -3638,7 +3701,7 @@ app.get('/api/ads/campaign/:id', async (req, res) => {
     const user = await getUserFromToken(req);
     if (!user) return res.status(401).json({ error: 'Authentication required' });
 
-    const { accessToken, customerId } = await _getGadsAccess(user);
+    const { accessToken, customerId, loginCustomerId } = await _getGadsAccess(user);
     const campaignId = req.params.id.replace(/\D/g, ''); // digits only
     if (!campaignId) return res.status(400).json({ error: 'Invalid campaign id' });
 
@@ -3678,7 +3741,7 @@ app.get('/api/ads/campaign/:id', async (req, res) => {
           AND ad_group_ad.status != 'REMOVED'
         ORDER BY metrics.impressions DESC
         LIMIT 50
-      `),
+      `, loginCustomerId),
       _gadsQuery(accessToken, customerId, `
         SELECT
           ad_group_criterion.keyword.text,
@@ -3694,7 +3757,7 @@ app.get('/api/ads/campaign/:id', async (req, res) => {
           AND ad_group_criterion.status != 'REMOVED'
         ORDER BY metrics.cost_micros DESC
         LIMIT 50
-      `).catch(() => []),
+      `, loginCustomerId).catch(() => []),
       _gadsQuery(accessToken, customerId, `
         SELECT
           search_term_view.search_term,
@@ -3710,7 +3773,7 @@ app.get('/api/ads/campaign/:id', async (req, res) => {
           AND metrics.impressions > 0
         ORDER BY metrics.cost_micros DESC
         LIMIT 50
-      `).catch(() => []),
+      `, loginCustomerId).catch(() => []),
       _gadsQuery(accessToken, customerId, `
         SELECT
           ad_group.id,
@@ -3726,7 +3789,7 @@ app.get('/api/ads/campaign/:id', async (req, res) => {
           AND ad_group.status != 'REMOVED'
         ORDER BY metrics.cost_micros DESC
         LIMIT 30
-      `).catch(() => []),
+      `, loginCustomerId).catch(() => []),
 
       // Campaign budget + channel info
       _gadsQuery(accessToken, customerId, `
@@ -3742,7 +3805,7 @@ app.get('/api/ads/campaign/:id', async (req, res) => {
         FROM campaign
         WHERE campaign.id = ${campaignId}
         LIMIT 1
-      `).catch(() => [])
+      `, loginCustomerId).catch(() => [])
     ]);
 
     // Extract budget from campaign info query
@@ -3893,7 +3956,7 @@ app.get('/api/ads/campaign/:id/assets', async (req, res) => {
     const user = await getUserFromToken(req);
     if (!user) return res.status(401).json({ error: 'Authentication required' });
 
-    const { accessToken, customerId } = await _getGadsAccess(user);
+    const { accessToken, customerId, loginCustomerId } = await _getGadsAccess(user);
     const campaignId = req.params.id.replace(/\D/g, '');
     if (!campaignId) return res.status(400).json({ error: 'Invalid campaign id' });
 
@@ -3910,7 +3973,7 @@ app.get('/api/ads/campaign/:id/assets', async (req, res) => {
         AND asset.type = 'IMAGE'
       ORDER BY asset.id
       LIMIT 50
-    `).catch(() => []);
+    `, loginCustomerId).catch(() => []);
 
     const assets = rows.map(r => {
       const a  = r.asset || {};
@@ -3939,7 +4002,7 @@ app.post('/api/ads/analyze', async (req, res) => {
     const user = await getUserFromToken(req);
     if (!user) return res.status(401).json({ error: 'Authentication required' });
 
-    const { accessToken, customerId, accountName } = await _getGadsAccess(user);
+    const { accessToken, customerId, accountName, loginCustomerId } = await _getGadsAccess(user);
 
     const VALID_RANGES = ['LAST_7_DAYS', 'LAST_14_DAYS', 'LAST_30_DAYS', 'LAST_90_DAYS'];
     const range = VALID_RANGES.includes(req.body && req.body.date_range) ? req.body.date_range : 'LAST_30_DAYS';
@@ -3959,7 +4022,7 @@ app.post('/api/ads/analyze', async (req, res) => {
           AND campaign.status != 'REMOVED'
         ORDER BY metrics.cost_micros DESC
         LIMIT 50
-      `),
+      `, loginCustomerId),
 
       // Keywords — top spenders for quality analysis
       _gadsQuery(accessToken, customerId, `
@@ -3974,7 +4037,7 @@ app.post('/api/ads/analyze', async (req, res) => {
           AND metrics.impressions > 0
         ORDER BY metrics.cost_micros DESC
         LIMIT 50
-      `).catch(() => []),
+      `, loginCustomerId).catch(() => []),
 
       // Search terms — detect irrelevant queries and wasted spend
       _gadsQuery(accessToken, customerId, `
@@ -3990,7 +4053,7 @@ app.post('/api/ads/analyze', async (req, res) => {
           AND metrics.impressions > 0
         ORDER BY metrics.cost_micros DESC
         LIMIT 50
-      `).catch(() => []),
+      `, loginCustomerId).catch(() => []),
 
       // Ads — detect low-performing creatives
       _gadsQuery(accessToken, customerId, `
@@ -4008,7 +4071,7 @@ app.post('/api/ads/analyze', async (req, res) => {
           AND metrics.impressions > 0
         ORDER BY metrics.impressions DESC
         LIMIT 30
-      `).catch(() => [])
+      `, loginCustomerId).catch(() => [])
     ]);
 
     const f = (n, d = 2) => (typeof n === 'number' ? n.toFixed(d) : '0');
@@ -4136,7 +4199,7 @@ app.post('/api/ads/recommend', async (req, res) => {
     const user = await getUserFromToken(req);
     if (!user) return res.status(401).json({ error: 'Authentication required' });
 
-    const { accessToken, customerId, accountName } = await _getGadsAccess(user);
+    const { accessToken, customerId, accountName, loginCustomerId } = await _getGadsAccess(user);
 
     const VALID_RANGES = ['LAST_7_DAYS', 'LAST_14_DAYS', 'LAST_30_DAYS', 'LAST_90_DAYS'];
     const range = VALID_RANGES.includes(req.body && req.body.date_range) ? req.body.date_range : 'LAST_30_DAYS';
@@ -4154,7 +4217,7 @@ app.post('/api/ads/recommend', async (req, res) => {
           AND campaign.status != 'REMOVED'
         ORDER BY metrics.cost_micros DESC
         LIMIT 20
-      `),
+      `, loginCustomerId),
 
       _gadsQuery(accessToken, customerId, `
         SELECT
@@ -4168,7 +4231,7 @@ app.post('/api/ads/recommend', async (req, res) => {
           AND metrics.impressions > 0
         ORDER BY metrics.cost_micros DESC
         LIMIT 30
-      `).catch(() => []),
+      `, loginCustomerId).catch(() => []),
 
       // Search terms with spend but no conversions → negative keyword candidates
       _gadsQuery(accessToken, customerId, `
@@ -4181,7 +4244,7 @@ app.post('/api/ads/recommend', async (req, res) => {
           AND metrics.cost_micros > 1000000
         ORDER BY metrics.cost_micros DESC
         LIMIT 30
-      `).catch(() => [])
+      `, loginCustomerId).catch(() => [])
     ]);
 
     const f = (n, d = 2) => (typeof n === 'number' ? n.toFixed(d) : '0');
