@@ -3387,6 +3387,169 @@ app.post('/api/google/active-account', async (req, res) => {
 });
 
 // ════════════════════════════════════════════════════════════════
+// TIKTOK ADS INTEGRATION
+// ════════════════════════════════════════════════════════════════
+
+const TIKTOK_APP_ID     = process.env.TIKTOK_APP_ID     || '';
+const TIKTOK_APP_SECRET = process.env.TIKTOK_APP_SECRET || '';
+const TIKTOK_REDIRECT_URI = process.env.TIKTOK_REDIRECT_URI
+  || (process.env.RENDER
+    ? 'https://oriven-backand-clean.onrender.com/auth/tiktok/callback'
+    : 'http://localhost:5500/auth/tiktok/callback');
+
+const _tiktokOAuthStates = new Map();
+setInterval(function() {
+  const now = Date.now();
+  for (const [k, v] of _tiktokOAuthStates.entries()) {
+    if (v.expires < now) _tiktokOAuthStates.delete(k);
+  }
+}, 5 * 60 * 1000);
+
+// GET /api/tiktok/auth-url — returns TikTok OAuth authorization URL
+app.get('/api/tiktok/auth-url', async (req, res) => {
+  const user = await getUserFromToken(req);
+  if (!user) return res.status(401).json({ error: 'Authentication required' });
+  if (!TIKTOK_APP_ID || !TIKTOK_APP_SECRET) {
+    return res.status(503).json({ error: 'TikTok OAuth not configured on server' });
+  }
+  const state = crypto.randomBytes(16).toString('hex');
+  _tiktokOAuthStates.set(state, { userId: user.id, expires: Date.now() + 10 * 60 * 1000 });
+  const params = new URLSearchParams({
+    app_id:       TIKTOK_APP_ID,
+    state:        state,
+    redirect_uri: TIKTOK_REDIRECT_URI
+  });
+  // TODO: replace with real TikTok auth URL once app is registered
+  res.json({ url: 'https://business-api.tiktok.com/portal/auth?' + params.toString() });
+});
+
+// GET /auth/tiktok/callback — OAuth callback from TikTok
+app.get('/auth/tiktok/callback', async (req, res) => {
+  const { auth_code, state, error } = req.query;
+  const frontendBase = process.env.FRONTEND_URL
+    || (process.env.RENDER ? 'https://orivenai.com' : 'http://localhost:5500');
+
+  if (error) {
+    console.error('[TikTok OAuth] Error from provider:', error);
+    return res.redirect(frontendBase + '/app.html?tiktok_error=' + encodeURIComponent(error));
+  }
+  if (!auth_code || !state) {
+    return res.redirect(frontendBase + '/app.html?tiktok_error=missing_params');
+  }
+
+  const stateData = _tiktokOAuthStates.get(state);
+  if (!stateData || stateData.expires < Date.now()) {
+    _tiktokOAuthStates.delete(state);
+    return res.redirect(frontendBase + '/app.html?tiktok_error=invalid_state');
+  }
+  _tiktokOAuthStates.delete(state);
+  const userId = stateData.userId;
+
+  // TODO: exchange auth_code for access_token via TikTok token endpoint
+  // POST https://business-api.tiktok.com/open_api/v1.3/oauth2/access_token/
+  // body: { app_id, secret, auth_code }
+  // response: { data: { access_token, advertiser_ids: [], scope: "" } }
+  console.log('[TikTok OAuth] Placeholder callback — auth_code received, real exchange not implemented');
+  return res.redirect(frontendBase + '/app.html?tiktok_error=not_implemented');
+});
+
+// GET /api/tiktok/status — return TikTok connection status for the authenticated user
+app.get('/api/tiktok/status', async (req, res) => {
+  const user = await getUserFromToken(req);
+  if (!user) return res.status(401).json({ error: 'Authentication required' });
+
+  const { data, error } = await supabaseAdmin
+    .from('integrations')
+    .select('tiktok_display_name, connected_at, token_expiry, tiktok_ads_accounts, active_ad_account')
+    .eq('user_id', user.id)
+    .eq('provider', 'tiktok_ads')
+    .maybeSingle();
+
+  if (error) return res.status(500).json({ error: 'Database error' });
+  if (!data)  return res.json({ connected: false });
+
+  res.json({
+    connected:            true,
+    tiktok_display_name:  data.tiktok_display_name  || null,
+    connected_at:         data.connected_at          || null,
+    tiktok_ads_accounts:  data.tiktok_ads_accounts   || [],
+    active_ad_account:    data.active_ad_account      || null
+  });
+});
+
+// GET /api/tiktok/accounts — re-fetch accessible TikTok Ads accounts
+app.get('/api/tiktok/accounts', async (req, res) => {
+  const user = await getUserFromToken(req);
+  if (!user) return res.status(401).json({ error: 'Authentication required' });
+  // TODO: fetch from TikTok Business API:
+  // GET https://business-api.tiktok.com/open_api/v1.3/oauth2/advertiser/get/
+  // header: Access-Token: <access_token>
+  // Returns list of { advertiser_id, advertiser_name, currency, timezone }
+  res.status(503).json({ error: 'TikTok account fetch not yet implemented' });
+});
+
+// POST /api/tiktok/disconnect — delete TikTok integration row
+app.post('/api/tiktok/disconnect', async (req, res) => {
+  const user = await getUserFromToken(req);
+  if (!user) return res.status(401).json({ error: 'Authentication required' });
+
+  const { error } = await supabaseAdmin
+    .from('integrations')
+    .delete()
+    .eq('user_id', user.id)
+    .eq('provider', 'tiktok_ads');
+
+  if (error) {
+    console.error('[TikTok disconnect] DB error:', error.message);
+    return res.status(500).json({ error: 'Could not disconnect' });
+  }
+  console.log('[TikTok disconnect] Removed | user:', user.id);
+  res.json({ ok: true });
+});
+
+// POST /api/tiktok/active-account — set active TikTok Ads account for a user
+app.post('/api/tiktok/active-account', async (req, res) => {
+  const user = await getUserFromToken(req);
+  if (!user) return res.status(401).json({ error: 'Authentication required' });
+
+  const { advertiser_id, advertiser_name, currency } = req.body || {};
+  if (!advertiser_id) return res.status(400).json({ error: 'advertiser_id is required' });
+
+  const active_ad_account = {
+    platform:      'tiktok_ads',
+    account_id:    String(advertiser_id),
+    account_name:  String(advertiser_name || ''),
+    currency:      currency || null
+  };
+
+  const { error } = await supabaseAdmin
+    .from('integrations')
+    .update({ active_ad_account })
+    .eq('user_id', user.id)
+    .eq('provider', 'tiktok_ads');
+
+  if (error) {
+    console.error('[TikTok ActiveAccount] DB error:', error.message);
+    return res.status(500).json({ error: 'Could not update active account' });
+  }
+  res.json({ ok: true, active_ad_account });
+});
+
+// GET /api/ads/tiktok/overview — placeholder for TikTok campaign KPIs
+app.get('/api/ads/tiktok/overview', async (req, res) => {
+  // TODO: implement using TikTok Reporting API
+  // POST https://business-api.tiktok.com/open_api/v1.3/report/integrated/get/
+  res.status(503).json({ error: 'TikTok Ads reporting not yet implemented' });
+});
+
+// GET /api/ads/tiktok/campaigns — placeholder for TikTok campaign list
+app.get('/api/ads/tiktok/campaigns', async (req, res) => {
+  // TODO: implement using TikTok Campaign API
+  // GET https://business-api.tiktok.com/open_api/v1.3/campaign/get/
+  res.status(503).json({ error: 'TikTok Ads campaigns not yet implemented' });
+});
+
+// ════════════════════════════════════════════════════════════════
 // ADS DASHBOARD — campaign data, AI analysis, recommendations
 // ════════════════════════════════════════════════════════════════
 
