@@ -111,6 +111,12 @@ const supabaseAdmin = createClient(
   } else {
     console.log('✅ [ENV] STRIPE_SECRET_KEY =', sk.startsWith('sk_live') ? '✅ LIVE key' : '⚠️  TEST key');
   }
+  // Stripe Price IDs — set these in Render environment variables.
+  // Create prices in Stripe Dashboard → Products, then copy the price_... ID.
+  // STRIPE_PRICE_STARTER      → Starter plan       €9.95/month
+  // STRIPE_PRICE_CREATOR      → Creator plan        €29.95/month
+  // STRIPE_PRICE_PROFESSIONAL → Professional plan   €59.95/month
+  // Agency is Contact Sales — no Stripe price ID required.
   const _price = (k) => console.log(' ', k, '=', process.env[k] || '❌ NOT SET');
   _price('STRIPE_PRICE_STARTER');
   _price('STRIPE_PRICE_CREATOR');
