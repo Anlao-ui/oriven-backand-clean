@@ -3392,6 +3392,194 @@ app.post('/api/google/active-account', async (req, res) => {
   }
 });
 
+// GET /auth/google — server-side redirect to Google OAuth consent screen.
+// Accepts ?token= (Supabase JWT) so the frontend can build a plain link or
+// window.location redirect without a separate fetch call.
+// Example: window.location.href = '/auth/google?token=' + supabaseSession.access_token
+app.get('/auth/google', async (req, res) => {
+  const frontendBase = process.env.FRONTEND_URL
+    || (process.env.RENDER ? 'https://orivenai.com' : 'http://localhost:5500');
+
+  if (!GOOGLE_CLIENT_ID || !GOOGLE_CLIENT_SECRET) {
+    console.warn('[Google OAuth] /auth/google hit but credentials not configured');
+    return res.redirect(frontendBase + '/app.html?google_error=not_configured');
+  }
+
+  const token = (req.query.token || '').toString().trim();
+  if (!token) {
+    console.warn('[Google OAuth] /auth/google hit with no token');
+    return res.redirect(frontendBase + '/app.html?google_error=missing_token');
+  }
+
+  let userId;
+  try {
+    const { data, error } = await supabaseAdmin.auth.getUser(token);
+    if (error || !data || !data.user) {
+      console.warn('[Google OAuth] /auth/google invalid token:', error && error.message);
+      return res.redirect(frontendBase + '/app.html?google_error=invalid_token');
+    }
+    userId = data.user.id;
+  } catch (err) {
+    console.error('[Google OAuth] /auth/google token validation threw:', err.message);
+    return res.redirect(frontendBase + '/app.html?google_error=auth_error');
+  }
+
+  const state = crypto.randomBytes(16).toString('hex');
+  _googleOAuthStates.set(state, { userId, expires: Date.now() + 10 * 60 * 1000 });
+
+  const params = new URLSearchParams({
+    client_id:     GOOGLE_CLIENT_ID,
+    redirect_uri:  GOOGLE_REDIRECT_URI,
+    response_type: 'code',
+    scope:         GOOGLE_SCOPES,
+    access_type:   'offline',
+    prompt:        'consent',
+    state
+  });
+
+  console.log('[Google OAuth] Redirecting user', userId, '→ Google consent screen');
+  res.redirect('https://accounts.google.com/o/oauth2/v2/auth?' + params.toString());
+});
+
+// GET /api/google-ads/accounts — spec-exact endpoint
+// Returns: { accounts: [{ customer_id, account_name, currency_code, is_manager, status }] }
+// Reuses the same token-refresh logic and _fetchGoogleAdsAccounts helper.
+app.get('/api/google-ads/accounts', async (req, res) => {
+  try {
+    const user = await getUserFromToken(req);
+    if (!user) return res.status(401).json({ error: 'Authentication required' });
+
+    const { data: intg, error: fetchErr } = await supabaseAdmin
+      .from('integrations')
+      .select('access_token, refresh_token, token_expiry')
+      .eq('user_id', user.id)
+      .eq('provider', 'google_ads')
+      .maybeSingle();
+
+    if (fetchErr) {
+      console.error('[google-ads/accounts] DB error:', fetchErr.message);
+      return res.status(500).json({ error: 'Database error' });
+    }
+    if (!intg) return res.status(404).json({ error: 'Google Ads not connected' });
+
+    let accessToken = intg.access_token;
+
+    if (intg.token_expiry && new Date(intg.token_expiry) < new Date()) {
+      if (!intg.refresh_token) {
+        return res.status(401).json({ error: 'Token expired — reconnect Google Ads' });
+      }
+      console.log('[google-ads/accounts] Token expired — refreshing…');
+      const rfRes  = await fetch('https://oauth2.googleapis.com/token', {
+        method:  'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body:    new URLSearchParams({
+          client_id:     GOOGLE_CLIENT_ID,
+          client_secret: GOOGLE_CLIENT_SECRET,
+          refresh_token: intg.refresh_token,
+          grant_type:    'refresh_token'
+        }).toString()
+      });
+      const rfData = await rfRes.json();
+      if (!rfRes.ok || rfData.error || !rfData.access_token) {
+        console.error('[google-ads/accounts] Token refresh failed:', rfData.error);
+        return res.status(401).json({ error: 'Token refresh failed — reconnect Google Ads' });
+      }
+      accessToken = rfData.access_token;
+      await supabaseAdmin.from('integrations').update({
+        access_token: accessToken,
+        token_expiry: new Date(Date.now() + (rfData.expires_in || 3600) * 1000).toISOString()
+      }).eq('user_id', user.id).eq('provider', 'google_ads');
+    }
+
+    const { accounts, error: gadsErr } = await _fetchGoogleAdsAccounts(accessToken);
+    if (gadsErr && accounts.length === 0) {
+      return res.status(503).json({ error: gadsErr });
+    }
+
+    // Persist updated list (non-fatal)
+    await supabaseAdmin.from('integrations')
+      .update({ google_ads_accounts: accounts })
+      .eq('user_id', user.id)
+      .eq('provider', 'google_ads');
+
+    res.json({
+      accounts: accounts.map(a => ({
+        customer_id:   a.customer_id,
+        account_name:  a.name,
+        currency_code: a.currency  || null,
+        is_manager:    a.is_manager || false,
+        status:        a.status     || null
+      }))
+    });
+  } catch (err) {
+    console.error('[google-ads/accounts] unexpected error:', err.message);
+    res.status(500).json({ error: 'Internal server error', detail: err.message });
+  }
+});
+
+// GET /api/google-ads/campaigns — spec-exact endpoint
+// Returns: { campaigns: [{ campaign_name, campaign_id, status, clicks, impressions, cost, ctr, conversions }] }
+// ?date_range= LAST_7_DAYS | LAST_14_DAYS | LAST_30_DAYS | LAST_90_DAYS (default: LAST_30_DAYS)
+app.get('/api/google-ads/campaigns', async (req, res) => {
+  try {
+    const user = await getUserFromToken(req);
+    if (!user) return res.status(401).json({ error: 'Authentication required' });
+
+    const { accessToken, customerId, loginCustomerId } = await _getGadsAccess(user);
+
+    const VALID_RANGES = ['LAST_7_DAYS', 'LAST_14_DAYS', 'LAST_30_DAYS', 'LAST_90_DAYS'];
+    const range = VALID_RANGES.includes(req.query.date_range) ? req.query.date_range : 'LAST_30_DAYS';
+
+    const results = await _gadsQuery(accessToken, customerId, `
+      SELECT
+        campaign.id,
+        campaign.name,
+        campaign.status,
+        metrics.cost_micros,
+        metrics.impressions,
+        metrics.clicks,
+        metrics.ctr,
+        metrics.conversions,
+        metrics.conversions_value
+      FROM campaign
+      WHERE segments.date DURING ${range}
+        AND campaign.status != 'REMOVED'
+      ORDER BY metrics.cost_micros DESC
+      LIMIT 100
+    `, loginCustomerId);
+
+    const campaigns = results.map(r => {
+      const c           = r.campaign || {};
+      const m           = r.metrics  || {};
+      const costMicros  = Number(m.costMicros  || 0);
+      const impressions = Number(m.impressions  || 0);
+      const clicks      = Number(m.clicks       || 0);
+      const conversions = Number(m.conversions  || 0);
+      const cost        = costMicros / 1e6;
+      return {
+        campaign_name: c.name   || 'Unnamed',
+        campaign_id:   c.id     || '',
+        status:        c.status || 'UNKNOWN',
+        clicks,
+        impressions,
+        cost:        parseFloat(cost.toFixed(2)),
+        ctr:         parseFloat((impressions > 0 ? (clicks / impressions) * 100 : 0).toFixed(4)),
+        conversions: parseFloat(conversions.toFixed(2))
+      };
+    });
+
+    console.log('[google-ads/campaigns] Returned', campaigns.length, 'campaigns for', customerId, '|', range);
+    res.json({ campaigns, date_range: range, customer_id: customerId });
+  } catch (err) {
+    console.error('[google-ads/campaigns]', err.message);
+    res.status(err.status || 500).json({
+      error:       err.message          || 'Internal server error',
+      gads_status: err.gadsStatus       || null,
+      gads_codes:  err.gadsErrorCodes   || null
+    });
+  }
+});
+
 // ════════════════════════════════════════════════════════════════
 // TIKTOK ADS INTEGRATION
 // ════════════════════════════════════════════════════════════════
@@ -3946,6 +4134,8 @@ app.get('/api/ads/campaign/:id', async (req, res) => {
           ad_group_criterion.keyword.text,
           ad_group_criterion.keyword.match_type,
           ad_group_criterion.status,
+          ad_group.name,
+          ad_group.id,
           metrics.impressions,
           metrics.clicks,
           metrics.conversions,
@@ -3955,7 +4145,7 @@ app.get('/api/ads/campaign/:id', async (req, res) => {
           AND segments.date DURING ${range}
           AND ad_group_criterion.status != 'REMOVED'
         ORDER BY metrics.cost_micros DESC
-        LIMIT 50
+        LIMIT 100
       `, loginCustomerId).catch(() => []),
       _gadsQuery(accessToken, customerId, `
         SELECT
@@ -4091,18 +4281,21 @@ app.get('/api/ads/campaign/:id', async (req, res) => {
     const keywords = kwRows.map(r => {
       const agc = r.adGroupCriterion || {};
       const kw  = agc.keyword        || {};
+      const ag  = r.adGroup          || {};
       const m   = r.metrics          || {};
       const cl  = Number(m.clicks      || 0);
       const im  = Number(m.impressions || 0);
       return {
-        text:        kw.text      || '',
-        match_type:  kw.matchType || '',
-        status:      agc.status   || 'UNKNOWN',
-        impressions: im,
-        clicks:      cl,
-        ctr:         im > 0 ? (cl / im) * 100 : 0,
-        conversions: Number(m.conversions || 0),
-        spend:       Number(m.costMicros  || 0) / 1e6
+        text:         kw.text      || '',
+        match_type:   kw.matchType || '',
+        status:       agc.status   || 'UNKNOWN',
+        ad_group:     ag.name      || '',
+        ad_group_id:  String(ag.id || ''),
+        impressions:  im,
+        clicks:       cl,
+        ctr:          im > 0 ? (cl / im) * 100 : 0,
+        conversions:  Number(m.conversions || 0),
+        spend:        Number(m.costMicros  || 0) / 1e6
       };
     });
 
@@ -4657,7 +4850,10 @@ app.listen(PORT, async () => {
     'GET /api/google/auth-url',
     'GET /api/google/status',
     'POST /api/google/disconnect',
-    'GET /auth/google/callback'
+    'GET /auth/google/callback',
+    'GET /auth/google',
+    'GET /api/google-ads/accounts',
+    'GET /api/google-ads/campaigns'
   ];
   _googleRoutes.forEach(function(sig) {
     const [method, path] = sig.split(' ');
