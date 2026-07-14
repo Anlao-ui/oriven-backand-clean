@@ -3744,6 +3744,582 @@ app.get('/api/ads/tiktok/campaigns', async (req, res) => {
 });
 
 // ════════════════════════════════════════════════════════════════
+// META ADS INTEGRATION
+// Uses Facebook Marketing API v21.0
+//
+// Required Supabase columns on the `integrations` table
+// (run once in the SQL editor before using this integration):
+//   ALTER TABLE integrations
+//     ADD COLUMN IF NOT EXISTS meta_user_name    TEXT,
+//     ADD COLUMN IF NOT EXISTS meta_user_id      TEXT,
+//     ADD COLUMN IF NOT EXISTS meta_ads_accounts JSONB DEFAULT '[]';
+// ════════════════════════════════════════════════════════════════
+
+const META_APP_ID     = process.env.META_APP_ID     || '';
+const META_APP_SECRET = process.env.META_APP_SECRET || '';
+const META_REDIRECT_URI = process.env.META_REDIRECT_URI
+  || (process.env.RENDER
+    ? 'https://oriven-backand-clean.onrender.com/auth/meta/callback'
+    : 'http://localhost:5500/auth/meta/callback');
+const META_SCOPES  = 'ads_read,ads_management,business_management';
+const META_API_VER = 'v21.0';
+const META_GRAPH   = 'https://graph.facebook.com/' + META_API_VER;
+
+// CSRF state store — same 10-minute expiry pattern as Google / TikTok
+const _metaOAuthStates = new Map();
+setInterval(function() {
+  const now = Date.now();
+  for (const [k, v] of _metaOAuthStates.entries()) {
+    if (v.expires < now) _metaOAuthStates.delete(k);
+  }
+}, 5 * 60 * 1000);
+
+// ── Helper: authenticated Meta Graph API call ─────────────────────────────────
+// Throws on any API error (including 200 + error body from Facebook).
+// Error code 190/102 → maps to HTTP 401 (expired/invalid token).
+// Error code 200     → maps to HTTP 403 (missing permission).
+async function _metaFetch(path, accessToken, queryParams) {
+  const params = new URLSearchParams({ access_token: accessToken });
+  if (queryParams) {
+    Object.entries(queryParams).forEach(function([k, v]) { params.set(k, v); });
+  }
+  const url = META_GRAPH + path + '?' + params.toString();
+
+  let res, data;
+  try {
+    res  = await fetch(url, { headers: { Accept: 'application/json' } });
+    data = await res.json();
+  } catch (netErr) {
+    const e = new Error('Meta API network error: ' + netErr.message);
+    e.status = 503;
+    throw e;
+  }
+
+  if (data.error) {
+    const msg  = data.error.message || ('Meta API error code ' + data.error.code);
+    const code = data.error.code;
+    console.error('[MetaAPI]', path, '→', msg, '| code:', code, '| type:', data.error.type);
+    const e    = new Error(msg);
+    e.metaCode = code;
+    e.metaType = data.error.type;
+    e.status   = (code === 190 || code === 102) ? 401
+               : (code === 200 || code === 10)  ? 403
+               : (code === 4   || code === 17)  ? 429
+               : 503;
+    throw e;
+  }
+  return data;
+}
+
+// ── Helper: resolve valid token + active account for a user ──────────────────
+// Throws with .status set so routes can return it directly.
+async function _getMetaAccess(user) {
+  const { data: intg, error } = await supabaseAdmin
+    .from('integrations')
+    .select('access_token, token_expiry, active_ad_account')
+    .eq('user_id', user.id)
+    .eq('provider', 'meta_ads')
+    .maybeSingle();
+
+  if (error || !intg) {
+    const e = new Error('Meta Ads not connected'); e.status = 400; throw e;
+  }
+  if (intg.token_expiry && new Date(intg.token_expiry) < new Date()) {
+    const e = new Error('Meta access token expired — reconnect Meta Ads in Integrations'); e.status = 401; throw e;
+  }
+
+  const active = intg.active_ad_account;
+  if (!active || !active.account_id) {
+    const e = new Error('No active Meta Ads account selected — go to Integrations and choose an account.'); e.status = 400; throw e;
+  }
+  // Meta ad account IDs are prefixed with 'act_'
+  const accountId = active.account_id.startsWith('act_')
+    ? active.account_id
+    : 'act_' + active.account_id;
+
+  return { accessToken: intg.access_token, accountId, accountName: active.account_name || accountId };
+}
+
+// ── Helper: fetch all accessible Meta ad accounts ────────────────────────────
+async function _fetchMetaAdAccounts(accessToken) {
+  const data = await _metaFetch('/me/adaccounts', accessToken, {
+    fields: 'id,name,currency,account_status,timezone_name',
+    limit:  '50'
+  });
+  return (data.data || []).map(function(a) {
+    return {
+      account_id:   a.id,           // 'act_123456'
+      account_name: a.name          || '',
+      currency:     a.currency      || '',
+      status:       a.account_status,  // 1=ACTIVE, 2=DISABLED
+      timezone:     a.timezone_name || ''
+    };
+  });
+}
+
+// ── Helper: map Oriven date range to Meta date_preset ────────────────────────
+function _metaDatePreset(range) {
+  return { LAST_7_DAYS: 'last_7d', LAST_14_DAYS: 'last_14d', LAST_30_DAYS: 'last_30d', LAST_90_DAYS: 'last_90d' }[range] || 'last_30d';
+}
+
+// ── Helper: sum conversion actions from Meta insights.actions array ──────────
+function _metaConversions(actions) {
+  const convTypes = new Set([
+    'offsite_conversion.fb_pixel_purchase',
+    'offsite_conversion.fb_pixel_lead',
+    'purchase',
+    'lead',
+    'complete_registration'
+  ]);
+  return (actions || [])
+    .filter(function(a) { return convTypes.has(a.action_type); })
+    .reduce(function(sum, a) { return sum + Number(a.value || 0); }, 0);
+}
+
+// GET /auth/meta — server-side redirect to Facebook Login
+// Accepts ?token= (Supabase JWT) — avoids a separate API call from the frontend.
+// Frontend usage: window.location.href = '/auth/meta?token=' + session.access_token
+app.get('/auth/meta', async (req, res) => {
+  const frontendBase = process.env.FRONTEND_URL
+    || (process.env.RENDER ? 'https://orivenai.com' : 'http://localhost:5500');
+
+  if (!META_APP_ID || !META_APP_SECRET) {
+    console.warn('[Meta OAuth] /auth/meta hit but credentials not configured');
+    return res.redirect(frontendBase + '/app.html?meta_error=not_configured');
+  }
+
+  const token = (req.query.token || '').toString().trim();
+  if (!token) return res.redirect(frontendBase + '/app.html?meta_error=missing_token');
+
+  let userId;
+  try {
+    const { data, error } = await supabaseAdmin.auth.getUser(token);
+    if (error || !data || !data.user) {
+      return res.redirect(frontendBase + '/app.html?meta_error=invalid_token');
+    }
+    userId = data.user.id;
+  } catch (err) {
+    console.error('[Meta OAuth] Token validation error:', err.message);
+    return res.redirect(frontendBase + '/app.html?meta_error=auth_error');
+  }
+
+  const state = crypto.randomBytes(16).toString('hex');
+  _metaOAuthStates.set(state, { userId, expires: Date.now() + 10 * 60 * 1000 });
+
+  const params = new URLSearchParams({
+    client_id:     META_APP_ID,
+    redirect_uri:  META_REDIRECT_URI,
+    scope:         META_SCOPES,
+    state,
+    response_type: 'code'
+  });
+
+  console.log('[Meta OAuth] Redirecting user', userId, '→ Facebook Login');
+  res.redirect('https://www.facebook.com/' + META_API_VER + '/dialog/oauth?' + params.toString());
+});
+
+// GET /auth/meta/callback — OAuth callback from Facebook
+app.get('/auth/meta/callback', async (req, res) => {
+  const { code, state, error, error_description } = req.query;
+  const frontendBase = process.env.FRONTEND_URL
+    || (process.env.RENDER ? 'https://orivenai.com' : 'http://localhost:5500');
+
+  if (error) {
+    console.error('[Meta OAuth] Error from Facebook:', error, error_description);
+    return res.redirect(frontendBase + '/app.html?meta_error=' + encodeURIComponent(error));
+  }
+  if (!code || !state) {
+    return res.redirect(frontendBase + '/app.html?meta_error=missing_params');
+  }
+
+  const stateData = _metaOAuthStates.get(state);
+  if (!stateData || stateData.expires < Date.now()) {
+    _metaOAuthStates.delete(state);
+    return res.redirect(frontendBase + '/app.html?meta_error=invalid_state');
+  }
+  _metaOAuthStates.delete(state);
+  const userId = stateData.userId;
+
+  // ── Step 1: Exchange code for short-lived user access token ─────────────
+  let shortToken;
+  try {
+    const tokenRes = await fetch(META_GRAPH + '/oauth/access_token', {
+      method:  'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body:    new URLSearchParams({
+        code,
+        client_id:     META_APP_ID,
+        client_secret: META_APP_SECRET,
+        redirect_uri:  META_REDIRECT_URI
+      }).toString()
+    });
+    const tokenData = await tokenRes.json();
+    if (tokenData.error || !tokenData.access_token) {
+      console.error('[Meta OAuth] Code exchange error:', tokenData.error);
+      return res.redirect(frontendBase + '/app.html?meta_error=token_exchange');
+    }
+    shortToken = tokenData.access_token;
+    console.log('[Meta OAuth] Short-lived token obtained');
+  } catch (err) {
+    console.error('[Meta OAuth] Token exchange network error:', err.message);
+    return res.redirect(frontendBase + '/app.html?meta_error=network');
+  }
+
+  // ── Step 2: Exchange for long-lived token (valid ~60 days) ──────────────
+  let accessToken = shortToken;
+  let tokenExpiry = new Date(Date.now() + 58 * 24 * 60 * 60 * 1000).toISOString(); // safe 58-day default
+  try {
+    const extRes = await fetch(META_GRAPH + '/oauth/access_token', {
+      method:  'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body:    new URLSearchParams({
+        grant_type:        'fb_exchange_token',
+        client_id:         META_APP_ID,
+        client_secret:     META_APP_SECRET,
+        fb_exchange_token: shortToken
+      }).toString()
+    });
+    const extData = await extRes.json();
+    if (!extData.error && extData.access_token) {
+      accessToken  = extData.access_token;
+      tokenExpiry  = extData.expires_in
+        ? new Date(Date.now() + Number(extData.expires_in) * 1000).toISOString()
+        : tokenExpiry;
+      console.log('[Meta OAuth] Long-lived token obtained | expires:', tokenExpiry);
+    } else {
+      console.warn('[Meta OAuth] Could not extend token (using short-lived):', extData.error && extData.error.message);
+    }
+  } catch (err) {
+    console.warn('[Meta OAuth] Token extension network error (using short-lived):', err.message);
+  }
+
+  // ── Step 3: Fetch Facebook user info ────────────────────────────────────
+  let metaUserName = null;
+  let metaUserId   = null;
+  try {
+    const me = await _metaFetch('/me', accessToken, { fields: 'id,name' });
+    metaUserName = me.name || null;
+    metaUserId   = me.id   || null;
+  } catch (err) {
+    console.warn('[Meta OAuth] Could not fetch /me:', err.message);
+  }
+
+  // ── Step 4: Fetch accessible ad accounts ────────────────────────────────
+  let adAccounts = [];
+  try {
+    adAccounts = await _fetchMetaAdAccounts(accessToken);
+    console.log('[Meta OAuth] Fetched', adAccounts.length, 'ad account(s)');
+  } catch (err) {
+    console.warn('[Meta OAuth] Could not fetch ad accounts:', err.message);
+  }
+
+  // ── Step 5: Upsert into Supabase ────────────────────────────────────────
+  const { error: dbError } = await supabaseAdmin
+    .from('integrations')
+    .upsert({
+      user_id:           userId,
+      provider:          'meta_ads',
+      meta_user_name:    metaUserName,
+      meta_user_id:      metaUserId,
+      access_token:      accessToken,
+      refresh_token:     null,           // Meta long-lived tokens don't use refresh tokens
+      token_expiry:      tokenExpiry,
+      connected_at:      new Date().toISOString(),
+      meta_ads_accounts: adAccounts
+    }, { onConflict: 'user_id,provider' });
+
+  if (dbError) {
+    console.error('[Meta OAuth] DB upsert error:', dbError.message);
+    return res.redirect(frontendBase + '/app.html?meta_error=db');
+  }
+
+  console.log('[Meta OAuth] ✅ Connected | user:', userId, '| name:', metaUserName, '| accounts:', adAccounts.length);
+  return res.redirect(frontendBase + '/app.html?meta_connected=1');
+});
+
+// GET /api/meta/status — connection status for the authenticated user
+app.get('/api/meta/status', async (req, res) => {
+  const user = await getUserFromToken(req);
+  if (!user) return res.status(401).json({ error: 'Authentication required' });
+
+  const { data, error } = await supabaseAdmin
+    .from('integrations')
+    .select('meta_user_name, meta_user_id, connected_at, token_expiry, meta_ads_accounts, active_ad_account')
+    .eq('user_id', user.id)
+    .eq('provider', 'meta_ads')
+    .maybeSingle();
+
+  if (error) return res.status(500).json({ error: 'Database error' });
+  if (!data)  return res.json({ connected: false });
+
+  const tokenExpired = data.token_expiry && new Date(data.token_expiry) < new Date();
+  res.json({
+    connected:         !tokenExpired,
+    status:            tokenExpired ? 'expired' : 'connected',
+    meta_user_name:    data.meta_user_name    || null,
+    meta_user_id:      data.meta_user_id      || null,
+    connected_at:      data.connected_at       || null,
+    token_expiry:      data.token_expiry        || null,
+    meta_ads_accounts: data.meta_ads_accounts  || [],
+    active_ad_account: data.active_ad_account   || null
+  });
+});
+
+// GET /api/meta/accounts — re-fetch accessible ad accounts from Facebook
+app.get('/api/meta/accounts', async (req, res) => {
+  try {
+    const user = await getUserFromToken(req);
+    if (!user) return res.status(401).json({ error: 'Authentication required' });
+
+    const { data: intg, error: fetchErr } = await supabaseAdmin
+      .from('integrations')
+      .select('access_token, token_expiry')
+      .eq('user_id', user.id)
+      .eq('provider', 'meta_ads')
+      .maybeSingle();
+
+    if (fetchErr) return res.status(500).json({ error: 'Database error' });
+    if (!intg)    return res.status(404).json({ error: 'Meta Ads not connected' });
+    if (intg.token_expiry && new Date(intg.token_expiry) < new Date()) {
+      return res.status(401).json({ error: 'Meta token expired — reconnect Meta Ads' });
+    }
+
+    const accounts = await _fetchMetaAdAccounts(intg.access_token);
+
+    await supabaseAdmin.from('integrations')
+      .update({ meta_ads_accounts: accounts })
+      .eq('user_id', user.id)
+      .eq('provider', 'meta_ads');
+
+    res.json({ accounts });
+  } catch (err) {
+    console.error('[meta/accounts]', err.message);
+    res.status(err.status || 500).json({ error: err.message, meta_code: err.metaCode || null });
+  }
+});
+
+// POST /api/meta/disconnect — revoke permissions and delete integration row
+app.post('/api/meta/disconnect', async (req, res) => {
+  const user = await getUserFromToken(req);
+  if (!user) return res.status(401).json({ error: 'Authentication required' });
+
+  // Best-effort permission revocation via Facebook
+  try {
+    const { data } = await supabaseAdmin
+      .from('integrations')
+      .select('access_token, meta_user_id')
+      .eq('user_id', user.id)
+      .eq('provider', 'meta_ads')
+      .maybeSingle();
+    if (data && data.meta_user_id && data.access_token) {
+      await fetch(META_GRAPH + '/' + data.meta_user_id + '/permissions', {
+        method:  'DELETE',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body:    new URLSearchParams({ access_token: data.access_token }).toString()
+      });
+    }
+  } catch (_) {}
+
+  const { error } = await supabaseAdmin
+    .from('integrations')
+    .delete()
+    .eq('user_id', user.id)
+    .eq('provider', 'meta_ads');
+
+  if (error) return res.status(500).json({ error: 'Database error' });
+
+  console.log('[Meta disconnect] Removed | user:', user.id);
+  res.json({ ok: true });
+});
+
+// POST /api/meta/active-account — set the active Meta Ads account for a user
+app.post('/api/meta/active-account', async (req, res) => {
+  try {
+    const user = await getUserFromToken(req);
+    if (!user) return res.status(401).json({ error: 'Authentication required' });
+
+    const { account_id, account_name, currency } = req.body || {};
+    if (!account_id) return res.status(400).json({ error: 'account_id is required' });
+
+    const active_ad_account = {
+      platform:     'meta_ads',
+      account_id:   String(account_id),
+      account_name: String(account_name || ''),
+      currency:     currency || null
+    };
+
+    const { error } = await supabaseAdmin
+      .from('integrations')
+      .update({ active_ad_account })
+      .eq('user_id', user.id)
+      .eq('provider', 'meta_ads');
+
+    if (error) {
+      console.error('[Meta ActiveAccount] DB error:', error.message);
+      return res.status(500).json({ error: 'Database error' });
+    }
+
+    console.log('[Meta ActiveAccount] Set | user:', user.id, '| account:', account_id, account_name);
+    res.json({ ok: true, active_ad_account });
+  } catch (err) {
+    res.status(500).json({ error: err.message || 'Internal server error' });
+  }
+});
+
+// GET /api/meta/campaigns — campaign list with Marketing API performance data
+// ?date_range= LAST_7_DAYS | LAST_14_DAYS | LAST_30_DAYS | LAST_90_DAYS
+app.get('/api/meta/campaigns', async (req, res) => {
+  try {
+    const user = await getUserFromToken(req);
+    if (!user) return res.status(401).json({ error: 'Authentication required' });
+
+    const { accessToken, accountId } = await _getMetaAccess(user);
+
+    const VALID_RANGES = ['LAST_7_DAYS', 'LAST_14_DAYS', 'LAST_30_DAYS', 'LAST_90_DAYS'];
+    const range      = VALID_RANGES.includes(req.query.date_range) ? req.query.date_range : 'LAST_30_DAYS';
+    const datePreset = _metaDatePreset(range);
+
+    const campData = await _metaFetch('/' + accountId + '/campaigns', accessToken, {
+      fields:           'id,name,status,objective,insights.date_preset(' + datePreset + '){spend,impressions,clicks,ctr,actions}',
+      limit:            '100',
+      effective_status: '["ACTIVE","PAUSED","ARCHIVED"]'
+    });
+
+    const campaigns = (campData.data || []).map(function(c) {
+      const ins  = (c.insights && c.insights.data && c.insights.data[0]) || {};
+      const spend       = parseFloat(ins.spend || 0);
+      const impressions = parseInt(ins.impressions || 0, 10);
+      const clicks      = parseInt(ins.clicks || 0, 10);
+      const ctr         = parseFloat(ins.ctr || 0);
+      const conversions = _metaConversions(ins.actions);
+      return {
+        campaign_id:   c.id,
+        campaign_name: c.name      || 'Unnamed',
+        status:        c.status    || 'UNKNOWN',
+        objective:     c.objective || '',
+        spend:         parseFloat(spend.toFixed(2)),
+        impressions,
+        clicks,
+        ctr:           parseFloat(ctr.toFixed(4)),
+        conversions:   parseFloat(conversions.toFixed(2))
+      };
+    });
+
+    console.log('[meta/campaigns] Returned', campaigns.length, 'campaigns |', range);
+    res.json({ campaigns, account_id: accountId, date_range: range });
+  } catch (err) {
+    console.error('[meta/campaigns]', err.message);
+    res.status(err.status || 500).json({ error: err.message, meta_code: err.metaCode || null });
+  }
+});
+
+// GET /api/meta/adsets — ad set list with performance metrics
+app.get('/api/meta/adsets', async (req, res) => {
+  try {
+    const user = await getUserFromToken(req);
+    if (!user) return res.status(401).json({ error: 'Authentication required' });
+
+    const { accessToken, accountId } = await _getMetaAccess(user);
+
+    const VALID_RANGES = ['LAST_7_DAYS', 'LAST_14_DAYS', 'LAST_30_DAYS', 'LAST_90_DAYS'];
+    const range      = VALID_RANGES.includes(req.query.date_range) ? req.query.date_range : 'LAST_30_DAYS';
+    const datePreset = _metaDatePreset(range);
+
+    const data = await _metaFetch('/' + accountId + '/adsets', accessToken, {
+      fields:           'id,name,status,campaign_id,daily_budget,optimization_goal,billing_event,insights.date_preset(' + datePreset + '){spend,impressions,clicks,ctr,actions}',
+      limit:            '100',
+      effective_status: '["ACTIVE","PAUSED","ARCHIVED"]'
+    });
+
+    const adsets = (data.data || []).map(function(s) {
+      const ins  = (s.insights && s.insights.data && s.insights.data[0]) || {};
+      return {
+        adset_id:          s.id,
+        adset_name:        s.name || 'Unnamed',
+        status:            s.status || 'UNKNOWN',
+        campaign_id:       s.campaign_id || '',
+        daily_budget:      s.daily_budget ? parseFloat(s.daily_budget) / 100 : null,
+        optimization_goal: s.optimization_goal || '',
+        billing_event:     s.billing_event || '',
+        spend:             parseFloat(parseFloat(ins.spend || 0).toFixed(2)),
+        impressions:       parseInt(ins.impressions || 0, 10),
+        clicks:            parseInt(ins.clicks || 0, 10),
+        ctr:               parseFloat(parseFloat(ins.ctr || 0).toFixed(4)),
+        conversions:       parseFloat(_metaConversions(ins.actions).toFixed(2))
+      };
+    });
+
+    console.log('[meta/adsets] Returned', adsets.length, 'ad sets |', range);
+    res.json({ adsets, account_id: accountId, date_range: range });
+  } catch (err) {
+    console.error('[meta/adsets]', err.message);
+    res.status(err.status || 500).json({ error: err.message, meta_code: err.metaCode || null });
+  }
+});
+
+// GET /api/meta/ads — individual ads with creative preview fields and performance
+// Creative fields returned for ad preview panel:
+//   headline, primary_text, call_to_action, image_url, video_thumbnail, destination_url
+app.get('/api/meta/ads', async (req, res) => {
+  try {
+    const user = await getUserFromToken(req);
+    if (!user) return res.status(401).json({ error: 'Authentication required' });
+
+    const { accessToken, accountId } = await _getMetaAccess(user);
+
+    const VALID_RANGES = ['LAST_7_DAYS', 'LAST_14_DAYS', 'LAST_30_DAYS', 'LAST_90_DAYS'];
+    const range      = VALID_RANGES.includes(req.query.date_range) ? req.query.date_range : 'LAST_30_DAYS';
+    const datePreset = _metaDatePreset(range);
+
+    const data = await _metaFetch('/' + accountId + '/ads', accessToken, {
+      fields: [
+        'id',
+        'name',
+        'status',
+        'adset_id',
+        'campaign_id',
+        'creative{id,title,body,call_to_action_type,image_url,thumbnail_url,link_url,object_url}',
+        'insights.date_preset(' + datePreset + '){spend,impressions,clicks,ctr,actions}'
+      ].join(','),
+      limit:            '100',
+      effective_status: '["ACTIVE","PAUSED","ARCHIVED"]'
+    });
+
+    const ads = (data.data || []).map(function(a) {
+      const ins  = (a.insights && a.insights.data && a.insights.data[0]) || {};
+      const cre  = a.creative || {};
+      return {
+        ad_id:           a.id,
+        ad_name:         a.name    || 'Unnamed',
+        status:          a.status  || 'UNKNOWN',
+        adset_id:        a.adset_id    || '',
+        campaign_id:     a.campaign_id || '',
+        // Creative / ad preview fields
+        headline:        cre.title                || '',
+        primary_text:    cre.body                 || '',
+        description:     '',
+        call_to_action:  cre.call_to_action_type  || '',
+        image_url:       cre.image_url            || '',
+        video_thumbnail: cre.thumbnail_url        || '',
+        destination_url: cre.link_url || cre.object_url || '',
+        // Performance
+        spend:           parseFloat(parseFloat(ins.spend || 0).toFixed(2)),
+        impressions:     parseInt(ins.impressions || 0, 10),
+        clicks:          parseInt(ins.clicks || 0, 10),
+        ctr:             parseFloat(parseFloat(ins.ctr || 0).toFixed(4)),
+        conversions:     parseFloat(_metaConversions(ins.actions).toFixed(2))
+      };
+    });
+
+    console.log('[meta/ads] Returned', ads.length, 'ads |', range);
+    res.json({ ads, account_id: accountId, date_range: range });
+  } catch (err) {
+    console.error('[meta/ads]', err.message);
+    res.status(err.status || 500).json({ error: err.message, meta_code: err.metaCode || null });
+  }
+});
+
+// ════════════════════════════════════════════════════════════════
 // ADS DASHBOARD — campaign data, AI analysis, recommendations
 // ════════════════════════════════════════════════════════════════
 
@@ -4777,15 +5353,33 @@ app.get('/api/debug/routes', function(req, res) {
 });
 
 // ── Fallback — after all routes ──────────────────────────────────
-// /api/* paths return a JSON 404 so the frontend fetch wrapper gets
-// parseable JSON instead of an HTML error page.
-// All other paths return index.html (public landing page).
+// /api/* and /auth/* are backend-only paths — return JSON 404 so callers
+// get parseable JSON instead of an HTML error page.
+// All other paths (e.g. /, /signup, /login) redirect to the frontend domain
+// or serve the local app file in development. The backend never serves
+// index.html on Render because the frontend lives on orivenai.com.
 app.use(function(req, res) {
-  if (req.path.startsWith('/api/')) {
+  if (req.path.startsWith('/api/') || req.path.startsWith('/auth/')) {
     console.warn('[404]', req.method, req.url);
     return res.status(404).json({ error: 'Route not found: ' + req.method + ' ' + req.url });
   }
-  res.sendFile(path.resolve(__dirname, '..', '..', 'index.html'));
+
+  // On Render: frontend is a separate static site — redirect there.
+  // In local dev: serve the file from the repo root if it exists.
+  var frontendBase = process.env.FRONTEND_URL
+    || (process.env.RENDER ? 'https://orivenai.com' : null);
+
+  if (frontendBase) {
+    return res.redirect(302, frontendBase + req.path + (req.url.includes('?') ? req.url.slice(req.url.indexOf('?')) : ''));
+  }
+
+  // Local dev fallback — serve the requested file; 404 cleanly if missing.
+  var filePath = path.resolve(__dirname, '..', '..', req.path === '/' ? 'index.html' : req.path.replace(/^\//, ''));
+  res.sendFile(filePath, function(err) {
+    if (err) {
+      res.status(404).send('Not found');
+    }
+  });
 });
 
 // ── Global error handler — catches unhandled errors in routes ───
@@ -4855,13 +5449,26 @@ app.listen(PORT, async () => {
     'GET /api/google-ads/accounts',
     'GET /api/google-ads/campaigns'
   ];
-  _googleRoutes.forEach(function(sig) {
+  const _metaRoutes = [
+    'GET /auth/meta',
+    'GET /auth/meta/callback',
+    'GET /api/meta/status',
+    'GET /api/meta/accounts',
+    'POST /api/meta/disconnect',
+    'POST /api/meta/active-account',
+    'GET /api/meta/campaigns',
+    'GET /api/meta/adsets',
+    'GET /api/meta/ads'
+  ];
+  _googleRoutes.concat(_metaRoutes).forEach(function(sig) {
     const [method, path] = sig.split(' ');
     const found = _checkStack.some(function(l) {
       return l.route && l.route.path === path && l.route.methods[method.toLowerCase()];
     });
     console.log('[Startup] Route', sig, found ? '✅ registered' : '❌ NOT FOUND');
   });
+  console.log('[Startup] META_APP_ID loaded:', !!META_APP_ID);
+  console.log('[Startup] META_APP_SECRET loaded:', !!META_APP_SECRET);
 
   // Live Supabase admin connectivity test — runs every server start
   console.log('[Startup] Testing Supabase admin client...');
