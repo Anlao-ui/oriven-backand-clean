@@ -3244,26 +3244,51 @@ app.post('/api/publish/meta', requireSubscription, async (req, res) => {
     const META_API = 'https://graph.facebook.com/v20.0';
 
     async function _metaPost(endpoint, body) {
-      const r = await fetch(META_API + endpoint, {
+      const url = META_API + endpoint;
+      const { access_token: _t, ...loggable } = { ...body, access_token: accessToken };
+      console.log('[publish/meta] POST', url);
+      console.log('[publish/meta] payload:', JSON.stringify(loggable, null, 2));
+
+      const r = await fetch(url, {
         method:  'POST',
         headers: { 'Content-Type': 'application/json' },
         body:    JSON.stringify({ ...body, access_token: accessToken }),
       });
       const d = await r.json();
-      if (!r.ok || d.error) throw Object.assign(new Error(d.error ? d.error.message : ('Meta API HTTP ' + r.status)), { status: r.status, metaCode: d.error && d.error.code });
+
+      if (!r.ok || d.error) {
+        const e = d.error || {};
+        console.error('[publish/meta] Graph API error ——————————');
+        console.error('  endpoint        :', endpoint);
+        console.error('  HTTP status     :', r.status);
+        console.error('  message         :', e.message          || '—');
+        console.error('  code            :', e.code             || '—');
+        console.error('  error_subcode   :', e.error_subcode    || '—');
+        console.error('  error_user_title:', e.error_user_title || '—');
+        console.error('  error_user_msg  :', e.error_user_msg   || '—');
+        console.error('  fbtrace_id      :', e.fbtrace_id       || '—');
+        console.error('  full body       :', JSON.stringify(d));
+        throw Object.assign(
+          new Error(e.message || ('Meta API HTTP ' + r.status)),
+          { status: r.status, metaCode: e.code, metaSubcode: e.error_subcode, fbtrace: e.fbtrace_id }
+        );
+      }
       return d;
     }
 
     const objectiveMap = { Sales: 'OUTCOME_SALES', Leads: 'OUTCOME_LEADS', Traffic: 'OUTCOME_TRAFFIC', Awareness: 'OUTCOME_AWARENESS' };
     const objective = objectiveMap[s.goal] || 'OUTCOME_TRAFFIC';
 
-    // 1. Campaign (PAUSED)
-    const campaign = await _metaPost('/act_' + accountId + '/campaigns', {
+    // accountId from _getMetaAccess is already normalised to exactly one 'act_' prefix.
+    console.log('[publish/meta] account:', accountId);
+
+    // 1. Campaign
+    const campaign = await _metaPost('/' + accountId + '/campaigns', {
       name: campaignName, objective, status: 'PAUSED', special_ad_categories: [],
     });
 
     // 2. Ad set
-    const adSet = await _metaPost('/act_' + accountId + '/adsets', {
+    const adSet = await _metaPost('/' + accountId + '/adsets', {
       name: campaignName + ' Ad Set',
       campaign_id: campaign.id,
       status: 'PAUSED',
@@ -3273,10 +3298,10 @@ app.post('/api/publish/meta', requireSubscription, async (req, res) => {
       targeting: { age_min: 18, age_max: 65, geo_locations: { countries: ['US'] } },
     });
 
-    console.log('[publish/meta] Campaign created:', campaign.id, 'AdSet:', adSet.id, 'for user', user.id);
+    console.log('[publish/meta] created campaign:', campaign.id, 'adset:', adSet.id);
     return res.json({ ok: true, campaignId: campaign.id, adSetId: adSet.id, platform: 'meta', status: 'paused' });
   } catch (err) {
-    console.error('[publish/meta] error:', err.message);
+    console.error('[publish/meta] fatal:', err.message, '| code:', err.metaCode || '—', '| subcode:', err.metaSubcode || '—');
     return res.status(err.status || 500).json({ ok: false, error: err.message || 'Failed to publish to Meta Ads' });
   }
 });
@@ -4198,10 +4223,12 @@ async function _getMetaAccess(user) {
   if (!active || !active.account_id) {
     const e = new Error('No active Meta Ads account selected â€” go to Integrations and choose an account.'); e.status = 400; throw e;
   }
-  // Meta ad account IDs are prefixed with 'act_'
-  const accountId = active.account_id.startsWith('act_')
-    ? active.account_id
-    : 'act_' + active.account_id;
+
+  // Normalise: strip any leading 'act_' then re-add exactly once.
+  const rawId     = String(active.account_id);
+  const bareId    = rawId.startsWith('act_') ? rawId.slice(4) : rawId;
+  const accountId = 'act_' + bareId;
+  console.log('[MetaAccess] stored:', rawId, '→ normalised:', accountId);
 
   return { accessToken: intg.access_token, accountId, accountName: active.account_name || accountId };
 }
