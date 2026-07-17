@@ -3288,7 +3288,7 @@ app.post('/api/publish/meta', requireSubscription, async (req, res) => {
     });
 
     // 2. Ad set
-    const adSet = await _metaPost('/' + accountId + '/adsets', {
+    const adSetPayload = {
       name: campaignName + ' Ad Set',
       campaign_id: campaign.id,
       status: 'PAUSED',
@@ -3297,7 +3297,9 @@ app.post('/api/publish/meta', requireSubscription, async (req, res) => {
       optimization_goal: 'REACH',
       is_adset_budget_sharing_enabled: false,
       targeting: { age_min: 18, age_max: 65, geo_locations: { countries: ['US'] } },
-    });
+    };
+    console.log('[META ADSET PAYLOAD]', JSON.stringify(adSetPayload, null, 2));
+    const adSet = await _metaPost('/' + accountId + '/adsets', adSetPayload);
 
     console.log('[publish/meta] created campaign:', campaign.id, 'adset:', adSet.id);
     return res.json({ ok: true, campaignId: campaign.id, adSetId: adSet.id, platform: 'meta', status: 'paused' });
