@@ -3285,6 +3285,7 @@ app.post('/api/publish/meta', requireSubscription, async (req, res) => {
     // 1. Campaign
     const campaign = await _metaPost('/' + accountId + '/campaigns', {
       name: campaignName, objective, status: 'PAUSED', special_ad_categories: [],
+      budget_optimization_type: 'ADSET',
     });
 
     // 2. Ad set
