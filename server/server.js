@@ -1,4 +1,4 @@
-const express = require('express');
+﻿const express = require('express');
 const cors = require('cors');
 const Stripe = require('stripe');
 const { createClient } = require('@supabase/supabase-js');
@@ -6,11 +6,11 @@ const nodemailer = require('nodemailer');
 const crypto     = require('crypto');
 const path       = require('path');
 const cron       = require('node-cron');
-// Resolve .env from the frontend root (two levels up: server/ → oriven-backand-clean/ → C:\files).
+// Resolve .env from the frontend root (two levels up: server/ â†’ oriven-backand-clean/ â†’ C:\files).
 // Frontend is the single source of truth for .env.
 // NOTE: dotenv does NOT override variables already present in the process
 // environment (e.g. set by Render dashboard). If a key shows the wrong value
-// at runtime, update it in the Render dashboard — not just in .env.
+// at runtime, update it in the Render dashboard â€” not just in .env.
 const _dotenvPath = path.resolve(__dirname, '..', '..', '.env');
 const _dotenvResult = require('dotenv').config({ path: _dotenvPath });
 console.log(
@@ -28,10 +28,16 @@ console.log(
 const stripe    = new Stripe(process.env.STRIPE_SECRET_KEY            || 'missing');
 
 
-// ── Resolved config constants ─────────────────────────────────────
+// â”€â”€ Resolved config constants â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 // Single definition for every value that would otherwise be duplicated
 // across multiple routes as process.env.X || 'hardcoded-default'.
-const FRONTEND_URL = process.env.FRONTEND_URL || 'https://orivenai.com';
+// On Render, RENDER_EXTERNAL_URL is automatically set to the service's own public URL
+// (e.g. https://oriven-backand-clean.onrender.com). That URL serves the NEW app.html
+// at /app, so it is always the correct redirect target after OAuth.
+// Override with FRONTEND_URL in the Render dashboard if you move to a custom domain.
+const FRONTEND_URL = process.env.FRONTEND_URL
+  || process.env.RENDER_EXTERNAL_URL   // Render injects this automatically
+  || 'http://localhost:5500';
 const SMTP_HOST    = process.env.SMTP_HOST    || 'smtp-mail.outlook.com';
 const SMTP_PORT    = parseInt(process.env.SMTP_PORT || '587', 10);
 
@@ -47,7 +53,7 @@ function decodeJwtRole(token) {
   }
 }
 
-// Admin Supabase client — must use service_role key to bypass RLS
+// Admin Supabase client â€” must use service_role key to bypass RLS
 // Server-side options: disable session persistence (no localStorage in Node)
 const supabaseAdmin = createClient(
   process.env.SUPABASE_URL,
@@ -55,91 +61,90 @@ const supabaseAdmin = createClient(
   { auth: { autoRefreshToken: false, persistSession: false } }
 );
 
-// ── Startup sanity checks ───────────────────────────────────────
+// â”€â”€ Startup sanity checks â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 (function checkEnv() {
   const srk  = process.env.SUPABASE_SERVICE_ROLE_KEY || '';
   const role = decodeJwtRole(srk);
 
-  console.log('\n══════════════ ORIVEN SERVER STARTUP ══════════════');
+  console.log('\nâ•â•â•â•â•â•â•â•â•â•â•â•â•â• ORIVEN SERVER STARTUP â•â•â•â•â•â•â•â•â•â•â•â•â•â•');
 
   if (!srk) {
-    console.error('❌ [ENV] SUPABASE_SERVICE_ROLE_KEY is not set');
+    console.error('âŒ [ENV] SUPABASE_SERVICE_ROLE_KEY is not set');
   } else if (!role) {
-    console.error('❌ [ENV] SUPABASE_SERVICE_ROLE_KEY is not a valid JWT');
-    console.error('   Get the service_role key from: Supabase Dashboard → Settings → API');
+    console.error('âŒ [ENV] SUPABASE_SERVICE_ROLE_KEY is not a valid JWT');
+    console.error('   Get the service_role key from: Supabase Dashboard â†’ Settings â†’ API');
   } else if (role !== 'service_role') {
-    console.error(`❌ [ENV] SUPABASE_SERVICE_ROLE_KEY JWT role = "${role}" — expected "service_role"`);
-    console.error('   ⚡ You set the ANON key as the service role key — this is the most common mistake');
-    console.error('   ⚡ The anon key cannot bypass RLS. Supabase updates in the webhook WILL be silently blocked.');
-    console.error('   Fix: Supabase Dashboard → Settings → API → copy the "service_role" key (labeled DANGER)');
+    console.error(`âŒ [ENV] SUPABASE_SERVICE_ROLE_KEY JWT role = "${role}" â€” expected "service_role"`);
+    console.error('   âš¡ You set the ANON key as the service role key â€” this is the most common mistake');
+    console.error('   âš¡ The anon key cannot bypass RLS. Supabase updates in the webhook WILL be silently blocked.');
+    console.error('   Fix: Supabase Dashboard â†’ Settings â†’ API â†’ copy the "service_role" key (labeled DANGER)');
     console.error('   Then update SUPABASE_SERVICE_ROLE_KEY in server/.env and restart the server');
   } else {
-    console.log('✅ [ENV] SUPABASE_SERVICE_ROLE_KEY JWT role = "service_role" ← correct');
+    console.log('âœ… [ENV] SUPABASE_SERVICE_ROLE_KEY JWT role = "service_role" â† correct');
   }
 
   if (!process.env.STRIPE_WEBHOOK_SECRET) {
-    console.error('❌ [ENV] STRIPE_WEBHOOK_SECRET is not set — all webhooks will be rejected');
+    console.error('âŒ [ENV] STRIPE_WEBHOOK_SECRET is not set â€” all webhooks will be rejected');
   } else {
-    console.log('✅ [ENV] STRIPE_WEBHOOK_SECRET is set');
+    console.log('âœ… [ENV] STRIPE_WEBHOOK_SECRET is set');
   }
 
-  if (!process.env.FRONTEND_URL) {
-    console.error('❌ [ENV] FRONTEND_URL is not set — Stripe will redirect to wrong URL after payment');
-    console.error('   Fix: set FRONTEND_URL to https://orivenai.com in Render environment variables');
+  if (!process.env.FRONTEND_URL && !process.env.RENDER_EXTERNAL_URL) {
+    console.warn('âš ï¸  [ENV] Neither FRONTEND_URL nor RENDER_EXTERNAL_URL is set â€” defaulting to localhost:5500');
   } else {
-    console.log('✅ [ENV] FRONTEND_URL =', process.env.FRONTEND_URL);
+    console.log('âœ… [ENV] FRONTEND_URL resolved to:', FRONTEND_URL);
   }
 
-  // ── AI keys ─────────────────────────────────────────────────────
+  // â”€â”€ AI keys â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   const _ck = (val, label) => {
-    if (!val || val === 'missing') { console.error('❌ [ENV] ' + label + ' is not set'); }
-    else { console.log('✅ [ENV] ' + label + ' = ' + val.slice(0, 10) + '...'); }
+    if (!val || val === 'missing') { console.error('âŒ [ENV] ' + label + ' is not set'); }
+    else { console.log('âœ… [ENV] ' + label + ' = ' + val.slice(0, 10) + '...'); }
   };
   _ck(process.env.AIML_API_KEY, 'AIML_API_KEY');
 
 
-  // AIML API — all AI generation routes
+  // AIML API â€” all AI generation routes
   const _aiml   = require('./providers/aimlProvider');
   const _router = require('./services/modelRouter');
   _aiml.diagnose();
   _router.logSummary();
 
-  // ── Stripe ───────────────────────────────────────────────────────
+  // â”€â”€ Stripe â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   const sk = process.env.STRIPE_SECRET_KEY;
   if (!sk || sk === 'missing') {
-    console.error('❌ [ENV] STRIPE_SECRET_KEY is not set — payments will fail');
+    console.error('âŒ [ENV] STRIPE_SECRET_KEY is not set â€” payments will fail');
   } else {
-    console.log('✅ [ENV] STRIPE_SECRET_KEY =', sk.startsWith('sk_live') ? '✅ LIVE key' : '⚠️  TEST key');
+    console.log('âœ… [ENV] STRIPE_SECRET_KEY =', sk.startsWith('sk_live') ? 'âœ… LIVE key' : 'âš ï¸  TEST key');
   }
-  // Stripe Price IDs — set these in Render environment variables.
-  // Create prices in Stripe Dashboard → Products, then copy the price_... ID.
-  // STRIPE_PRICE_STARTER      → Starter plan       €9.95/month
-  // STRIPE_PRICE_CREATOR      → Creator plan        €29.95/month
-  // STRIPE_PRICE_PROFESSIONAL → Professional plan   €59.95/month
-  // Agency is Contact Sales — no Stripe price ID required.
-  const _price = (k) => console.log(' ', k, '=', process.env[k] || '❌ NOT SET');
+  // Stripe Price IDs â€” set these in Render environment variables.
+  // Create prices in Stripe Dashboard â†’ Products, then copy the price_... ID.
+  // STRIPE_PRICE_STARTER      â†’ Starter plan       â‚¬9.95/month
+  // STRIPE_PRICE_CREATOR      â†’ Creator plan        â‚¬29.95/month
+  // STRIPE_PRICE_PROFESSIONAL â†’ Professional plan   â‚¬59.95/month
+  // Agency is Contact Sales â€” no Stripe price ID required.
+  const _price = (k) => console.log(' ', k, '=', process.env[k] || 'âŒ NOT SET');
   _price('STRIPE_PRICE_STARTER');
   _price('STRIPE_PRICE_CREATOR');
   _price('STRIPE_PRICE_PROFESSIONAL');
 
-  // ── SMTP ─────────────────────────────────────────────────────────
+  // â”€â”€ SMTP â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   if (!process.env.SMTP_USER || !process.env.SMTP_PASS) {
-    console.warn('⚠️  [ENV] SMTP_USER / SMTP_PASS not fully set — verification emails will be skipped');
+    console.warn('âš ï¸  [ENV] SMTP_USER / SMTP_PASS not fully set â€” verification emails will be skipped');
   } else {
-    console.log('✅ [ENV] SMTP configured for', process.env.SMTP_USER);
+    console.log('âœ… [ENV] SMTP configured for', process.env.SMTP_USER);
   }
 
-  // ── Google OAuth ──────────────────────────────────────────────────
+  // â”€â”€ Google OAuth â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   if (!process.env.GOOGLE_CLIENT_ID || !process.env.GOOGLE_CLIENT_SECRET) {
-    console.warn('⚠️  [ENV] GOOGLE_CLIENT_ID / GOOGLE_CLIENT_SECRET not set — Google Ads OAuth disabled');
+    console.warn('âš ï¸  [ENV] GOOGLE_CLIENT_ID / GOOGLE_CLIENT_SECRET not set â€” Google Ads OAuth disabled');
   } else {
     const _resolvedRedirect = process.env.GOOGLE_REDIRECT_URI
       || (process.env.RENDER ? 'https://oriven-backand-clean.onrender.com/auth/google/callback' : 'http://localhost:5500/auth/google/callback');
-    console.log('✅ [ENV] Google OAuth configured | redirect:', _resolvedRedirect,
+    console.log('âœ… [ENV] Google OAuth configured | redirect:', _resolvedRedirect,
       process.env.GOOGLE_REDIRECT_URI ? '(from env)' : process.env.RENDER ? '(Render default)' : '(localhost default)');
   }
 
-  console.log('═══════════════════════════════════════════════════\n');
+  console.log('â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•\n');
 })();
 
 const PRICE_IDS = {
@@ -150,17 +155,17 @@ const PRICE_IDS = {
 
 app.use(cors());
 
-// ── Static files — serve the frontend from the project root ────
+// â”€â”€ Static files â€” serve the frontend from the project root â”€â”€â”€â”€
 // This makes Express the single origin for both HTML and API routes,
 // so relative /api/... URLs from the browser resolve to this process.
 // Must come before express.json() but after cors() so CORS headers
 // are present on static responses too.
 app.use(express.static(path.resolve(__dirname, '..', '..')));
 
-// ── Stripe webhook — must be registered BEFORE express.json() ──
+// â”€â”€ Stripe webhook â€” must be registered BEFORE express.json() â”€â”€
 app.post('/api/stripe-webhook', express.raw({ type: 'application/json' }), async (req, res) => {
-  console.log('\n──────────────────────────────────────────');
-  console.log('[Webhook] ▶ Route hit');
+  console.log('\nâ”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€');
+  console.log('[Webhook] â–¶ Route hit');
 
   // 1. Verify Stripe signature
   const sig = req.headers['stripe-signature'];
@@ -168,9 +173,9 @@ app.post('/api/stripe-webhook', express.raw({ type: 'application/json' }), async
 
   try {
     event = stripe.webhooks.constructEvent(req.body, sig, process.env.STRIPE_WEBHOOK_SECRET);
-    console.log('[Webhook] ✅ Signature verified');
+    console.log('[Webhook] âœ… Signature verified');
   } catch (err) {
-    console.error('[Webhook] ❌ Signature verification failed:', err.message);
+    console.error('[Webhook] âŒ Signature verification failed:', err.message);
     return res.status(400).send(`Webhook Error: ${err.message}`);
   }
 
@@ -178,41 +183,41 @@ app.post('/api/stripe-webhook', express.raw({ type: 'application/json' }), async
   console.log('[Webhook] Event type:', event.type);
   console.log('[Webhook] Event id:  ', event.id);
 
-  // ── Subscription deleted (cancellation applied) ──────────────
+  // â”€â”€ Subscription deleted (cancellation applied) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   if (event.type === 'customer.subscription.deleted') {
     const sub = event.data.object;
     const customerId = sub.customer;
-    console.log('[Webhook] subscription.deleted → customer:', customerId);
+    console.log('[Webhook] subscription.deleted â†’ customer:', customerId);
     if (customerId) {
       const { error } = await supabaseAdmin.from('profiles')
         .update({ subscription_status: 'free', pending_plan: null, pending_plan_date: null })
         .eq('stripe_customer_id', customerId);
       if (error) console.error('[Webhook] subscription.deleted DB error:', error.message);
-      else console.log('[Webhook] ✅ Plan reset to free for customer:', customerId);
+      else console.log('[Webhook] âœ… Plan reset to free for customer:', customerId);
     }
     return res.json({ received: true });
   }
 
-  // ── Subscription updated (paid-to-paid switch) ────────────────
+  // â”€â”€ Subscription updated (paid-to-paid switch) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   if (event.type === 'customer.subscription.updated') {
     const sub = event.data.object;
     const customerId = sub.customer;
     const pendingPlan = sub.metadata && sub.metadata.pending_plan;
     if (pendingPlan && sub.status === 'active') {
-      console.log('[Webhook] subscription.updated → applying plan:', pendingPlan);
+      console.log('[Webhook] subscription.updated â†’ applying plan:', pendingPlan);
       const { error } = await supabaseAdmin.from('profiles')
         .update({ subscription_status: pendingPlan, pending_plan: null, pending_plan_date: null })
         .eq('stripe_customer_id', customerId);
       if (error) console.error('[Webhook] subscription.updated DB error:', error.message);
-      else console.log('[Webhook] ✅ Plan updated to:', pendingPlan, 'for customer:', customerId);
+      else console.log('[Webhook] âœ… Plan updated to:', pendingPlan, 'for customer:', customerId);
     } else {
-      console.log('[Webhook] subscription.updated — no pending_plan or not active, skipping');
+      console.log('[Webhook] subscription.updated â€” no pending_plan or not active, skipping');
     }
     return res.json({ received: true });
   }
 
   if (event.type !== 'checkout.session.completed') {
-    console.log('[Webhook] ℹ️  Ignoring event type:', event.type);
+    console.log('[Webhook] â„¹ï¸  Ignoring event type:', event.type);
     return res.json({ received: true });
   }
 
@@ -231,11 +236,11 @@ app.post('/api/stripe-webhook', express.raw({ type: 'application/json' }), async
 
   // 5. Guard: both fields must be present
   if (!userId) {
-    console.error('[Webhook] ❌ userId missing from metadata — cannot update Supabase');
+    console.error('[Webhook] âŒ userId missing from metadata â€” cannot update Supabase');
     return res.json({ received: true });
   }
   if (!plan) {
-    console.error('[Webhook] ❌ plan missing from metadata — cannot update Supabase');
+    console.error('[Webhook] âŒ plan missing from metadata â€” cannot update Supabase');
     return res.json({ received: true });
   }
 
@@ -243,18 +248,18 @@ app.post('/api/stripe-webhook', express.raw({ type: 'application/json' }), async
   console.log("[Checkout Debug] Using creator/professional plan mapping");
   const validPlans = ['starter', 'creator', 'professional'];
   if (!validPlans.includes(plan)) {
-    console.error(`[Webhook] ❌ Unknown plan "${plan}" — expected one of: ${validPlans.join(', ')}`);
+    console.error(`[Webhook] âŒ Unknown plan "${plan}" â€” expected one of: ${validPlans.join(', ')}`);
     return res.json({ received: true });
   }
 
   // 7. Guard: payment must be confirmed
   if (session.payment_status !== 'paid') {
-    console.warn(`[Webhook] ⚠️  payment_status is "${session.payment_status}", not "paid" — skipping update`);
+    console.warn(`[Webhook] âš ï¸  payment_status is "${session.payment_status}", not "paid" â€” skipping update`);
     return res.json({ received: true });
   }
 
   // 8. Attempt Supabase update
-  console.log(`[Webhook] 🔄 UPDATE profiles SET subscription_status = '${plan}' WHERE id = '${userId}'`);
+  console.log(`[Webhook] ðŸ”„ UPDATE profiles SET subscription_status = '${plan}' WHERE id = '${userId}'`);
 
   const { data: updateData, error: updateError } = await supabaseAdmin
     .from('profiles')
@@ -266,22 +271,22 @@ app.post('/api/stripe-webhook', express.raw({ type: 'application/json' }), async
     .eq('id', userId)
     .select('id, subscription_status');
 
-  // Log raw update result — never assume success without checking
+  // Log raw update result â€” never assume success without checking
   console.log('[Webhook] Raw update response:');
   console.log('           data: ', JSON.stringify(updateData));
   console.log('           error:', JSON.stringify(updateError));
 
   if (updateError) {
-    console.error('[Webhook] ❌ UPDATE failed');
+    console.error('[Webhook] âŒ UPDATE failed');
     console.error('           code:   ', updateError.code);
     console.error('           message:', updateError.message);
     console.error('           details:', updateError.details);
     console.error('           hint:   ', updateError.hint);
     if (updateError.code === '42501') {
-      console.error('[Webhook] ❌ RLS policy blocked the update — service_role key is probably wrong');
+      console.error('[Webhook] âŒ RLS policy blocked the update â€” service_role key is probably wrong');
     }
   } else if (!updateData || updateData.length === 0) {
-    console.warn('[Webhook] ⚠️  UPDATE matched 0 rows');
+    console.warn('[Webhook] âš ï¸  UPDATE matched 0 rows');
     console.warn('           This means no profile row has id =', userId);
     console.warn('           Checking whether the row exists at all...');
 
@@ -292,21 +297,21 @@ app.post('/api/stripe-webhook', express.raw({ type: 'application/json' }), async
       .maybeSingle();
 
     if (checkError) {
-      console.error('[Webhook] ❌ Existence check failed:', checkError.message);
+      console.error('[Webhook] âŒ Existence check failed:', checkError.message);
     } else if (!checkData) {
-      console.error('[Webhook] ❌ No profile row found for userId:', userId);
+      console.error('[Webhook] âŒ No profile row found for userId:', userId);
       console.error('           The user may not have a profiles row yet');
     } else {
-      console.log('[Webhook] ℹ️  Row exists but was not updated:', JSON.stringify(checkData));
+      console.log('[Webhook] â„¹ï¸  Row exists but was not updated:', JSON.stringify(checkData));
       console.log('[Webhook]    This is likely an RLS permission problem');
     }
   } else {
-    console.log('[Webhook] ✅ UPDATE succeeded — rows changed:', updateData.length);
+    console.log('[Webhook] âœ… UPDATE succeeded â€” rows changed:', updateData.length);
     console.log('[Webhook]    Updated row:', JSON.stringify(updateData[0]));
   }
 
-  // 9. Independent post-update verification SELECT — confirms what's in the DB right now
-  console.log('[Webhook] 🔎 Verifying current DB value...');
+  // 9. Independent post-update verification SELECT â€” confirms what's in the DB right now
+  console.log('[Webhook] ðŸ”Ž Verifying current DB value...');
   const { data: verifyData, error: verifyError } = await supabaseAdmin
     .from('profiles')
     .select('id, subscription_status')
@@ -314,27 +319,27 @@ app.post('/api/stripe-webhook', express.raw({ type: 'application/json' }), async
     .maybeSingle();
 
   if (verifyError) {
-    console.error('[Webhook] ❌ Verification SELECT failed:', verifyError.message);
+    console.error('[Webhook] âŒ Verification SELECT failed:', verifyError.message);
   } else if (!verifyData) {
-    console.error('[Webhook] ❌ Verification: no row found in profiles for userId:', userId);
+    console.error('[Webhook] âŒ Verification: no row found in profiles for userId:', userId);
   } else {
     const actual = verifyData.subscription_status;
     if (actual === plan) {
-      console.log(`[Webhook] ✅ CONFIRMED — DB shows subscription_status = "${actual}"`);
+      console.log(`[Webhook] âœ… CONFIRMED â€” DB shows subscription_status = "${actual}"`);
     } else {
-      console.error(`[Webhook] ❌ MISMATCH — expected "${plan}" but DB shows "${actual}"`);
-      console.error('[Webhook]    The update did not persist — check service_role key and RLS policies');
+      console.error(`[Webhook] âŒ MISMATCH â€” expected "${plan}" but DB shows "${actual}"`);
+      console.error('[Webhook]    The update did not persist â€” check service_role key and RLS policies');
     }
   }
 
-  console.log('──────────────────────────────────────────\n');
+  console.log('â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€\n');
   res.json({ received: true });
 });
 
 app.use(express.json({ limit: '20mb' }));
 app.use(express.urlencoded({ limit: '20mb', extended: true }));
 
-// ── Web generator — registered immediately after json middleware ──
+// â”€â”€ Web generator â€” registered immediately after json middleware â”€â”€
 app.post('/api/generate-web', async (req, res) => {
   const {
     brand_name, product, goal,
@@ -353,12 +358,12 @@ app.post('/api/generate-web', async (req, res) => {
   const accColor  = accent_color     || '#BFA07A';
 
   const conversionGoalLabels = {
-    signup:    'Sign up / free trial — every CTA drives toward account creation or trial',
-    purchase:  'Purchase — product-first, overcome buying hesitation, clear price and value',
-    contact:   'Contact / enquiry — build trust first, make reaching out feel low-friction',
-    download:  'Download — surface the benefit immediately, single-click CTA',
-    book_call: 'Book a call — social proof heavy, calendar CTA prominent',
-    awareness: 'Brand awareness — storytelling over selling, memorability over conversion',
+    signup:    'Sign up / free trial â€” every CTA drives toward account creation or trial',
+    purchase:  'Purchase â€” product-first, overcome buying hesitation, clear price and value',
+    contact:   'Contact / enquiry â€” build trust first, make reaching out feel low-friction',
+    download:  'Download â€” surface the benefit immediately, single-click CTA',
+    book_call: 'Book a call â€” social proof heavy, calendar CTA prominent',
+    awareness: 'Brand awareness â€” storytelling over selling, memorability over conversion',
   };
   const goalDescription = (goal && conversionGoalLabels[goal]) || (goal ? `Goal: ${goal}` : null);
 
@@ -380,13 +385,13 @@ app.post('/api/generate-web', async (req, res) => {
 
   if (!userPrompt) return res.status(400).json({ error: 'No input provided' });
 
-  console.log('[Web] Anthropic → generating brand-aligned landing page');
+  console.log('[Web] Anthropic â†’ generating brand-aligned landing page');
 
   const systemPrompt = `You are a senior web designer and frontend engineer who builds pixel-perfect, brand-aligned landing pages.
 
 Generate a complete, production-ready HTML landing page that STRICTLY follows the brand identity provided in the brief.
 
-BRAND IDENTITY RULES — NON-NEGOTIABLE:
+BRAND IDENTITY RULES â€” NON-NEGOTIABLE:
 - Page background MUST be exactly the "Background color" value from the brief
 - All body text MUST use exactly the "Text color" value from the brief
 - Primary buttons, hero sections, and main CTAs MUST use the "Primary color"
@@ -394,14 +399,14 @@ BRAND IDENTITY RULES — NON-NEGOTIABLE:
 - Borders, dividers, highlights, and accent details MUST use the "Accent color"
 TECHNICAL REQUIREMENTS:
 - Output ONLY a complete HTML document starting with <!DOCTYPE html>
-- All CSS inside a <style> tag in <head> — no external stylesheets, no CDN links
+- All CSS inside a <style> tag in <head> â€” no external stylesheets, no CDN links
 - Define CSS custom properties at :root for all brand colors and use them throughout
-- Use system fonts (system-ui, -apple-system, Georgia, serif) — no web font CDNs
+- Use system fonts (system-ui, -apple-system, Georgia, serif) â€” no web font CDNs
 - No icons, no emojis, no SVG illustrations
-- All copy must be specific to the product/brand in the brief — no lorem ipsum
+- All copy must be specific to the product/brand in the brief â€” no lorem ipsum
 - Include: a nav bar, all sections listed in the brief, and a footer
 - Footer must include small text: "Generated by ORIVEN"
-- Fully responsive — mobile and desktop
+- Fully responsive â€” mobile and desktop
 - Animations: use CSS keyframes only if the brief requests them
 
 OUTPUT: Return ONLY the HTML document. No explanation, no preamble, no markdown fences. Start directly with <!DOCTYPE html>.`;
@@ -425,7 +430,7 @@ OUTPUT: Return ONLY the HTML document. No explanation, no preamble, no markdown 
       return res.status(500).json({ error: 'Failed to generate website' });
     }
 
-    console.log(`[Web] page ready — ${html.length} chars`);
+    console.log(`[Web] page ready â€” ${html.length} chars`);
     res.json({ html });
   } catch (err) {
     console.error('[Web] Anthropic error:', err.message);
@@ -433,7 +438,7 @@ OUTPUT: Return ONLY the HTML document. No explanation, no preamble, no markdown 
   }
 });
 
-// ── Service key guard ─────────────────────────────────────────────
+// â”€â”€ Service key guard â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 // Call at the top of any route that needs a specific env var.
 // Returns true if the key exists; otherwise sends a 503 and returns false.
 function _requireEnv(key, res, label) {
@@ -447,7 +452,7 @@ function _requireEnv(key, res, label) {
   return true;
 }
 
-// ── Auth helper — verify Supabase JWT and return user ───────────
+// â”€â”€ Auth helper â€” verify Supabase JWT and return user â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 async function getUserFromToken(req) {
   const auth = req.headers.authorization || '';
   const token = auth.startsWith('Bearer ') ? auth.slice(7) : '';
@@ -459,13 +464,13 @@ async function getUserFromToken(req) {
   } catch (_) { return null; }
 }
 
-// ── Subscription enforcement middleware ───────────────────────────
+// â”€â”€ Subscription enforcement middleware â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 // Two tiers:
 //
-// requireSubscription     — strict: auth token required AND subscription required.
+// requireSubscription     â€” strict: auth token required AND subscription required.
 //                           Use for account-management routes (plan change, invite).
 //
-// requireSubIfAuthed      — lenient: no-auth requests pass through (guest demo);
+// requireSubIfAuthed      â€” lenient: no-auth requests pass through (guest demo);
 //                           authenticated-but-unpaid requests are blocked with 403.
 //                           Use for all generation routes shared with the guest demo.
 
@@ -491,22 +496,39 @@ async function requireSubscription(req, res, next) {
 }
 
 async function requireSubIfAuthed(req, res, next) {
+  const route = req.path || req.url || '?';
   const auth = req.headers.authorization || '';
-  if (!auth) return next(); // unauthenticated — guest demo, pass through
+  console.log(`[middleware] requireSubIfAuthed — ${req.method} ${route} | auth header: ${auth ? 'present (' + auth.slice(0,15) + '...)' : 'MISSING'}`);
+  if (!auth) {
+    console.log('[middleware] No auth — guest pass-through');
+    return next();
+  }
   const user = await getUserFromToken(req);
-  if (!user) return next(); // bad token — pass through gracefully
+  if (!user) {
+    console.log('[middleware] Auth header present but getUserFromToken returned null — pass-through');
+    return next();
+  }
+  console.log('[middleware] User resolved:', user.id, user.email || '(no email)');
   try {
-    const { data } = await supabaseAdmin
+    const { data, error: dbErr } = await supabaseAdmin
       .from('profiles').select('subscription_status').eq('id', user.id).maybeSingle();
-    if (!PAID_PLANS.includes((data && data.subscription_status) || '')) {
+    if (dbErr) console.warn('[middleware] Supabase profiles query error:', dbErr.message);
+    const status = (data && data.subscription_status) || 'none';
+    console.log('[middleware] subscription_status:', status, '| paid:', PAID_PLANS.includes(status));
+    if (!PAID_PLANS.includes(status)) {
+      console.log('[middleware] 403 — subscription required for', user.id);
       return res.status(403).json({ error: 'Active subscription required', code: 'SUBSCRIPTION_REQUIRED' });
     }
     req.user = user;
+    console.log('[middleware] ✓ Authorized — proceeding to route');
     next();
-  } catch (_) { next(); } // fail open for generation routes
+  } catch (err) {
+    console.warn('[middleware] Subscription check threw — fail open:', err.message);
+    next();
+  }
 }
 
-// ── Shared SMTP transporter factory ─────────────────────────────
+// â”€â”€ Shared SMTP transporter factory â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 function _smtpTransporter() {
   return nodemailer.createTransport({
     host:   SMTP_HOST,
@@ -517,7 +539,7 @@ function _smtpTransporter() {
   });
 }
 
-// ── Verification email HTML ──────────────────────────────────────
+// â”€â”€ Verification email HTML â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 function _verificationEmailHtml(firstName, verifyUrl) {
   return `<!DOCTYPE html>
 <html lang="en">
@@ -559,9 +581,9 @@ app.use((req, _res, next) => {
 });
 
 
-// ── Shared helpers ──────────────────────────────────────────────
+// â”€â”€ Shared helpers â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
-// ── Strip markdown/quote fences from HTML output ────────────────
+// â”€â”€ Strip markdown/quote fences from HTML output â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 function extractHtml(raw) {
   let s = (raw || '').trim();
   // Strip backtick fences: ```html ... ``` or ``` ... ```
@@ -575,17 +597,17 @@ function extractHtml(raw) {
 }
 
 
-// ── Extract a concise image prompt from a structured brief via AIML ─
+// â”€â”€ Extract a concise image prompt from a structured brief via AIML â”€
 async function _briefToDallEPrompt(fullBrief, contextHint) {
   const system = `You are a visual art director. Convert the following structured brief into a single image generation prompt.
 
 The prompt must:
-- Be 150–300 characters
+- Be 150â€“300 characters
 - Describe a specific, photorealistic or design-art visual scene
-- Reference brand colours from the brief by name or hex if present — e.g. "neon green (#B7FF2A) accent on black background"
+- Reference brand colours from the brief by name or hex if present â€” e.g. "neon green (#B7FF2A) accent on black background"
 - Match the composition, mood, and format requirements in the brief
 - NOT mention text, headlines, logos, buttons, or UI elements
-- NOT start with "Generate" or "Create" — just describe what is seen
+- NOT start with "Generate" or "Create" â€” just describe what is seen
 
 Output ONLY the image prompt. No labels. No explanation. No quotes.`;
 
@@ -596,9 +618,9 @@ Output ONLY the image prompt. No labels. No explanation. No quotes.`;
   return result.trim().slice(0, 450);
 }
 
-// ── Text — Anthropic only ───────────────────────────────────────
+// â”€â”€ Text â€” Anthropic only â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 // Used by: Text, Brand Assistant, Ideas, Video
-// ── Shared helper: format BrandCore context for AI prompts ──────
+// â”€â”€ Shared helper: format BrandCore context for AI prompts â”€â”€â”€â”€â”€â”€
 function _buildBrandSection(bc) {
   if (!bc || !bc.name) return '';
   const lines = [];
@@ -612,10 +634,10 @@ function _buildBrandSection(bc) {
   return lines.map(l => '  - ' + l).join('\n');
 }
 
-// ── Generation helpers — all routes through AIML ─────────────────
+// â”€â”€ Generation helpers â€” all routes through AIML â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 // Provider and model are determined entirely by modelRouter.js.
 
-// Size ↔ ratio conversion utilities
+// Size â†” ratio conversion utilities
 function _sizeToRatio(size) {
   const map = { '1024x1024': '1:1', '1024x1536': '9:16', '1536x1024': '16:9', '1792x1024': '16:9', '1024x1792': '9:16' };
   return map[size] || '1:1';
@@ -649,12 +671,12 @@ async function _aimlVision(taskType, system, user, imageDataUrl, opts = {}) {
   return aiml.generateTextWithVision(system, user, imageDataUrl, { model: route.model, ...opts });
 }
 
-// ── Image prompt builder ──────────────────────────────────────────
+// â”€â”€ Image prompt builder â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 // Turns a brief into a focused image generation prompt via Anthropic,
 // then the caller passes the result to _aimlImage for rendering.
 
 async function _briefToImagePrompt(brief, contextHint, taskType) {
-  const system = `You are a visual art director. Convert this brief into a single vivid image generation prompt of 150–300 characters. Describe what's seen — composition, color palette, mood, lighting. Reference brand colors by hex if provided. No text, logos, or UI elements. Output ONLY the prompt.`;
+  const system = `You are a visual art director. Convert this brief into a single vivid image generation prompt of 150â€“300 characters. Describe what's seen â€” composition, color palette, mood, lighting. Reference brand colors by hex if provided. No text, logos, or UI elements. Output ONLY the prompt.`;
   const user   = (contextHint ? `Context: ${contextHint}\n\nBrief:\n` : 'Brief:\n') + brief.slice(0, 2000);
   return _aimlText(taskType || 'visuals-copy', system, user, { max_tokens: 300 });
 }
@@ -666,21 +688,21 @@ app.post('/api/generate-text', async (req, res) => {
   const brandSection = _buildBrandSection(brandContext);
   const hasBrand     = brandSection.length > 0;
 
-  console.log(`[Text/${type || 'default'}] Anthropic → prompt received | brand: ${hasBrand ? brandContext.name : 'none'}`);
+  console.log(`[Text/${type || 'default'}] Anthropic â†’ prompt received | brand: ${hasBrand ? brandContext.name : 'none'}`);
 
   let systemPrompt;
 
   if (type === 'assistant') {
-    systemPrompt = `You are a smart, helpful AI assistant for brand owners and marketers. You have deep knowledge of marketing, branding, strategy, copywriting, campaigns, content, and creative direction.${hasBrand ? `\n\nYou have access to the user's brand context below. Use it when it's relevant to their question — but don't reference it in every response. When someone says "hi" or makes small talk, just respond naturally and briefly.\n\nBRAND CONTEXT (draw on this when relevant):\n${brandSection}` : ''}
+    systemPrompt = `You are a smart, helpful AI assistant for brand owners and marketers. You have deep knowledge of marketing, branding, strategy, copywriting, campaigns, content, and creative direction.${hasBrand ? `\n\nYou have access to the user's brand context below. Use it when it's relevant to their question â€” but don't reference it in every response. When someone says "hi" or makes small talk, just respond naturally and briefly.\n\nBRAND CONTEXT (draw on this when relevant):\n${brandSection}` : ''}
 
-Be conversational and natural. Match the energy of the message — brief for casual, thorough for strategic questions. Think like a knowledgeable colleague, not a branded bot. Never start with hollow affirmations like "Great!" or "Absolutely!". Be direct.`;
+Be conversational and natural. Match the energy of the message â€” brief for casual, thorough for strategic questions. Think like a knowledgeable colleague, not a branded bot. Never start with hollow affirmations like "Great!" or "Absolutely!". Be direct.`;
 
   } else if (type === 'text' || type === 'video' || type === 'ideas') {
     systemPrompt = `You are a senior brand copywriter and content strategist.
 Generate structured, professional content based on the brief provided.
-Output must be specific, intentional, and ready to use — no preamble, no meta-commentary, no filler.
+Output must be specific, intentional, and ready to use â€” no preamble, no meta-commentary, no filler.
 Never respond conversationally. Never say "Sure!" or "Great!" or explain what you're about to do.
-Just produce the requested content, formatted cleanly and directly.${hasBrand ? `\n\nBRAND CONTEXT — every output must reflect this brand identity exactly:\n${brandSection}` : ''}`;
+Just produce the requested content, formatted cleanly and directly.${hasBrand ? `\n\nBRAND CONTEXT â€” every output must reflect this brand identity exactly:\n${brandSection}` : ''}`;
 
   } else {
     systemPrompt = `You are a senior brand copywriter. Generate professional brand content based on the brief.
@@ -689,7 +711,7 @@ Be specific and direct. No preamble or filler.${hasBrand ? `\n\nBRAND CONTEXT:\n
 
   try {
     const result = await _aimlText('text-copy', systemPrompt, prompt);
-    console.log(`[Text/${type || 'default'}] AIML → response ready`);
+    console.log(`[Text/${type || 'default'}] AIML â†’ response ready`);
     res.json({ result });
   } catch (err) {
     console.error(`[Text/${type || 'default'}] AIML error:`, err.message);
@@ -697,7 +719,7 @@ Be specific and direct. No preamble or filler.${hasBrand ? `\n\nBRAND CONTEXT:\n
   }
 });
 
-// ── Email Designer — Anthropic ─────────────────────────────────
+// â”€â”€ Email Designer â€” Anthropic â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 // Used by: Email Designer generator
 // Receives: { prompt }  Returns: { html }
 app.post('/api/generate-email', async (req, res) => {
@@ -710,16 +732,16 @@ CRITICAL: Output ONLY raw HTML starting with <!DOCTYPE html>. No markdown. No co
 
 TECHNICAL REQUIREMENTS:
 - Table-based layout for maximum email client compatibility (Gmail, Outlook, Apple Mail)
-- Inline every CSS style — attribute style="" on every element (no <style> blocks)
+- Inline every CSS style â€” attribute style="" on every element (no <style> blocks)
 - Max-width 600px, centered with auto margins
 - Include realistic, compelling sections: header with brand name/logo text, main content body, CTA button, footer with unsubscribe link
 
 DESIGN REQUIREMENTS:
 - Apply brand colours from BrandCore as inline hex values throughout
 - Use web-safe fonts (Arial, Georgia, Helvetica)
-- Every section must have visible content — no blank areas
+- Every section must have visible content â€” no blank areas
 - CTA button must be a styled table cell with solid background colour, not a plain link
-- Write all copy based on the brief — zero placeholder text`;
+- Write all copy based on the brief â€” zero placeholder text`;
 
   try {
     const html = extractHtml(await _aimlText('email', system, prompt, { max_tokens: 4096 }));
@@ -730,7 +752,7 @@ DESIGN REQUIREMENTS:
   }
 });
 
-// ── Presentation Generator — Anthropic ─────────────────────────
+// â”€â”€ Presentation Generator â€” Anthropic â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 // Used by: Presentation Generator
 // Receives: { prompt }  Returns: { slides: [{slide, title, content, notes}] }
 app.post('/api/generate-deck', requireSubIfAuthed, async (req, res) => {
@@ -741,7 +763,7 @@ app.post('/api/generate-deck', requireSubIfAuthed, async (req, res) => {
 
 CRITICAL: Respond with ONLY a valid JSON object. No markdown. No code fences. No explanation. Start directly with {
 
-OUTPUT SCHEMA — every slide must use this structure:
+OUTPUT SCHEMA â€” every slide must use this structure:
 {
   "slides": [
     {
@@ -755,18 +777,18 @@ OUTPUT SCHEMA — every slide must use this structure:
       "metrics": [{"value": "10x", "label": "Growth"}, {"value": "$2M", "label": "ARR"}],
       "cta": "Call to action text (closing slides only)",
       "attribution": "Quote author (quote slides only)",
-      "notes": "Speaker notes — what to say while this slide is shown"
+      "notes": "Speaker notes â€” what to say while this slide is shown"
     }
   ]
 }
 
-LAYOUT TYPES — assign the best layout for each slide:
-- "title" — Opening slide. Large title + subtitle. ALWAYS use for slide 1.
-- "content" — Standard slide. Headline + bullet points (3–5 max). Most slides use this.
-- "stats" — Data slide. Use "metrics" array (2–4 items, each with value + label). Use for any slide with numbers.
-- "feature" — Showcase slide. Use "bullets" as feature names (3–6 items in a grid). Use for feature/benefit lists.
-- "quote" — Impact statement. Use "content" for the quote, "attribution" for the source.
-- "closing" — Final slide. Title + body + CTA. ALWAYS use for the last slide.
+LAYOUT TYPES â€” assign the best layout for each slide:
+- "title" â€” Opening slide. Large title + subtitle. ALWAYS use for slide 1.
+- "content" â€” Standard slide. Headline + bullet points (3â€“5 max). Most slides use this.
+- "stats" â€” Data slide. Use "metrics" array (2â€“4 items, each with value + label). Use for any slide with numbers.
+- "feature" â€” Showcase slide. Use "bullets" as feature names (3â€“6 items in a grid). Use for feature/benefit lists.
+- "quote" â€” Impact statement. Use "content" for the quote, "attribution" for the source.
+- "closing" â€” Final slide. Title + body + CTA. ALWAYS use for the last slide.
 
 RULES:
 - Slide 1 MUST be "title" layout. Last slide MUST be "closing" layout.
@@ -794,7 +816,7 @@ RULES:
   }
 });
 
-// ── Poster Generator — Anthropic ───────────────────────────────
+// â”€â”€ Poster Generator â€” Anthropic â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 // Used by: Poster Generator
 // Receives: { prompt }  Returns: { html }
 app.post('/api/generate-poster', requireSubIfAuthed, async (req, res) => {
@@ -821,8 +843,8 @@ MANDATORY DOCUMENT STRUCTURE:
 <body>
   <div class="poster">
     <!-- SECTION 1: Header with brand name (large, bold, brand color) -->
-    <!-- SECTION 2: Hero visual area (CSS gradients, geometric shapes — NO <img> tags) -->
-    <!-- SECTION 3: Headline (DOMINANT element — largest text on the poster) -->
+    <!-- SECTION 2: Hero visual area (CSS gradients, geometric shapes â€” NO <img> tags) -->
+    <!-- SECTION 3: Headline (DOMINANT element â€” largest text on the poster) -->
     <!-- SECTION 4: Supporting copy and body text -->
     <!-- SECTION 5: CTA section (button or URL in brand color) -->
     <!-- SECTION 6: Footer with brand details -->
@@ -832,12 +854,12 @@ MANDATORY DOCUMENT STRUCTURE:
 
 DESIGN REQUIREMENTS:
 - Apply brand colours from BrandCore as the primary palette throughout
-- Headline must be LARGE (80px+) and DOMINANT — the first thing the eye sees
+- Headline must be LARGE (80px+) and DOMINANT â€” the first thing the eye sees
 - Use CSS gradients, shapes, borders, and pseudo-elements for all visual interest (no <img>)
-- High contrast — dark background with bright brand-coloured accents, or vice versa
-- Every section must have VISIBLE CONTENT — zero blank areas
+- High contrast â€” dark background with bright brand-coloured accents, or vice versa
+- Every section must have VISIBLE CONTENT â€” zero blank areas
 - Bold typographic hierarchy: headline > subheading > body > CTA
-- Include all copy from the brief verbatim — no placeholder text
+- Include all copy from the brief verbatim â€” no placeholder text
 
 POSTER MUST INCLUDE ALL OF THESE SECTIONS:
 1. Brand header (brand name or logo text, brand colour)
@@ -879,7 +901,7 @@ MANDATORY DOCUMENT STRUCTURE:
   <div class="infographic">
     <!-- SECTION 1: Title header with brand name and infographic title -->
     <!-- SECTION 2: Introduction / context line -->
-    <!-- SECTION 3: Main data visualisation (charts, bars, steps, timeline, icons — all CSS only) -->
+    <!-- SECTION 3: Main data visualisation (charts, bars, steps, timeline, icons â€” all CSS only) -->
     <!-- SECTION 4: Key statistics or callout facts -->
     <!-- SECTION 5: CTA footer with brand name -->
   </div>
@@ -889,15 +911,15 @@ MANDATORY DOCUMENT STRUCTURE:
 DESIGN REQUIREMENTS:
 - Apply brand colours from BrandCore as the primary palette throughout
 - Title must be prominent (56px+) at the top of the infographic
-- Use CSS-only visualisations: bar charts, progress bars, icon shapes, numbered circles, connecting lines — NO <img> tags
-- Data must be visually encoded — numbers should be LARGE and immediately readable
+- Use CSS-only visualisations: bar charts, progress bars, icon shapes, numbered circles, connecting lines â€” NO <img> tags
+- Data must be visually encoded â€” numbers should be LARGE and immediately readable
 - High visual hierarchy: title > section headers > data points > supporting text
-- All copy from the brief included verbatim — no placeholder text
+- All copy from the brief included verbatim â€” no placeholder text
 - Sections clearly separated with whitespace, dividers, or background contrast
 
 INFOGRAPHIC MUST INCLUDE ALL OF THESE:
 1. Brand header (brand name, brand colour, infographic title)
-2. Main data section (visually rich — charts, steps, icons, stats, all CSS)
+2. Main data section (visually rich â€” charts, steps, icons, stats, all CSS)
 3. At least one prominent callout stat or highlight box
 4. CTA footer (brand-coloured, action-oriented)`;
 
@@ -910,7 +932,7 @@ INFOGRAPHIC MUST INCLUDE ALL OF THESE:
   }
 });
 
-// ── Image — OpenAI DALL-E only ──────────────────────────────────
+// â”€â”€ Image â€” OpenAI DALL-E only â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 // Used by: Image (guided flow)
 // Receives: { prompt, size, imageType, imageFormat, refImageData? }
 // If refImageData is provided, Anthropic vision extracts style cues
@@ -920,7 +942,7 @@ app.post('/api/generate-image', requireSubIfAuthed, async (req, res) => {
   if (!prompt) return res.status(400).json({ error: 'prompt is required' });
 
   const resolvedSize = size || '1024x1024';
-  console.log(`[Image] type=${imageType || '?'} format=${imageFormat || '?'} uploadType=${uploadType || 'none'} → DALL-E size: ${resolvedSize}`);
+  console.log(`[Image] type=${imageType || '?'} format=${imageFormat || '?'} uploadType=${uploadType || 'none'} â†’ DALL-E size: ${resolvedSize}`);
 
   let finalPrompt = prompt;
 
@@ -936,20 +958,20 @@ app.post('/api/generate-image', requireSubIfAuthed, async (req, res) => {
 
         if (uploadType === 'product') {
           visionSystem = 'You are a product photographer and art director. Analyze this product image precisely.';
-          visionPrompt = 'Describe this product in detail for a DALL-E image generation prompt: exact shape, color, material, finish, proportions, and any distinguishing features. Be specific and literal — this description will be used to faithfully recreate the product in a scene. 60–80 words max.';
+          visionPrompt = 'Describe this product in detail for a DALL-E image generation prompt: exact shape, color, material, finish, proportions, and any distinguishing features. Be specific and literal â€” this description will be used to faithfully recreate the product in a scene. 60â€“80 words max.';
           promptLabel  = 'PRODUCT TO FEATURE';
         } else if (uploadType === 'logo') {
           visionSystem = 'You are a brand identity analyst. Analyze this logo for its design language.';
-          visionPrompt = 'Analyze this brand logo and extract its visual design language: color palette, geometric forms, negative space usage, visual weight, and the overall aesthetic feeling it conveys. Do NOT describe the logo itself — describe the design principles that could inform a photograph or scene. 50–70 words max.';
+          visionPrompt = 'Analyze this brand logo and extract its visual design language: color palette, geometric forms, negative space usage, visual weight, and the overall aesthetic feeling it conveys. Do NOT describe the logo itself â€” describe the design principles that could inform a photograph or scene. 50â€“70 words max.';
           promptLabel  = 'BRAND VISUAL LANGUAGE FROM LOGO';
         } else {
           // reference (default)
           visionSystem = 'You are a visual art director. Analyze reference images for style extraction.';
-          visionPrompt = 'Extract the key visual style cues from this reference image for use in a DALL-E generation prompt. Focus on: color palette and temperature, lighting character and direction, composition approach, texture and material feel, depth of field, overall mood and aesthetic. Specific observations only. 60–80 words max.';
+          visionPrompt = 'Extract the key visual style cues from this reference image for use in a DALL-E generation prompt. Focus on: color palette and temperature, lighting character and direction, composition approach, texture and material feel, depth of field, overall mood and aesthetic. Specific observations only. 60â€“80 words max.';
           promptLabel  = 'REFERENCE IMAGE STYLE';
         }
 
-        console.log(`[Image] Running ${uploadType || 'reference'} vision analysis…`);
+        console.log(`[Image] Running ${uploadType || 'reference'} vision analysisâ€¦`);
         const imageDataUrl = `data:${mediaType};base64,${b64data}`;
         const analysis = (await _aimlVision('vision', visionSystem, visionPrompt, imageDataUrl, { max_tokens: 160 })).trim();
         finalPrompt = finalPrompt + '\n\n' + promptLabel + ': ' + analysis;
@@ -960,18 +982,18 @@ app.post('/api/generate-image', requireSubIfAuthed, async (req, res) => {
     }
   }
 
-  // Hard safety clamp before DALL-E — API limit is 4000 chars
+  // Hard safety clamp before DALL-E â€” API limit is 4000 chars
   const DALLE_MAX = 3900;
   console.log(`[Image] Prompt length before DALL-E: ${finalPrompt.length}`);
   if (finalPrompt.length > DALLE_MAX) {
     finalPrompt = finalPrompt.slice(0, DALLE_MAX);
-    console.warn(`[Image] Prompt clamped to ${DALLE_MAX} chars — check prompt builder for verbosity.`);
+    console.warn(`[Image] Prompt clamped to ${DALLE_MAX} chars â€” check prompt builder for verbosity.`);
   }
   console.log(`[Image] Final prompt length: ${finalPrompt.length}`);
 
   try {
     const imageUrl = await _aimlImage('visuals', finalPrompt, { aspect_ratio: _sizeToRatio(resolvedSize) });
-    console.log('[Image] AIML → image ready');
+    console.log('[Image] AIML â†’ image ready');
     res.json({ imageUrl });
   } catch (err) {
     console.error('[Image] AIML error:', err.message);
@@ -979,7 +1001,7 @@ app.post('/api/generate-image', requireSubIfAuthed, async (req, res) => {
   }
 });
 
-// ── Ads — Anthropic (copy) + Anthropic→DALL-E (visual) ──────────
+// â”€â”€ Ads â€” Anthropic (copy) + Anthropicâ†’DALL-E (visual) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 // Used by: Ads
 // Receives: { prompt, size, adFormat }
 // Steps 1 and 2 (copy + visual prompt) run in parallel via Promise.all
@@ -989,12 +1011,12 @@ app.post('/api/generate-ad', async (req, res) => {
   if (!prompt) return res.status(400).json({ error: 'prompt is required' });
 
   const resolvedSize = size || '1024x1024';
-  console.log(`[Ads] format=${adFormat || '?'} → DALL-E size: ${resolvedSize}`);
-  console.log('[Ads] Step 1+2 — Anthropic (copy + visual prompt) in parallel...');
+  console.log(`[Ads] format=${adFormat || '?'} â†’ DALL-E size: ${resolvedSize}`);
+  console.log('[Ads] Step 1+2 â€” Anthropic (copy + visual prompt) in parallel...');
 
   const copySystem = `You are a senior creative advertising director.
 Generate ONE complete, platform-specific ad concept based on the brief provided.
-Every element must reflect the brand identity in the brief — not be generic.
+Every element must reflect the brand identity in the brief â€” not be generic.
 Use the brand tone, colours, audience, and positioning provided. Every word earns its place.
 Reply ONLY with valid JSON (no markdown fences, no extra text):
 {"title":"...","headline":"...","body":"...","cta":"..."}
@@ -1019,19 +1041,19 @@ Reply ONLY with valid JSON (no markdown fences, no extra text):
       adCopy = { headline: '', body: rawCopy, cta: 'Learn More' };
     }
     dallePrompt = rawVisual;
-    console.log('[Ads] Step 1+2 — copy and visual prompt ready');
+    console.log('[Ads] Step 1+2 â€” copy and visual prompt ready');
   } catch (err) {
     console.error('[Ads] Anthropic error:', err.message);
     return res.status(500).json({ error: 'Failed to generate ad copy' });
   }
 
-  console.log(`[Ads] Step 3 — AIML image → ratio: ${_sizeToRatio(resolvedSize)}`);
+  console.log(`[Ads] Step 3 â€” AIML image â†’ ratio: ${_sizeToRatio(resolvedSize)}`);
   let imageUrl = null;
   try {
     imageUrl = await _aimlImage('visuals', dallePrompt, { aspect_ratio: _sizeToRatio(resolvedSize) });
-    console.log('[Ads] Step 3 — AIML → image ready');
+    console.log('[Ads] Step 3 â€” AIML â†’ image ready');
   } catch (err) {
-    console.warn('[Ads] Step 3 — AIML image failed (non-fatal):', err.message);
+    console.warn('[Ads] Step 3 â€” AIML image failed (non-fatal):', err.message);
   }
 
   res.json({
@@ -1043,7 +1065,7 @@ Reply ONLY with valid JSON (no markdown fences, no extra text):
   });
 });
 
-// ── Campaign — N adset-style variations, each with image + copy ─
+// â”€â”€ Campaign â€” N adset-style variations, each with image + copy â”€
 // Used by: Campaign builder
 // Receives: { prompt, size }
 // Step 1: Anthropic generates N variation objects (title/headline/body/cta/imagePrompt)
@@ -1055,15 +1077,15 @@ app.post('/api/generate-campaign', requireSubIfAuthed, async (req, res) => {
 
   const resolvedSize = size || '1024x1024';
 
-  // ── Step 1: Generate all variation copy + image prompts via Anthropic ──
-  console.log('[Campaign] Step 1 — Anthropic → generating campaign variations...');
+  // â”€â”€ Step 1: Generate all variation copy + image prompts via Anthropic â”€â”€
+  console.log('[Campaign] Step 1 â€” Anthropic â†’ generating campaign variations...');
   let variations;
   try {
     const system = `You are a strategic brand marketing expert and senior creative director.
 Generate a complete set of campaign adset-style variation concepts based on the brief.
-Each variation must use a genuinely different creative angle — not repetitions of the same idea.
+Each variation must use a genuinely different creative angle â€” not repetitions of the same idea.
 The brand identity in the brief must be unmistakable in every variation.
-Reply ONLY with a valid JSON array — no markdown fences, no extra text, nothing else.
+Reply ONLY with a valid JSON array â€” no markdown fences, no extra text, nothing else.
 [{"title":"...","headline":"...","body":"...","cta":"...","imagePrompt":"..."},...]
 Rules:
 - title: variation concept name, max 5 words, unique per variation
@@ -1083,14 +1105,14 @@ Rules:
       console.error('[Campaign] JSON parse failed. Raw output:', raw.slice(0, 300));
       return res.status(500).json({ error: 'Failed to parse campaign variations output' });
     }
-    console.log(`[Campaign] Step 1 — ${variations.length} variations ready`);
+    console.log(`[Campaign] Step 1 â€” ${variations.length} variations ready`);
   } catch (err) {
     console.error('[Campaign] AIML error:', err.message);
     return res.status(500).json({ error: 'Failed to generate campaign variations' });
   }
 
-  // ── Step 2: Generate all images in parallel ──────────────────────────
-  console.log(`[Campaign] Step 2 — generating ${variations.length} images in parallel (size: ${resolvedSize})...`);
+  // â”€â”€ Step 2: Generate all images in parallel â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  console.log(`[Campaign] Step 2 â€” generating ${variations.length} images in parallel (size: ${resolvedSize})...`);
   const imageResults = await Promise.allSettled(
     variations.map(async (v, i) => {
       const imgPrompt = (v.imagePrompt || '').trim();
@@ -1114,14 +1136,14 @@ Rules:
     imageUrl: imageResults[i].status === 'fulfilled' ? imageResults[i].value : null,
   }));
 
-  console.log(`[Campaign] Done — ${variationsWithImages.length} variations with images`);
+  console.log(`[Campaign] Done â€” ${variationsWithImages.length} variations with images`);
   res.json({ variations: variationsWithImages });
 });
 
-// ── Video — placeholder (not implemented) ───────────────────────
+// â”€â”€ Video â€” placeholder (not implemented) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 // The frontend handles this locally; no route needed.
 
-// ── BrandCore — AI Generate ─────────────────────────────────────
+// â”€â”€ BrandCore â€” AI Generate â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 app.post('/api/generate-brandcore', requireSubIfAuthed, async (req, res) => {
   const {
     brandName, description, industry, targetAudience,
@@ -1139,18 +1161,18 @@ app.post('/api/generate-brandcore', requireSubIfAuthed, async (req, res) => {
 
   console.log('[BrandCore] Generating complete brand identity for:', brandName);
 
-  const system = `You are ORIVEN BrandCore AI — a world-class brand strategist, creative director, design systems architect, and visual identity specialist.
+  const system = `You are ORIVEN BrandCore AI â€” a world-class brand strategist, creative director, design systems architect, and visual identity specialist.
 
 Your task is to generate a COMPLETE, real brand identity system from a user brief. Every field must be specific, intentional, and commercially believable.
 
 STRICT RULES:
-- Never produce generic, placeholder, or cliché output
+- Never produce generic, placeholder, or clichÃ© output
 - Every color must be a purposeful hex code justified by the brand's emotional register, industry, and audience
 - Fonts must be real, widely available typefaces with genuine strategic reasoning
 - Personality must be exactly 4 distinct, powerful single-word keywords (not phrases)
 - Tone of Voice must be exactly one clear sentence describing how the brand speaks
 - Positioning must be exactly one sentence: what the brand is, who it serves, and what makes it distinct
-- Tagline must be punchy, memorable, and ≤ 8 words
+- Tagline must be punchy, memorable, and â‰¤ 8 words
 - Visual direction must be a vivid, specific description of the visual language (not generic adjectives)
 - Logo concept imagePrompt must be visual-only, contain NO text or letterforms, suitable for AI image generation
 - Choose typography that feels intentional: pair a distinctive heading font with a high-readability body font
@@ -1172,36 +1194,36 @@ Reply ONLY with valid JSON. No markdown fences. No extra text. No preamble.
 
 {
   "brandName": "string",
-  "tagline": "string — ≤8 words, punchy, brand-defining",
+  "tagline": "string â€” â‰¤8 words, punchy, brand-defining",
   "colorSystem": {
-    "primary":   { "hex": "#XXXXXX", "name": "Primary",   "reason": "string — why this color for this brand" },
-    "secondary": { "hex": "#XXXXXX", "name": "Secondary", "reason": "string — why this color for this brand" },
-    "accent":    { "hex": "#XXXXXX", "name": "Accent",    "reason": "string — why this color for this brand" },
-    "text":      { "hex": "#XXXXXX", "name": "Text",      "reason": "string — readability and contrast rationale" },
-    "support1":  { "hex": "#XXXXXX", "name": "Support 1", "reason": "string — usage context" },
-    "support2":  { "hex": "#XXXXXX", "name": "Support 2", "reason": "string — usage context" }
+    "primary":   { "hex": "#XXXXXX", "name": "Primary",   "reason": "string â€” why this color for this brand" },
+    "secondary": { "hex": "#XXXXXX", "name": "Secondary", "reason": "string â€” why this color for this brand" },
+    "accent":    { "hex": "#XXXXXX", "name": "Accent",    "reason": "string â€” why this color for this brand" },
+    "text":      { "hex": "#XXXXXX", "name": "Text",      "reason": "string â€” readability and contrast rationale" },
+    "support1":  { "hex": "#XXXXXX", "name": "Support 1", "reason": "string â€” usage context" },
+    "support2":  { "hex": "#XXXXXX", "name": "Support 2", "reason": "string â€” usage context" }
   },
   "typography": {
-    "heading": { "family": "string", "reason": "string — why this font matches the brand personality" },
-    "body":    { "family": "string", "reason": "string — why this font supports readability and brand feel" }
+    "heading": { "family": "string", "reason": "string â€” why this font matches the brand personality" },
+    "body":    { "family": "string", "reason": "string â€” why this font supports readability and brand feel" }
   },
   "brandStrategy": {
-    "positioning":    "string — exactly one sentence",
-    "targetAudience": "string — specific psychographic and demographic description",
+    "positioning":    "string â€” exactly one sentence",
+    "targetAudience": "string â€” specific psychographic and demographic description",
     "personality":    ["keyword1", "keyword2", "keyword3", "keyword4"],
-    "toneOfVoice":   "string — exactly one sentence describing how the brand speaks"
+    "toneOfVoice":   "string â€” exactly one sentence describing how the brand speaks"
   },
   "brandCore": {
-    "brandPromise": "string — one sharp sentence the customer can hold the brand to",
-    "mission":      "string — why the brand exists beyond profit",
-    "vision":       "string — what success looks like in 5 years",
+    "brandPromise": "string â€” one sharp sentence the customer can hold the brand to",
+    "mission":      "string â€” why the brand exists beyond profit",
+    "vision":       "string â€” what success looks like in 5 years",
     "values":       ["string", "string", "string"]
   },
-  "visualDirection": "string — vivid, specific description of the complete visual language and aesthetic direction",
+  "visualDirection": "string â€” vivid, specific description of the complete visual language and aesthetic direction",
   "logoConcept": {
-    "description":  "string — strategic rationale: what the logo communicates and why",
-    "style":       "string — wordmark / lettermark / icon / combination mark and why",
-    "imagePrompt": "string — specific DALL-E prompt, visual only, no text, no letterforms"
+    "description":  "string â€” strategic rationale: what the logo communicates and why",
+    "style":       "string â€” wordmark / lettermark / icon / combination mark and why",
+    "imagePrompt": "string â€” specific DALL-E prompt, visual only, no text, no letterforms"
   }
 }`;
 
@@ -1217,7 +1239,7 @@ Visual Style Preference: ${effectiveVisualStyle || 'not specified'}
 Color Direction: ${effectiveColorDir || 'not specified'}
 Desired Brand Feeling: ${brandFeeling || 'not specified'}
 
-Generate the complete BrandCore JSON now. Every field must be specific to this brand — no generic placeholders.`;
+Generate the complete BrandCore JSON now. Every field must be specific to this brand â€” no generic placeholders.`;
 
   try {
     const raw = await _aimlText('brand-core', system, userPrompt, { max_tokens: 3000 });
@@ -1244,7 +1266,7 @@ Generate the complete BrandCore JSON now. Every field must be specific to this b
   }
 });
 
-// ── Brand Check — OpenAI Quality Analysis ────────────────────────
+// â”€â”€ Brand Check â€” OpenAI Quality Analysis â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 app.post('/api/brand-check', requireSubIfAuthed, async (req, res) => {
   const {
     brandName, tagline, colors, fonts, brandPromise, description,
@@ -1253,7 +1275,7 @@ app.post('/api/brand-check', requireSubIfAuthed, async (req, res) => {
   } = req.body;
   if (!brandName) return res.status(400).json({ error: 'brandName is required' });
 
-  console.log('[BrandCheck] AIML → analysing brand:', brandName);
+  console.log('[BrandCheck] AIML â†’ analysing brand:', brandName);
   try {
     const system = `You are a world-class brand strategist with 20 years of experience advising high-growth companies, DTC brands, and funded startups.
 
@@ -1261,25 +1283,25 @@ Your role: Perform an intelligent, quality-driven brand audit. This is NOT a com
 A brand with every field filled in can still score poorly if the positioning is weak, the personality is generic, or the visual direction is inconsistent.
 
 Evaluate quality across ten dimensions:
-1. Consistency — do all elements reinforce each other?
-2. Differentiation — does this brand stand out or blend in?
-3. Clarity — is the positioning instantly understandable?
-4. Positioning Strength — is it specific, ownable, and meaningful?
-5. Audience Alignment — does the identity match who it's speaking to?
-6. Visual Coherence — do colors, typography, and style direction work as a system?
-7. Brand Personality Strength — is it distinctive or generic?
-8. Tone of Voice Alignment — does the tone match the personality and audience?
-9. Typography Suitability — does the font choice reinforce the brand feeling?
-10. Color Harmony — does the palette feel intentional and emotionally right?
+1. Consistency â€” do all elements reinforce each other?
+2. Differentiation â€” does this brand stand out or blend in?
+3. Clarity â€” is the positioning instantly understandable?
+4. Positioning Strength â€” is it specific, ownable, and meaningful?
+5. Audience Alignment â€” does the identity match who it's speaking to?
+6. Visual Coherence â€” do colors, typography, and style direction work as a system?
+7. Brand Personality Strength â€” is it distinctive or generic?
+8. Tone of Voice Alignment â€” does the tone match the personality and audience?
+9. Typography Suitability â€” does the font choice reinforce the brand feeling?
+10. Color Harmony â€” does the palette feel intentional and emotionally right?
 
 Score calibration:
-- 30–50: Weak positioning, generic personality, poor alignment
-- 51–65: Some elements working but lacks coherence or differentiation
-- 66–79: Solid foundation with clear opportunities to sharpen
-- 80–89: Strong, coherent identity with minor gaps
-- 90–100: Exceptional clarity, differentiation, and system coherence
+- 30â€“50: Weak positioning, generic personality, poor alignment
+- 51â€“65: Some elements working but lacks coherence or differentiation
+- 66â€“79: Solid foundation with clear opportunities to sharpen
+- 80â€“89: Strong, coherent identity with minor gaps
+- 90â€“100: Exceptional clarity, differentiation, and system coherence
 
-Return ONLY valid JSON — no markdown, no extra text — matching this exact structure:
+Return ONLY valid JSON â€” no markdown, no extra text â€” matching this exact structure:
 {
   "score": number,
   "professionalLevel": "string",
@@ -1290,12 +1312,12 @@ Return ONLY valid JSON — no markdown, no extra text — matching this exact st
 }
 
 Rules:
-- score: integer 0–100 based entirely on quality, not completeness. Be honest — inflation destroys trust.
+- score: integer 0â€“100 based entirely on quality, not completeness. Be honest â€” inflation destroys trust.
 - professionalLevel: one of "developing", "emerging", "established", "advanced", "premium"
-- summary: 2–3 sentences. The most important strategic truth about this brand. Direct, warm, insightful — write as a trusted advisor to a founder, not a report generator.
-- strengths: 3–5 items. Specific and concrete. Reference actual brand elements. No vague praise.
-- opportunities: 3–5 items. Where recognition is being left on the table. Frame as strategic guidance. Be specific about what to improve and why it matters for audience connection or market differentiation.
-- recommendations: 3–5 items. Concrete, prioritized actions the brand owner should take next. Most impactful first. Each must be immediately actionable.
+- summary: 2â€“3 sentences. The most important strategic truth about this brand. Direct, warm, insightful â€” write as a trusted advisor to a founder, not a report generator.
+- strengths: 3â€“5 items. Specific and concrete. Reference actual brand elements. No vague praise.
+- opportunities: 3â€“5 items. Where recognition is being left on the table. Frame as strategic guidance. Be specific about what to improve and why it matters for audience connection or market differentiation.
+- recommendations: 3â€“5 items. Concrete, prioritized actions the brand owner should take next. Most impactful first. Each must be immediately actionable.
 - Every line must be specific to THIS brand. Generic feedback is a failure.`;
 
     // Build rich brand context
@@ -1320,7 +1342,7 @@ Rules:
     if (styleDirection) lines.push(`Visual Style Direction: ${styleDirection}`);
     if (logoConcept)    lines.push(`Logo Concept: ${logoConcept}`);
 
-    const userMsg = `Perform a comprehensive brand audit for the following brand identity. Evaluate quality rigorously — not just whether fields are filled in. Return your full strategic analysis as JSON.\n\n${lines.join('\n')}`;
+    const userMsg = `Perform a comprehensive brand audit for the following brand identity. Evaluate quality rigorously â€” not just whether fields are filled in. Return your full strategic analysis as JSON.\n\n${lines.join('\n')}`;
 
     const raw = await _aimlText('brand-core', system, userMsg, { max_tokens: 1200 });
     const cleaned = raw.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '').trim();
@@ -1333,7 +1355,7 @@ Rules:
       return res.status(500).json({ error: 'Failed to parse brand check output' });
     }
 
-    console.log('[BrandCheck] AIML → analysis ready for:', brandName, '| Score:', report.score);
+    console.log('[BrandCheck] AIML â†’ analysis ready for:', brandName, '| Score:', report.score);
     res.json(report);
   } catch (err) {
     console.error('[BrandCheck] AIML error:', err.message);
@@ -1341,7 +1363,7 @@ Rules:
   }
 });
 
-// ── Competitor Intelligence v2 ──────────────────────────────────
+// â”€â”€ Competitor Intelligence v2 â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 app.post('/api/competitor-intelligence', requireSubIfAuthed, async (req, res) => {
   const { competitor, brandCore } = req.body;
 
@@ -1373,7 +1395,7 @@ Analyze the competitor brand at the given URL using your comprehensive knowledge
 
 For colors: return accurate HEX codes. For major brands (Apple, Nike, Google, etc.) use their real brand colors. For less-known brands, make a reasonable inference.
 For typography: name the actual typeface the brand uses.
-Keep every label short — 2–6 words max. Only the "insight" field may be longer (3–4 sentences).
+Keep every label short â€” 2â€“6 words max. Only the "insight" field may be longer (3â€“4 sentences).
 
 Return ONLY valid JSON with zero markdown, matching this exact structure:
 
@@ -1381,9 +1403,9 @@ Return ONLY valid JSON with zero markdown, matching this exact structure:
   "competitor": {
     "name": "Brand Name",
     "industry": "Short industry label",
-    "positioning": "3–5 word positioning statement",
+    "positioning": "3â€“5 word positioning statement",
     "tone": "Single word",
-    "audience": "2–4 word description",
+    "audience": "2â€“4 word description",
     "visualStyle": "Single word",
     "colors": ["#hex1", "#hex2", "#hex3"],
     "typography": "Font family name",
@@ -1395,31 +1417,31 @@ Return ONLY valid JSON with zero markdown, matching this exact structure:
     "toneWords": ["word1", "word2", "word3", "word4"]
   },
   "positioning": {
-    "competitorOwns": "2–5 word phrase",
-    "userOwns": "2–5 word phrase",
+    "competitorOwns": "2â€“5 word phrase",
+    "userOwns": "2â€“5 word phrase",
     "overlap": ["word1", "word2", "word3"]
   },
   "differentiation": {
-    "theyOwn": "2–5 word phrase",
-    "youOwn": "2–5 word phrase",
-    "opportunity": "2–5 word phrase",
-    "risk": "2–5 word phrase"
+    "theyOwn": "2â€“5 word phrase",
+    "youOwn": "2â€“5 word phrase",
+    "opportunity": "2â€“5 word phrase",
+    "risk": "2â€“5 word phrase"
   },
-  "insight": "3–4 sentence strategic insight. Direct, specific, and actionable.",
+  "insight": "3â€“4 sentence strategic insight. Direct, specific, and actionable.",
   "verdict": {
-    "strength": "2–4 word phrase",
-    "weakness": "2–4 word phrase",
-    "advantage": "2–4 word phrase",
-    "position": "2–5 word phrase"
+    "strength": "2â€“4 word phrase",
+    "weakness": "2â€“4 word phrase",
+    "advantage": "2â€“4 word phrase",
+    "position": "2â€“5 word phrase"
   }
 }
 
 Rules:
 - userBrand fields must reflect the provided Brand Core data. If no data: use strategic defaults.
-- Be specific to the actual brand — no generic filler.
+- Be specific to the actual brand â€” no generic filler.
 - All values are scannable at a glance.`;
 
-  const userMsg = `Competitor URL: ${url}\n\n${bcLines.length ? `User's Brand Core:\n${bcLines.join('\n')}` : 'No brand core provided — use strategic defaults for the user brand.'}`;
+  const userMsg = `Competitor URL: ${url}\n\n${bcLines.length ? `User's Brand Core:\n${bcLines.join('\n')}` : 'No brand core provided â€” use strategic defaults for the user brand.'}`;
 
   try {
     const raw = await _aimlText('competitor-intel', system, userMsg, { max_tokens: 1800 });
@@ -1441,33 +1463,33 @@ Rules:
   }
 });
 
-// ── Stripe checkout session ─────────────────────────────────────
+// â”€â”€ Stripe checkout session â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 app.post('/api/create-checkout-session', async (req, res) => {
   const { plan, userId, userEmail, source } = req.body;
 
-  console.log(`[Checkout] ▶ Request received — plan: ${plan}, userId: ${userId}, email: ${userEmail || '(none)'}`);
+  console.log(`[Checkout] â–¶ Request received â€” plan: ${plan}, userId: ${userId}, email: ${userEmail || '(none)'}`);
 
   if (!plan || !userId) {
-    console.error('[Checkout] ❌ Missing required fields — plan:', plan, 'userId:', userId);
+    console.error('[Checkout] âŒ Missing required fields â€” plan:', plan, 'userId:', userId);
     return res.status(400).json({ error: 'plan and userId are required' });
   }
 
   const validPlans = ['starter', 'creator', 'professional'];
   if (!validPlans.includes(plan)) {
-    console.error(`[Checkout] ❌ Unrecognised plan name: "${plan}" — expected one of: ${validPlans.join(', ')}`);
+    console.error(`[Checkout] âŒ Unrecognised plan name: "${plan}" â€” expected one of: ${validPlans.join(', ')}`);
     return res.status(400).json({ error: `Unrecognised plan: ${plan}` });
   }
 
   const priceId = PRICE_IDS[plan];
   if (!priceId) {
-    console.error(`[Checkout] ❌ No price ID configured for plan "${plan}"`);
+    console.error(`[Checkout] âŒ No price ID configured for plan "${plan}"`);
     console.error('[Checkout]    STRIPE_PRICE_' + plan.toUpperCase(), '= (NOT SET in environment)');
     console.error('[Checkout]    Fix: add this variable in the Render dashboard and redeploy');
     return res.status(400).json({ error: `No price configured for plan: ${plan}. Contact support.` });
   }
 
   const frontendUrl = FRONTEND_URL;
-  // All checkout cancels return to /app — hard paywall will re-appear for unpaid users.
+  // All checkout cancels return to /app â€” hard paywall will re-appear for unpaid users.
   const cancelPath = '/app?canceled=true';
 
   try {
@@ -1481,7 +1503,7 @@ app.post('/api/create-checkout-session', async (req, res) => {
       cancel_url:  `${frontendUrl}${cancelPath}`,
     });
 
-    console.log(`[Checkout] ✅ Session created`);
+    console.log(`[Checkout] âœ… Session created`);
     console.log(`[Checkout]    Session ID:   ${session.id}`);
     console.log(`[Checkout]    userId:       ${userId}`);
     console.log(`[Checkout]    plan:         ${plan}`);
@@ -1491,7 +1513,7 @@ app.post('/api/create-checkout-session', async (req, res) => {
     res.json({ url: session.url });
   } catch (err) {
     // Log every available field on Stripe errors for easy debugging
-    console.error('[Checkout] ❌ Stripe error creating session');
+    console.error('[Checkout] âŒ Stripe error creating session');
     console.error('           message:', err.message);
     console.error('           type:   ', err.type    || '(none)');
     console.error('           code:   ', err.code    || '(none)');
@@ -1503,7 +1525,7 @@ app.post('/api/create-checkout-session', async (req, res) => {
   }
 });
 
-// ── GET /api/get-subscription ───────────────────────────────────
+// â”€â”€ GET /api/get-subscription â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 app.get('/api/get-subscription', async (req, res) => {
   const user = await getUserFromToken(req);
   if (!user) return res.status(401).json({ error: 'Unauthorized' });
@@ -1529,7 +1551,7 @@ app.get('/api/get-subscription', async (req, res) => {
   }
 });
 
-// ── POST /api/schedule-plan-change ──────────────────────────────
+// â”€â”€ POST /api/schedule-plan-change â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 app.post('/api/schedule-plan-change', requireSubscription, async (req, res) => {
   const user = await getUserFromToken(req);
   if (!user) return res.status(401).json({ error: 'Unauthorized' });
@@ -1553,15 +1575,15 @@ app.post('/api/schedule-plan-change', requireSubscription, async (req, res) => {
 
   if (plan === currentPlan) return res.json({ ok: true, message: 'Already on this plan' });
 
-  // Upgrading from free to paid — tell client to use checkout
+  // Upgrading from free to paid â€” tell client to use checkout
   if (currentPlan === 'free' && plan !== 'free') {
     return res.json({ requiresCheckout: true });
   }
 
-  // Cancelling to free — schedule cancel_at_period_end on Stripe, fallback to immediate DB update
+  // Cancelling to free â€” schedule cancel_at_period_end on Stripe, fallback to immediate DB update
   if (plan === 'free') {
     if (!subId) {
-      // No Stripe subscription on record — just update DB immediately
+      // No Stripe subscription on record â€” just update DB immediately
       await supabaseAdmin.from('profiles')
         .update({ subscription_status: 'free', pending_plan: null, pending_plan_date: null })
         .eq('id', user.id);
@@ -1576,7 +1598,7 @@ app.post('/api/schedule-plan-change', requireSubscription, async (req, res) => {
       console.log('[SchedulePlan] Cancellation scheduled for:', periodEnd);
       return res.json({ ok: true, pending_plan: 'free', pending_plan_date: periodEnd });
     } catch (err) {
-      // Stripe failed (invalid/missing sub) — downgrade in DB immediately
+      // Stripe failed (invalid/missing sub) â€” downgrade in DB immediately
       console.error('[SchedulePlan] Stripe cancel failed, falling back to DB downgrade:', err.message);
       await supabaseAdmin.from('profiles')
         .update({ subscription_status: 'free', pending_plan: null, pending_plan_date: null, stripe_subscription_id: null })
@@ -1585,16 +1607,16 @@ app.post('/api/schedule-plan-change', requireSubscription, async (req, res) => {
     }
   }
 
-  // Switching between paid plans — update Stripe subscription, fallback to DB-only change
+  // Switching between paid plans â€” update Stripe subscription, fallback to DB-only change
   const newPriceId = PRICE_IDS[plan];
   if (!newPriceId) return res.status(400).json({ error: 'Price not configured for plan: ' + plan });
 
   if (!subId) {
-    // No Stripe subscription — apply plan change directly in DB (edge case: manual override)
+    // No Stripe subscription â€” apply plan change directly in DB (edge case: manual override)
     await supabaseAdmin.from('profiles')
       .update({ subscription_status: plan, pending_plan: null, pending_plan_date: null })
       .eq('id', user.id);
-    console.log('[SchedulePlan] No sub ID — applied plan directly in DB:', plan);
+    console.log('[SchedulePlan] No sub ID â€” applied plan directly in DB:', plan);
     return res.json({ ok: true, subscription_status: plan });
   }
 
@@ -1616,7 +1638,7 @@ app.post('/api/schedule-plan-change', requireSubscription, async (req, res) => {
     console.log('[SchedulePlan] Plan change to', plan, 'scheduled for:', periodEnd);
     return res.json({ ok: true, pending_plan: plan, pending_plan_date: periodEnd });
   } catch (err) {
-    // Stripe failed — apply plan change directly in DB so the user isn't stuck
+    // Stripe failed â€” apply plan change directly in DB so the user isn't stuck
     console.error('[SchedulePlan] Stripe update failed, falling back to DB plan change:', err.message);
     await supabaseAdmin.from('profiles')
       .update({ subscription_status: plan, pending_plan: null, pending_plan_date: null })
@@ -1625,7 +1647,7 @@ app.post('/api/schedule-plan-change', requireSubscription, async (req, res) => {
   }
 });
 
-// ── POST /api/cancel-plan-change ────────────────────────────────
+// â”€â”€ POST /api/cancel-plan-change â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 app.post('/api/cancel-plan-change', requireSubscription, async (req, res) => {
   const user = await getUserFromToken(req);
   if (!user) return res.status(401).json({ error: 'Unauthorized' });
@@ -1655,7 +1677,7 @@ app.post('/api/cancel-plan-change', requireSubscription, async (req, res) => {
   res.json({ ok: true });
 });
 
-// ── GET /api/get-usage ───────────────────────────────────────────
+// â”€â”€ GET /api/get-usage â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 app.get('/api/get-usage', async (req, res) => {
   const user = await getUserFromToken(req);
   if (!user) return res.status(401).json({ error: 'Unauthorized' });
@@ -1678,8 +1700,8 @@ app.get('/api/get-usage', async (req, res) => {
   }
 });
 
-// ── POST /api/increment-usage ────────────────────────────────────
-// Body: { count?: number }  — credits consumed (default 1, capped at 20)
+// â”€â”€ POST /api/increment-usage â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// Body: { count?: number }  â€” credits consumed (default 1, capped at 20)
 app.post('/api/increment-usage', requireSubscription, async (req, res) => {
   const user = await getUserFromToken(req);
   if (!user) return res.status(401).json({ error: 'Unauthorized' });
@@ -1702,7 +1724,7 @@ app.post('/api/increment-usage', requireSubscription, async (req, res) => {
   }
 });
 
-// ── POST /api/signup ─────────────────────────────────────────────
+// â”€â”€ POST /api/signup â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 // Creates a user immediately (email_confirm:true bypasses Supabase gate),
 // stores email_verified:false in profiles, sends verification email.
 // Body: { firstName, lastName, email, password, phone }
@@ -1715,7 +1737,7 @@ app.post('/api/signup', async (req, res) => {
     return res.status(400).json({ error: 'Password must be at least 6 characters' });
   }
 
-  // Create user — email_confirm:true means Supabase won't block signInWithPassword
+  // Create user â€” email_confirm:true means Supabase won't block signInWithPassword
   const { data: authData, error: authError } = await supabaseAdmin.auth.admin.createUser({
     email,
     password,
@@ -1735,7 +1757,7 @@ app.post('/api/signup', async (req, res) => {
   const user = authData.user;
   const verificationToken = crypto.randomBytes(32).toString('hex');
 
-  // Upsert profile row — using upsert (not insert) so a Supabase auth trigger that
+  // Upsert profile row â€” using upsert (not insert) so a Supabase auth trigger that
   // pre-creates the row cannot block the write or leave a stale subscription_status.
   const { error: profileError } = await supabaseAdmin.from('profiles').upsert({
     id:                   user.id,
@@ -1752,7 +1774,7 @@ app.post('/api/signup', async (req, res) => {
   if (profileError) console.error('[Signup] Profile upsert error:', profileError.message);
   else console.log('[Signup] Profile upserted with subscription_status=free for user:', user.id);
 
-  // Send verification email (best-effort — signup succeeds even if email fails)
+  // Send verification email (best-effort â€” signup succeeds even if email fails)
   const smtpUser = process.env.SMTP_USER;
   const smtpPass = process.env.SMTP_PASS;
   if (smtpUser && smtpPass) {
@@ -1763,22 +1785,22 @@ app.post('/api/signup', async (req, res) => {
         to:      email,
         subject: 'Verify your ORIVEN email address',
         html:    _verificationEmailHtml(firstName, verifyUrl),
-        text:    `Hi ${firstName},\n\nVerify your email:\n${verifyUrl}\n\nThis link is valid for 14 days.\n\n— ORIVEN`
+        text:    `Hi ${firstName},\n\nVerify your email:\n${verifyUrl}\n\nThis link is valid for 14 days.\n\nâ€” ORIVEN`
       });
       console.log('[Signup] Verification email sent to', email);
     } catch (emailErr) {
       console.error('[Signup] Verification email failed (non-fatal):', emailErr.message);
     }
   } else {
-    console.warn('[Signup] SMTP not configured — skipping verification email');
+    console.warn('[Signup] SMTP not configured â€” skipping verification email');
   }
 
-  console.log('[Signup] ✅ User created:', user.id, email);
+  console.log('[Signup] âœ… User created:', user.id, email);
   res.json({ ok: true, userId: user.id });
 });
 
-// ── POST /api/verify-email ───────────────────────────────────────
-// No auth required — the token itself is the credential.
+// â”€â”€ POST /api/verify-email â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// No auth required â€” the token itself is the credential.
 // Body: { token }
 app.post('/api/verify-email', async (req, res) => {
   const { token } = req.body || {};
@@ -1797,11 +1819,11 @@ app.post('/api/verify-email', async (req, res) => {
     verification_token: null
   }).eq('id', data.id);
 
-  console.log('[VerifyEmail] ✅ Email verified for user:', data.id);
+  console.log('[VerifyEmail] âœ… Email verified for user:', data.id);
   res.json({ ok: true });
 });
 
-// ── POST /api/resend-verification ───────────────────────────────
+// â”€â”€ POST /api/resend-verification â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 // Requires auth. Generates a fresh token and resends the email.
 app.post('/api/resend-verification', async (req, res) => {
   const user = await getUserFromToken(req);
@@ -1810,7 +1832,7 @@ app.post('/api/resend-verification', async (req, res) => {
   const smtpUser = process.env.SMTP_USER;
   const smtpPass = process.env.SMTP_PASS;
   if (!smtpUser || !smtpPass) {
-    return res.status(503).json({ error: 'Email service not configured — set SMTP_USER and SMTP_PASS' });
+    return res.status(503).json({ error: 'Email service not configured â€” set SMTP_USER and SMTP_PASS' });
   }
 
   const verificationToken = crypto.randomBytes(32).toString('hex');
@@ -1832,9 +1854,9 @@ app.post('/api/resend-verification', async (req, res) => {
       to:      toEmail,
       subject: 'Verify your ORIVEN email address',
       html:    _verificationEmailHtml(firstName, verifyUrl),
-      text:    `Hi ${firstName},\n\nVerify your email:\n${verifyUrl}\n\nThis link is valid for 14 days.\n\n— ORIVEN`
+      text:    `Hi ${firstName},\n\nVerify your email:\n${verifyUrl}\n\nThis link is valid for 14 days.\n\nâ€” ORIVEN`
     });
-    console.log('[ResendVerify] ✅ Sent to', toEmail);
+    console.log('[ResendVerify] âœ… Sent to', toEmail);
     res.json({ ok: true });
   } catch (err) {
     console.error('[ResendVerify] Failed:', err.message);
@@ -1842,7 +1864,7 @@ app.post('/api/resend-verification', async (req, res) => {
   }
 });
 
-// ── POST /api/send-invite ────────────────────────────────────────
+// â”€â”€ POST /api/send-invite â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 // Sends a team invite email via Outlook SMTP.
 // Body: { name, email, role, message, workspaceName }
 app.post('/api/send-invite', requireSubscription, async (req, res) => {
@@ -1856,7 +1878,7 @@ app.post('/api/send-invite', requireSubscription, async (req, res) => {
   const smtpPass = process.env.SMTP_PASS;
 
   if (!smtpUser || !smtpPass) {
-    console.error('[Invite] ❌ SMTP credentials not configured — set SMTP_USER and SMTP_PASS in .env');
+    console.error('[Invite] âŒ SMTP credentials not configured â€” set SMTP_USER and SMTP_PASS in .env');
     return res.status(503).json({ error: 'Email service not configured' });
   }
 
@@ -1918,18 +1940,18 @@ app.post('/api/send-invite', requireSubscription, async (req, res) => {
       to:      email,
       subject: `You've been invited to ${senderWorkspace} on ORIVEN`,
       html:    html,
-      text:    `Hi ${recipientName},\n\nYou've been invited to join "${senderWorkspace}" on ORIVEN as a ${roleLabel}.\n\nVisit https://orivenai.com/app to accept.\n\n— The ORIVEN Team`
+      text:    `Hi ${recipientName},\n\nYou've been invited to join "${senderWorkspace}" on ORIVEN as a ${roleLabel}.\n\nVisit https://orivenai.com/app to accept.\n\nâ€” The ORIVEN Team`
     });
 
-    console.log(`[Invite] ✅ Invite sent to ${email} (role: ${roleLabel}, workspace: ${senderWorkspace})`);
+    console.log(`[Invite] âœ… Invite sent to ${email} (role: ${roleLabel}, workspace: ${senderWorkspace})`);
     res.json({ ok: true });
   } catch (err) {
-    console.error('[Invite] ❌ Failed to send invite email:', err.message);
+    console.error('[Invite] âŒ Failed to send invite email:', err.message);
     res.status(500).json({ error: 'Failed to send invite email: ' + err.message });
   }
 });
 
-// ── AI Logo Generation ──────────────────────────────────────────
+// â”€â”€ AI Logo Generation â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 // Receives: { brandName, description, logoStyle, styleDirection, colorPalette }
 // Returns: { imageUrl, prompt }
 app.post('/api/generate-logo', requireSubIfAuthed, async (req, res) => {
@@ -1943,15 +1965,15 @@ app.post('/api/generate-logo', requireSubIfAuthed, async (req, res) => {
 Your job is to write a precise DALL-E 3 prompt that will generate a professional brand logo concept.
 
 Rules:
-- Output is 120–250 characters — a single, vivid visual description
-- Describe a logo SYMBOL or MARK — geometric shapes, abstract forms, icons, emblems — never letters or text
+- Output is 120â€“250 characters â€” a single, vivid visual description
+- Describe a logo SYMBOL or MARK â€” geometric shapes, abstract forms, icons, emblems â€” never letters or text
 - Describe the specific visual form: shape, geometry, composition, colour treatment
 - Reference the style direction and logo type requested
 - End with: ", isolated on white background, vector-style clean design, professional brand identity mark"
 - CRITICAL: Do NOT include ANY readable text, letters, words, numbers, or typographic elements of any kind
 - Do NOT include the brand name, initials, taglines, or ANY characters that form words
-- DALL-E cannot reliably render text — the output must be a pure visual symbol with zero written elements
-- Do NOT say "Generate" or "Create" — just describe what is seen in the image
+- DALL-E cannot reliably render text â€” the output must be a pure visual symbol with zero written elements
+- Do NOT say "Generate" or "Create" â€” just describe what is seen in the image
 - Output ONLY the prompt. No labels. No quotes. No explanation.`;
 
   try {
@@ -1966,7 +1988,7 @@ Brand description: ${description || 'a professional brand'}`;
 
     console.log(`[LogoGen] Image prompt: ${imagePrompt}`);
     const imageUrl = await _aimlImage('logo', imagePrompt, { aspect_ratio: '1:1' });
-    console.log(`[LogoGen] ✅ Logo generated for: ${brandName}`);
+    console.log(`[LogoGen] âœ… Logo generated for: ${brandName}`);
     res.json({ imageUrl, prompt: imagePrompt });
   } catch (err) {
     console.error('[LogoGen] Error:', err.message);
@@ -1974,11 +1996,11 @@ Brand description: ${description || 'a professional brand'}`;
   }
 });
 
-// ════════════════════════════════════════════════════════════════
-// UGC — AI VIDEO GENERATION (AIML / Kling)
-// ════════════════════════════════════════════════════════════════
+// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+// UGC â€” AI VIDEO GENERATION (AIML / Kling)
+// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 
-// Static creator presets — displayed in the UGC avatar picker.
+// Static creator presets â€” displayed in the UGC avatar picker.
 // Avatar-based video is no longer used; these represent creator styles
 // that inform the video prompt sent to Kling.
 const UGC_PRESET_AVATARS = [
@@ -1995,14 +2017,14 @@ const UGC_PRESET_VOICES = [
   { voice_id: 'v_energetic',  name: 'Energetic',  language: 'English', gender: 'female' },
 ];
 
-// ── GET /api/ugc-avatars ─────────────────────────────────────────
+// â”€â”€ GET /api/ugc-avatars â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 app.get('/api/ugc-avatars', async (req, res) => {
   const user = await getUserFromToken(req);
   if (!user) return res.status(401).json({ error: 'Unauthorized' });
   return res.json({ avatars: UGC_PRESET_AVATARS });
 });
 
-// ── GET /api/ugc-voices ──────────────────────────────────────────
+// â”€â”€ GET /api/ugc-voices â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 app.get('/api/ugc-voices', async (req, res) => {
   const user = await getUserFromToken(req);
   if (!user) return res.status(401).json({ error: 'Unauthorized' });
@@ -2011,7 +2033,7 @@ app.get('/api/ugc-voices', async (req, res) => {
 
 console.log("UGC ROUTE REGISTERED");
 
-// ── POST /api/generate-ugc ──────────────────────────────────────
+// â”€â”€ POST /api/generate-ugc â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 // AIML writes the script, Kling (via AIML) generates the video.
 // Frontend calls one endpoint, gets back a videoId to poll.
 app.post('/api/generate-ugc', requireSubIfAuthed, async (req, res) => {
@@ -2033,32 +2055,32 @@ app.post('/api/generate-ugc', requireSubIfAuthed, async (req, res) => {
 
   const formatAspect = { vertical: '9:16', square: '1:1', landscape: '16:9' };
   const aspectRatio  = formatAspect[format] || '9:16';
-  console.log('[UGC] Received → adFeeling:', adFeeling, '| adGoal:', adGoal, '| format:', format, '| aspect:', aspectRatio, '| scriptMode:', customScript ? 'custom' : 'ai');
+  console.log('[UGC] Received â†’ adFeeling:', adFeeling, '| adGoal:', adGoal, '| format:', format, '| aspect:', aspectRatio, '| scriptMode:', customScript ? 'custom' : 'ai');
 
-  // ── Cinematic brief registry — each style is a full creative direction ──
+  // â”€â”€ Cinematic brief registry â€” each style is a full creative direction â”€â”€
   const CREATOR_BRIEFS = {
     startup_founder: {
-      context:   'A bold startup founder speaking directly from their workspace — authentic, disruptive, has been in the trenches and knows the audience\'s exact pain point.',
+      context:   'A bold startup founder speaking directly from their workspace â€” authentic, disruptive, has been in the trenches and knows the audience\'s exact pain point.',
       hookStyle: 'Lead with the problem the audience already knows. One line. Then flip it hard.',
       language:  'Founder energy: "we built this", "shipped it last week", "changed the way I work completely"',
       ctaStyle:  'Direct and urgent: "try it now", "link in bio", "ship faster starting today"',
     },
     podcast_creator: {
-      context:   'A trusted podcast host mid-recommendation — relaxed, genuinely enthusiastic, talking like they\'re in the middle of a real conversation with a close friend.',
+      context:   'A trusted podcast host mid-recommendation â€” relaxed, genuinely enthusiastic, talking like they\'re in the middle of a real conversation with a close friend.',
       hookStyle: 'Start mid-story or mid-thought. Like you jumped into a conversation already in progress.',
       language:  'Warm and authentic: "honestly", "I\'ve been using this for months now", "you need to hear about this"',
       ctaStyle:  'Soft confidence: "worth checking out", "grab the link below", "you\'ll thank me later"',
     },
     fitness_creator: {
-      context:   'A results-obsessed fitness creator in their element — pumped, direct, every single word carries physical energy and drive.',
+      context:   'A results-obsessed fitness creator in their element â€” pumped, direct, every single word carries physical energy and drive.',
       hookStyle: 'Open with a transformation or a challenge. Make them feel the intensity in the first sentence.',
       language:  'Active and relentless: "gains", "no excuses", "I don\'t stop until", "results speak for themselves"',
       ctaStyle:  'No hesitation: "get it now", "stop waiting", "your move"',
     },
     luxury_influencer: {
-      context:   'A luxury lifestyle creator speaking from a premium environment — measured, deliberate, every word is intentional and earns its place.',
+      context:   'A luxury lifestyle creator speaking from a premium environment â€” measured, deliberate, every word is intentional and earns its place.',
       hookStyle: 'Paint the aspirational scene first. Let the audience want the life before they hear anything about the product.',
-      language:  'Elevated and sparse: "exceptional", "the kind of quality that stays with you", "not for everyone — and that\'s the point"',
+      language:  'Elevated and sparse: "exceptional", "the kind of quality that stays with you", "not for everyone â€” and that\'s the point"',
       ctaStyle:  'Restrained and exclusive: "discover it", "if you know, you know", "for those who notice the difference"',
     },
     tech_reviewer: {
@@ -2068,54 +2090,54 @@ app.post('/api/generate-ugc', requireSubIfAuthed, async (req, res) => {
       ctaStyle:  'Confident endorsement: "worth every penny", "link in the description", "upgraded and never looked back"',
     },
     street_creator: {
-      context:   'A spontaneous street creator filming on-the-go — raw, unfiltered energy, just discovered something and physically cannot wait to share it.',
-      hookStyle: 'React first. "Okay wait—" or "I need to stop and talk about this right now" — pull them into the urgency.',
+      context:   'A spontaneous street creator filming on-the-go â€” raw, unfiltered energy, just discovered something and physically cannot wait to share it.',
+      hookStyle: 'React first. "Okay waitâ€”" or "I need to stop and talk about this right now" â€” pull them into the urgency.',
       language:  'Raw and viral: "no cap", "lowkey obsessed", "fr fr", "I can\'t believe this actually works"',
       ctaStyle:  'Impulsive and urgent: "grab it fr", "link in bio right now", "you\'re welcome in advance"',
     },
     vacation_creator: {
-      context:   'A travel creator on location — relaxed, fully in their element, makes the audience want the experience before they even know what the product is.',
+      context:   'A travel creator on location â€” relaxed, fully in their element, makes the audience want the experience before they even know what the product is.',
       hookStyle: 'Pull them into the scene. Set where you are and how it feels before revealing anything.',
       language:  'Lifestyle and discovery: "couldn\'t leave without it", "this changed how I travel", "the vibe here is completely different"',
       ctaStyle:  'Aspirational close: "take me back", "get yours before they\'re gone", "you genuinely deserve this"',
     },
     office_creator: {
-      context:   'A sharp professional in a clean modern workspace — focused, outcome-driven, respects the audience\'s time and treats them as intelligent adults.',
-      hookStyle: 'Name the professional pain point in the first sentence. Time is the asset — get to the solution fast.',
+      context:   'A sharp professional in a clean modern workspace â€” focused, outcome-driven, respects the audience\'s time and treats them as intelligent adults.',
+      hookStyle: 'Name the professional pain point in the first sentence. Time is the asset â€” get to the solution fast.',
       language:  'Direct and measurable: "saves me two hours every day", "our entire team switched", "the ROI showed up immediately"',
       ctaStyle:  'Measured and clear: "try it free", "book the demo", "your workflow will thank you"',
     },
   };
 
-  // ── Step 1: Script — use provided or generate with AI ────────
+  // â”€â”€ Step 1: Script â€” use provided or generate with AI â”€â”€â”€â”€â”€â”€â”€â”€
   let script;
   if (customScript && customScript.trim()) {
     script = customScript.trim();
     console.log('[UGC] Using custom script (', script.length, 'chars )');
   } else {
     try {
-      // Ad feeling → directorial instruction (energy, pacing, sentence structure)
+      // Ad feeling â†’ directorial instruction (energy, pacing, sentence structure)
       const feelingInstruction = {
         viral:       'Make this spread. Rapid-fire energy, punchy hooks designed to be shared. Short sentences. Bold, declarative statements.',
-        cinematic:   'Write like a film director narrating a moment — evocative, visual language. Every sentence paints a picture. Slow and deliberate. Emotionally charged.',
+        cinematic:   'Write like a film director narrating a moment â€” evocative, visual language. Every sentence paints a picture. Slow and deliberate. Emotionally charged.',
         emotional:   'Lead with heart. Personal story, raw honesty, vulnerability that earns real connection. Make them feel something before you ask them to do anything.',
-        aggressive:  'No warmup. Direct, hard-hitting, zero fluff. Bold claims, urgency in every line. This is a closer — make them feel like they\'re missing out right now.',
+        aggressive:  'No warmup. Direct, hard-hitting, zero fluff. Bold claims, urgency in every line. This is a closer â€” make them feel like they\'re missing out right now.',
         luxury:      'Nothing is rushed. Sparse, aspirational language where every word earns its place. The silence between sentences matters. Elevated throughout.',
         startup:     'Scrappy and exciting. Disruptive framing, founder-level conviction, the energy of someone who genuinely believes they\'re changing something.',
         friendly:    'Warm, genuine, completely likeable. Feels exactly like a trusted friend giving an honest recommendation with zero agenda.',
         high_energy: 'Maximum energy from the first word. Fast pace, exclamation, nonstop forward momentum. There is no gear below fifth.',
       }[adFeeling] || 'Write in a genuine, natural first-person voice with authentic energy.';
 
-      // Ad goal → hook angle + CTA direction
+      // Ad goal â†’ hook angle + CTA direction
       const goalInstruction = {
         sales:     'GOAL: Drive immediate purchase. Build desire fast, remove hesitation, close with urgency. CTA should push "buy now", "get it", "grab yours".',
-        awareness: 'GOAL: Build brand recall and desire. Plant the seed — intrigue over hard sell. CTA should invite discovery: "check it out", "learn more", "look it up".',
+        awareness: 'GOAL: Build brand recall and desire. Plant the seed â€” intrigue over hard sell. CTA should invite discovery: "check it out", "learn more", "look it up".',
         downloads: 'GOAL: Drive app installs. Highlight how fast and easy it is to get started. CTA should push "download it", "get the app", "it\'s free to start".',
         clicks:    'GOAL: Pull to a link or page. Create enough curiosity that clicking feels inevitable. CTA should be "link in bio", "tap the link", "click below".',
         launch:    'GOAL: Announce a new launch. Create FOMO and excitement for something that just dropped. CTA should signal scarcity or newness: "just launched", "early access", "be first".',
       }[adGoal] || '';
 
-      // Build brand context block — prefer new BrandCore fields, fall back to legacy fields
+      // Build brand context block â€” prefer new BrandCore fields, fall back to legacy fields
       const effectiveTone = brandToneOfVoice || brandTone || '';
       const effectivePos  = brandPositioning || brandPromise || brandDiff || '';
 
@@ -2131,18 +2153,18 @@ app.post('/api/generate-ugc', requireSubIfAuthed, async (req, res) => {
       ].filter(Boolean);
 
       const system = `You are an expert UGC ad scriptwriter and creative director for TikTok, Instagram Reels, and YouTube Shorts.
-${brandLines.length ? '\nBRAND CONTEXT — write as if you live inside this brand:\n' + brandLines.map(l => '- ' + l).join('\n') : ''}
-AD FEELING — apply this to every sentence (HIGHEST PRIORITY): ${feelingInstruction}
-${goalInstruction ? '\nAD GOAL — shape your hook angle and CTA around this: ' + goalInstruction : ''}
+${brandLines.length ? '\nBRAND CONTEXT â€” write as if you live inside this brand:\n' + brandLines.map(l => '- ' + l).join('\n') : ''}
+AD FEELING â€” apply this to every sentence (HIGHEST PRIORITY): ${feelingInstruction}
+${goalInstruction ? '\nAD GOAL â€” shape your hook angle and CTA around this: ' + goalInstruction : ''}
 Script rules:
 - Open with a strong attention-grabbing hook that stops the scroll in the first 3 seconds
 - Speak in a genuine first-person voice as an authentic creator living in this brand's world
-- Weave in the brand's vocabulary and tone naturally — not as a checklist, as character
+- Weave in the brand's vocabulary and tone naturally â€” not as a checklist, as character
 - End with a clear, natural call-to-action aligned with the goal above
-- First person only — no "you should" constructions at the start
+- First person only â€” no "you should" constructions at the start
 - No stage directions, brackets, parenthetical actions, or scene descriptions
-- Output ONLY the spoken script — nothing else, no titles, no labels
-- Target 8–12 sentences for a 30–45 second read`;
+- Output ONLY the spoken script â€” nothing else, no titles, no labels
+- Target 8â€“12 sentences for a 30â€“45 second read`;
 
       const userMsg = [
         'Write a UGC ad script.',
@@ -2162,7 +2184,7 @@ Script rules:
     }
   }
 
-  // ── Step 2: Generate video via AIML (Kling) ──────────────────
+  // â”€â”€ Step 2: Generate video via AIML (Kling) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   try {
     const aiml      = require('./providers/aimlProvider');
     const router    = require('./services/modelRouter');
@@ -2182,9 +2204,9 @@ Script rules:
   }
 });
 
-// ── POST /api/generate-ugc-script ───────────────────────────────
+// â”€â”€ POST /api/generate-ugc-script â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 // Standalone script-only endpoint (used by test page / direct integrations).
-// Aligned with the simplified UGC flow — no product/niche/audience required.
+// Aligned with the simplified UGC flow â€” no product/niche/audience required.
 app.post('/api/generate-ugc-script', requireSubIfAuthed, async (req, res) => {
   const user = await getUserFromToken(req);
   if (!user) return res.status(401).json({ error: 'Unauthorized' });
@@ -2192,24 +2214,24 @@ app.post('/api/generate-ugc-script', requireSubIfAuthed, async (req, res) => {
   const { creatorStyle, adFeeling, brandName, brandDesc } = req.body || {};
 
   const CREATOR_BRIEFS = {
-    startup_founder:   { context: 'A bold startup founder speaking directly from their workspace — authentic, disruptive, knows the audience\'s pain point firsthand.', hookStyle: 'Lead with the problem the audience already knows. One line. Then flip it.', language: 'Founder energy: "we built this", "shipped it", "changed the way I work"', ctaStyle: 'Direct and urgent: "try it now", "link in bio", "ship faster today"' },
-    podcast_creator:   { context: 'A trusted podcast host mid-recommendation — relaxed, genuine, talking like they\'re in conversation with a close friend.', hookStyle: 'Start mid-story or mid-thought. Like jumping into a conversation already in progress.', language: 'Warm: "honestly", "I\'ve been using this for months", "you need to hear this"', ctaStyle: 'Soft confidence: "worth checking out", "grab the link", "you\'ll thank me"' },
-    fitness_creator:   { context: 'A results-obsessed fitness creator in their element — pumped, direct, every word carries physical energy.', hookStyle: 'Open with a transformation claim or challenge. Make them feel the intensity.', language: 'Active: "gains", "no excuses", "results don\'t lie"', ctaStyle: 'No hesitation: "get it now", "stop waiting", "your move"' },
-    luxury_influencer: { context: 'A luxury lifestyle creator in a premium environment — measured, deliberate, every word is intentional.', hookStyle: 'Paint the aspirational scene first. Let the audience want the life before the product.', language: 'Elevated: "exceptional", "the kind of quality that stays with you", "not for everyone"', ctaStyle: 'Restrained: "discover it", "if you know, you know", "for those who notice"' },
+    startup_founder:   { context: 'A bold startup founder speaking directly from their workspace â€” authentic, disruptive, knows the audience\'s pain point firsthand.', hookStyle: 'Lead with the problem the audience already knows. One line. Then flip it.', language: 'Founder energy: "we built this", "shipped it", "changed the way I work"', ctaStyle: 'Direct and urgent: "try it now", "link in bio", "ship faster today"' },
+    podcast_creator:   { context: 'A trusted podcast host mid-recommendation â€” relaxed, genuine, talking like they\'re in conversation with a close friend.', hookStyle: 'Start mid-story or mid-thought. Like jumping into a conversation already in progress.', language: 'Warm: "honestly", "I\'ve been using this for months", "you need to hear this"', ctaStyle: 'Soft confidence: "worth checking out", "grab the link", "you\'ll thank me"' },
+    fitness_creator:   { context: 'A results-obsessed fitness creator in their element â€” pumped, direct, every word carries physical energy.', hookStyle: 'Open with a transformation claim or challenge. Make them feel the intensity.', language: 'Active: "gains", "no excuses", "results don\'t lie"', ctaStyle: 'No hesitation: "get it now", "stop waiting", "your move"' },
+    luxury_influencer: { context: 'A luxury lifestyle creator in a premium environment â€” measured, deliberate, every word is intentional.', hookStyle: 'Paint the aspirational scene first. Let the audience want the life before the product.', language: 'Elevated: "exceptional", "the kind of quality that stays with you", "not for everyone"', ctaStyle: 'Restrained: "discover it", "if you know, you know", "for those who notice"' },
     tech_reviewer:     { context: 'An authoritative tech reviewer who only recommends what genuinely works. Credibility through specificity.', hookStyle: 'Lead with the boldest claim immediately, then back it up with detail.', language: 'Precise: "tested for 30 days", "here\'s what surprised me", "the feature that matters"', ctaStyle: 'Confident: "worth every penny", "link in description", "never looked back"' },
-    street_creator:    { context: 'A spontaneous street creator filming on-the-go — raw, just discovered something and can\'t wait to share it.', hookStyle: 'React first. "Okay wait—" or "I need to talk about this right now".', language: 'Raw: "no cap", "lowkey obsessed", "fr fr", "can\'t believe this works"', ctaStyle: 'Urgent: "grab it fr", "link in bio now", "you\'re welcome"' },
-    vacation_creator:  { context: 'A travel creator on location — relaxed, makes the audience want the experience before they know the product.', hookStyle: 'Set the scene first. Pull them into where you are and how it feels.', language: 'Lifestyle: "couldn\'t leave without it", "changed how I travel", "the vibe is different"', ctaStyle: 'Aspirational: "get yours", "you deserve this", "take me back"' },
-    office_creator:    { context: 'A sharp professional in a clean workspace — focused, outcome-driven, respects the audience\'s time.', hookStyle: 'Name the pain point in the first sentence. Get to the solution fast.', language: 'Measurable: "saves me two hours daily", "whole team switched", "ROI showed up immediately"', ctaStyle: 'Clear: "try it free", "book the demo", "your workflow will thank you"' },
+    street_creator:    { context: 'A spontaneous street creator filming on-the-go â€” raw, just discovered something and can\'t wait to share it.', hookStyle: 'React first. "Okay waitâ€”" or "I need to talk about this right now".', language: 'Raw: "no cap", "lowkey obsessed", "fr fr", "can\'t believe this works"', ctaStyle: 'Urgent: "grab it fr", "link in bio now", "you\'re welcome"' },
+    vacation_creator:  { context: 'A travel creator on location â€” relaxed, makes the audience want the experience before they know the product.', hookStyle: 'Set the scene first. Pull them into where you are and how it feels.', language: 'Lifestyle: "couldn\'t leave without it", "changed how I travel", "the vibe is different"', ctaStyle: 'Aspirational: "get yours", "you deserve this", "take me back"' },
+    office_creator:    { context: 'A sharp professional in a clean workspace â€” focused, outcome-driven, respects the audience\'s time.', hookStyle: 'Name the pain point in the first sentence. Get to the solution fast.', language: 'Measurable: "saves me two hours daily", "whole team switched", "ROI showed up immediately"', ctaStyle: 'Clear: "try it free", "book the demo", "your workflow will thank you"' },
   };
 
   const feelingInstruction = {
     viral:       'Make this spread. Rapid-fire energy, punchy hooks designed to be shared. Short sentences, bold statements.',
-    cinematic:   'Write like a film director — evocative, visual language. Every sentence paints a picture. Slow, deliberate, emotionally charged.',
+    cinematic:   'Write like a film director â€” evocative, visual language. Every sentence paints a picture. Slow, deliberate, emotionally charged.',
     emotional:   'Lead with heart. Raw honesty and vulnerability that earns real connection.',
     aggressive:  'No warmup. Direct, hard-hitting, urgency in every line. Make them feel like they\'re missing out right now.',
     luxury:      'Nothing is rushed. Sparse, aspirational language where every word earns its place.',
     startup:     'Scrappy and exciting. Disruptive framing, founder conviction, energy of someone changing something.',
-    friendly:    'Warm, genuine, completely likeable — a trusted friend giving an honest recommendation.',
+    friendly:    'Warm, genuine, completely likeable â€” a trusted friend giving an honest recommendation.',
     high_energy: 'Maximum energy from the first word. Fast pace, nonstop forward momentum. No lower gear.',
   }[adFeeling] || 'Write in a genuine, natural first-person voice.';
 
@@ -2224,7 +2246,7 @@ CTA STYLE: ${brief.ctaStyle || 'End with a clear, natural call-to-action.'}
 
 AD FEELING (HIGHEST PRIORITY): ${feelingInstruction}
 
-Rules: first-person only, no stage directions, no brackets, output ONLY the spoken script, 8–12 sentences.`;
+Rules: first-person only, no stage directions, no brackets, output ONLY the spoken script, 8â€“12 sentences.`;
 
   const userMsg = [
     'Write a UGC ad script.',
@@ -2248,7 +2270,7 @@ Rules: first-person only, no stage directions, no brackets, output ONLY the spok
   }
 });
 
-// ── POST /api/generate-ugc-video ─────────────────────────────────
+// â”€â”€ POST /api/generate-ugc-video â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 // Generates a video from a script via AIML (Kling text-to-video).
 // avatarId and voiceId are accepted for API compatibility but unused.
 app.post('/api/generate-ugc-video', requireSubIfAuthed, async (req, res) => {
@@ -2277,7 +2299,7 @@ app.post('/api/generate-ugc-video', requireSubIfAuthed, async (req, res) => {
   }
 });
 
-// ── GET /api/ugc-video-status/:videoId ──────────────────────────
+// â”€â”€ GET /api/ugc-video-status/:videoId â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 app.get('/api/ugc-video-status/:videoId', async (req, res) => {
   const user = await getUserFromToken(req);
   if (!user) return res.status(401).json({ error: 'Unauthorized' });
@@ -2299,10 +2321,10 @@ app.get('/api/ugc-video-status/:videoId', async (req, res) => {
 });
 
 
-// ── POST /api/video-ads/generate ──────────────────────────────────
+// â”€â”€ POST /api/video-ads/generate â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 // Three modes: 'ai' (Anthropic builds prompt) | 'script' (user prompt) | 'image' (image-to-video)
 // Provider: AIML API via aimlProvider (AIML_API_KEY).
-// API key is read from env only — never hardcoded or sent to frontend.
+// API key is read from env only â€” never hardcoded or sent to frontend.
 app.post('/api/video-ads/generate', requireSubIfAuthed, async (req, res) => {
   const user = await getUserFromToken(req);
   if (!user) return res.status(401).json({ error: 'Unauthorized' });
@@ -2311,7 +2333,7 @@ app.post('/api/video-ads/generate', requireSubIfAuthed, async (req, res) => {
 
   const aiml = require('./providers/aimlProvider');
   if (!aiml.isConfigured()) {
-    return res.status(503).json({ error: 'Video Ads is not configured — set AIML_API_KEY in environment variables.' });
+    return res.status(503).json({ error: 'Video Ads is not configured â€” set AIML_API_KEY in environment variables.' });
   }
 
   const _rawDuration = Number(String(length || '5').replace(/[^0-9]/g, '')) || 5;
@@ -2319,7 +2341,7 @@ app.post('/api/video-ads/generate', requireSubIfAuthed, async (req, res) => {
   const t1 = Math.round(normDuration * 0.33);
   const t2  = Math.round(normDuration * 0.72);
 
-  // ── Image-to-video mode ───────────────────────────────────────
+  // â”€â”€ Image-to-video mode â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   if (mode === 'image') {
     if (!imageUrl || !imageUrl.trim()) return res.status(400).json({ error: 'An image URL is required for image-to-video.' });
     const vidPrompt = (prompt && prompt.trim()) || `Slow cinematic push-in on product. Soft studio lighting. Product holds centre-frame throughout.`;
@@ -2330,7 +2352,7 @@ app.post('/api/video-ads/generate', requireSubIfAuthed, async (req, res) => {
         duration:      normDuration,
         aspect_ratio:  '16:9',
       });
-      console.log('[VideoAds/image] Generation started:', result.generationId, '— user:', user.id);
+      console.log('[VideoAds/image] Generation started:', result.generationId, 'â€” user:', user.id);
       return res.json({ generationId: result.generationId, status: 'queued' });
     } catch (err) {
       console.error('[VideoAds/image] error:', err.message);
@@ -2338,13 +2360,13 @@ app.post('/api/video-ads/generate', requireSubIfAuthed, async (req, res) => {
     }
   }
 
-  // ── Script mode — user provides the creative brief directly ──
+  // â”€â”€ Script mode â€” user provides the creative brief directly â”€â”€
   if (mode === 'script') {
     if (!script || !script.trim()) return res.status(400).json({ error: 'A script or creative brief is required.' });
     console.log('[VideoAds/script] prompt:', script.trim().slice(0, 120));
     try {
       const result = await aiml.generateVideo(script.trim(), { duration: normDuration, aspect_ratio: '16:9' });
-      console.log('[VideoAds/script] Generation started:', result.generationId, '— user:', user.id);
+      console.log('[VideoAds/script] Generation started:', result.generationId, 'â€” user:', user.id);
       return res.json({ generationId: result.generationId, status: 'queued' });
     } catch (err) {
       console.error('[VideoAds/script] error:', err.message);
@@ -2352,7 +2374,7 @@ app.post('/api/video-ads/generate', requireSubIfAuthed, async (req, res) => {
     }
   }
 
-  // ── AI mode (default) — Anthropic builds a scene-based Kling prompt ──
+  // â”€â”€ AI mode (default) â€” Anthropic builds a scene-based Kling prompt â”€â”€
   if (!product || !product.trim()) return res.status(400).json({ error: 'Product or promotion description is required.' });
 
   let vidPrompt;
@@ -2363,19 +2385,19 @@ app.post('/api/video-ads/generate', requireSubIfAuthed, async (req, res) => {
     try {
       const systemPrompt = `You are a video director writing prompts for Kling AI video generation.
 
-Write a concrete scene-by-scene visual description — 50 to 80 words total.
+Write a concrete scene-by-scene visual description â€” 50 to 80 words total.
 
 Use this exact format:
-Scene 1 [0s–${t1}s]: <camera movement> + <subject> + <action>
-Scene 2 [${t1}s–${t2}s]: <camera movement> + <subject> + <action>
-Scene 3 [${t2}s–${normDuration}s]: <product or brand name clearly visible> + <closing shot>
+Scene 1 [0sâ€“${t1}s]: <camera movement> + <subject> + <action>
+Scene 2 [${t1}sâ€“${t2}s]: <camera movement> + <subject> + <action>
+Scene 3 [${t2}sâ€“${normDuration}s]: <product or brand name clearly visible> + <closing shot>
 
 Rules:
 - Camera: "slow push in", "static overhead", "tracking left", "quick cut to close-up"
 - Lighting: "soft backlight", "warm golden rim", "cool studio fill", "neon edge light"
 - Name the real product, surface, material, and any people
 - End on the product or brand name clearly readable on screen
-- No "represents", "powerful", "evokes", "dynamic" — only what the camera sees
+- No "represents", "powerful", "evokes", "dynamic" â€” only what the camera sees
 - Output ONLY the prompt. No preamble, no quotes.`;
 
       const userContext = [
@@ -2392,14 +2414,14 @@ Rules:
       console.log('[VideoAds/ai] 2. Generated prompt:', vidPrompt);
     } catch (err) {
       console.warn('[VideoAds/ai] Anthropic build failed, using fallback:', err.message);
-      vidPrompt = `Scene 1 [0s–${t1}s]: Static close-up shot of ${product.trim()} on a clean surface, soft studio lighting. Scene 2 [${t1}s–${t2}s]: Slow push-in revealing product detail, warm rim light. Scene 3 [${t2}s–${normDuration}s]: Product centred, ${brand || 'brand'} name fades in below.`;
+      vidPrompt = `Scene 1 [0sâ€“${t1}s]: Static close-up shot of ${product.trim()} on a clean surface, soft studio lighting. Scene 2 [${t1}sâ€“${t2}s]: Slow push-in revealing product detail, warm rim light. Scene 3 [${t2}sâ€“${normDuration}s]: Product centred, ${brand || 'brand'} name fades in below.`;
     }
   }
 
   console.log(`[VideoAds/ai] 3. Final Kling prompt: ${vidPrompt}`);
   try {
     const result = await aiml.generateVideo(vidPrompt, { duration: normDuration, aspect_ratio: '16:9' });
-    console.log('[VideoAds/ai] Generation started:', result.generationId, '— user:', user.id);
+    console.log('[VideoAds/ai] Generation started:', result.generationId, 'â€” user:', user.id);
     return res.json({ generationId: result.generationId, status: 'queued' });
   } catch (err) {
     console.error('[VideoAds/ai] error:', err.message);
@@ -2407,7 +2429,7 @@ Rules:
   }
 });
 
-// ── GET /api/video-ads/status/:generationId ────────────────────────
+// â”€â”€ GET /api/video-ads/status/:generationId â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 // Polls AIML API for video generation status.
 app.get('/api/video-ads/status/:generationId', async (req, res) => {
   const user = await getUserFromToken(req);
@@ -2415,7 +2437,7 @@ app.get('/api/video-ads/status/:generationId', async (req, res) => {
 
   const aiml = require('./providers/aimlProvider');
   if (!aiml.isConfigured()) {
-    return res.status(503).json({ error: 'Video Ads is not configured — set AIML_API_KEY in environment variables.' });
+    return res.status(503).json({ error: 'Video Ads is not configured â€” set AIML_API_KEY in environment variables.' });
   }
 
   try {
@@ -2431,10 +2453,10 @@ app.get('/api/video-ads/status/:generationId', async (req, res) => {
   }
 });
 
-// ── POST /api/motion-graphics/generate ────────────────────────────
+// â”€â”€ POST /api/motion-graphics/generate â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 // Generates branded motion graphic videos via AIML API (kling-video).
 // Anthropic writes a cinematic video prompt with Brand Core injection.
-// Returns { generationId, status: 'queued' } — client polls /status/:id.
+// Returns { generationId, status: 'queued' } â€” client polls /status/:id.
 app.post('/api/motion-graphics/generate', requireSubIfAuthed, async (req, res) => {
   const user = await getUserFromToken(req);
   if (!user) return res.status(401).json({ error: 'Unauthorized' });
@@ -2443,13 +2465,13 @@ app.post('/api/motion-graphics/generate', requireSubIfAuthed, async (req, res) =
 
   const aiml = require('./providers/aimlProvider');
   if (!aiml.isConfigured()) {
-    return res.status(503).json({ error: 'Motion Graphics is not available — set AIML_API_KEY in environment variables.' });
+    return res.status(503).json({ error: 'Motion Graphics is not available â€” set AIML_API_KEY in environment variables.' });
   }
 
-  // Style → animation-specific visual instructions for Kling
+  // Style â†’ animation-specific visual instructions for Kling
   const styleMap = {
-    logo:       { label: 'Logo Reveal',        motion: 'The brand logo animates onto screen — it must visibly appear, scale up or slide in, and hold centre-frame.' },
-    kinetic:    { label: 'Kinetic Typography', motion: 'Text elements fly, snap, and animate across the frame — words must appear, move, and land with precision.' },
+    logo:       { label: 'Logo Reveal',        motion: 'The brand logo animates onto screen â€” it must visibly appear, scale up or slide in, and hold centre-frame.' },
+    kinetic:    { label: 'Kinetic Typography', motion: 'Text elements fly, snap, and animate across the frame â€” words must appear, move, and land with precision.' },
     social:     { label: 'Social Motion Post', motion: 'Bold graphic elements animate in from off-screen, stop sharply, and hold for impact.' },
     intro:      { label: 'Brand Intro',        motion: 'A dramatic reveal sequence: elements build from black, converge, and settle into a final branded frame.' },
     transition: { label: 'Transition Video',   motion: 'Shapes sweep across frame left-to-right, wiping from one colour field to another.' },
@@ -2458,7 +2480,7 @@ app.post('/api/motion-graphics/generate', requireSubIfAuthed, async (req, res) =
   const styleInfo    = styleMap[style] || styleMap.custom;
   const normDuration = parseInt(duration || '5', 10) <= 7 ? 5 : 10;
 
-  // Extract only the visual elements from Brand Core (colours + name — no brand strategy in video prompts)
+  // Extract only the visual elements from Brand Core (colours + name â€” no brand strategy in video prompts)
   const bc    = brandCore || {};
   const bcName = bc.name || '';
   const bcClrs = (() => {
@@ -2479,19 +2501,19 @@ app.post('/api/motion-graphics/generate', requireSubIfAuthed, async (req, res) =
     try {
       const systemPrompt = `You are a motion graphics director writing prompts for Kling AI video generation.
 
-Write a short, concrete scene-by-scene description — 40 to 60 words total.
+Write a short, concrete scene-by-scene description â€” 40 to 60 words total.
 
 Use this exact format:
-[0s–${t1}s]: <what literally appears and how it moves>
-[${t1}s–${t2}s]: <what happens next — specific motion>
-[${t2}s–${normDuration}s]: <final frame — what is visible>
+[0sâ€“${t1}s]: <what literally appears and how it moves>
+[${t1}sâ€“${t2}s]: <what happens next â€” specific motion>
+[${t2}sâ€“${normDuration}s]: <final frame â€” what is visible>
 
 Strict rules:
-- Describe EXACTLY what the viewer sees — no metaphors, no moods
+- Describe EXACTLY what the viewer sees â€” no metaphors, no moods
 - ${styleInfo.motion}
 - Specify direction: "slides in from left", "fades up", "scales from 0 to full", "rotates in"
 - Name colours when relevant
-- No "powerful", "dynamic", "evokes", "cinematic" — only visual facts
+- No "powerful", "dynamic", "evokes", "cinematic" â€” only visual facts
 - Output ONLY the prompt. No preamble, no quotes.`;
 
       const userContext = [
@@ -2506,7 +2528,7 @@ Strict rules:
       console.log('[MotionGraphics] 2. Generated prompt:', videoPrompt);
     } catch (err) {
       console.warn('[MotionGraphics] Anthropic failed, using fallback:', err.message);
-      videoPrompt = `[0s–${t1}s]: ${bcName || 'Brand'} logo fades in from black, centred on screen. [${t1}s–${t2}s]: Logo scales up smoothly${bcClrs ? ', ' + bcClrs + ' glow' : ''}. [${t2}s–${normDuration}s]: Logo holds full-frame on solid background.`;
+      videoPrompt = `[0sâ€“${t1}s]: ${bcName || 'Brand'} logo fades in from black, centred on screen. [${t1}sâ€“${t2}s]: Logo scales up smoothly${bcClrs ? ', ' + bcClrs + ' glow' : ''}. [${t2}sâ€“${normDuration}s]: Logo holds full-frame on solid background.`;
     }
   }
 
@@ -2526,7 +2548,7 @@ Strict rules:
   }
 });
 
-// ── GET /api/motion-graphics/status/:generationId ─────────────────
+// â”€â”€ GET /api/motion-graphics/status/:generationId â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 // Polls AIML API for motion graphic video generation status.
 app.get('/api/motion-graphics/status/:generationId', async (req, res) => {
   const user = await getUserFromToken(req);
@@ -2534,7 +2556,7 @@ app.get('/api/motion-graphics/status/:generationId', async (req, res) => {
 
   const aiml = require('./providers/aimlProvider');
   if (!aiml.isConfigured()) {
-    return res.status(503).json({ error: 'Motion Graphics is not configured — set AIML_API_KEY in environment variables.' });
+    return res.status(503).json({ error: 'Motion Graphics is not configured â€” set AIML_API_KEY in environment variables.' });
   }
 
   try {
@@ -2550,7 +2572,7 @@ app.get('/api/motion-graphics/status/:generationId', async (req, res) => {
   }
 });
 
-// ── POST /api/product-shoots/generate ─────────────────────────────
+// â”€â”€ POST /api/product-shoots/generate â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 // Professional product photography via gpt-image-1 (same stack as Visuals/Logos).
 // Anthropic builds the photography prompt from product + style + goal.
 app.post('/api/product-shoots/generate', requireSubIfAuthed, async (req, res) => {
@@ -2560,7 +2582,7 @@ app.post('/api/product-shoots/generate', requireSubIfAuthed, async (req, res) =>
   const { product, style, goal, notes, customPrompt } = req.body || {};
   if (!product || !product.trim()) return res.status(400).json({ error: 'Product description is required.' });
 
-  // Derive aspect ratio from goal (ecommerce/social → square; advertising/website → wide)
+  // Derive aspect ratio from goal (ecommerce/social â†’ square; advertising/website â†’ wide)
   const ratioFromGoal = { ecommerce: '1:1', social: '1:1', advertising: '16:9', website: '16:9' };
   const aimlRatio = ratioFromGoal[goal] || '1:1';
 
@@ -2571,10 +2593,10 @@ app.post('/api/product-shoots/generate', requireSubIfAuthed, async (req, res) =>
     dark_premium: 'dark premium photography, dramatic directional light, deep moody shadows',
   };
   const goalLabels = {
-    ecommerce:   'product listing — sharp focus, clean composition, product fills the frame',
-    social:      'social media — creative composition, lifestyle feel, thumb-stopping',
-    advertising: 'advertising — brand-aligned, persuasive, high production value',
-    website:     'website hero — editorial, full-bleed composition, premium presentation',
+    ecommerce:   'product listing â€” sharp focus, clean composition, product fills the frame',
+    social:      'social media â€” creative composition, lifestyle feel, thumb-stopping',
+    advertising: 'advertising â€” brand-aligned, persuasive, high production value',
+    website:     'website hero â€” editorial, full-bleed composition, premium presentation',
   };
 
   const styleDesc = styleLabels[style] || styleLabels.studio;
@@ -2588,10 +2610,10 @@ app.post('/api/product-shoots/generate', requireSubIfAuthed, async (req, res) =>
     try {
       const system = `You are a professional product photographer and creative director.
 Write a single image generation prompt for gpt-image-1 to create commercial product photography.
-The image must look like a real photograph — not a render, illustration, or CGI.
+The image must look like a real photograph â€” not a render, illustration, or CGI.
 Include: lighting setup, camera angle, depth of field, surface, and background.
 Keep the product as the clear hero of the frame.
-Output ONLY the prompt. 2–3 sentences. No quotes, no preamble.`;
+Output ONLY the prompt. 2â€“3 sentences. No quotes, no preamble.`;
 
       const brief = [
         `Product: ${product.trim()}`,
@@ -2624,7 +2646,7 @@ Output ONLY the prompt. 2–3 sentences. No quotes, no preamble.`;
   }
 });
 
-// ── POST /api/daily-brief ─────────────────────────────────────────
+// â”€â”€ POST /api/daily-brief â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 app.post('/api/daily-brief', requireSubIfAuthed, async (req, res) => {
   const { brandCore, marketContext, competitorContext, opportunityContext } = req.body;
 
@@ -2644,7 +2666,7 @@ app.post('/api/daily-brief', requireSubIfAuthed, async (req, res) => {
 
   const system = `You are the Brand Brain daily intelligence system for a brand strategist.
 
-Today is ${today}. Generate a concise morning brief for this brand — a strategic starting point for the day.
+Today is ${today}. Generate a concise morning brief for this brand â€” a strategic starting point for the day.
 
 Return ONLY valid JSON with zero markdown:
 
@@ -2662,13 +2684,13 @@ Return ONLY valid JSON with zero markdown:
 
 Rules:
 - Include exactly 4 items. Mix types: at least 1 insight, 1 action, 1 alert
-- Be specific to this brand — no generic advice
+- Be specific to this brand â€” no generic advice
 - If limited context: focus on brand-building fundamentals appropriate to their stage
 - The focus line should feel like a clear directive, not a question`;
 
   const userMsg = ctxLines.length
     ? `Brand context:\n${ctxLines.join('\n')}`
-    : 'No brand context provided — generate a brief for an early-stage brand getting started.';
+    : 'No brand context provided â€” generate a brief for an early-stage brand getting started.';
 
   try {
     const raw = await _aimlText('daily-brief', system, userMsg, { max_tokens: 800 });
@@ -2688,7 +2710,7 @@ Rules:
   }
 });
 
-// ── POST /api/website-monitor ─────────────────────────────────────
+// â”€â”€ POST /api/website-monitor â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 app.post('/api/website-monitor', requireSubIfAuthed, async (req, res) => {
   const { url, brandCore } = req.body;
 
@@ -2741,7 +2763,7 @@ Rules:
 - Issues should be ordered by severity (high first)
 - Recommendations should be concrete and prioritized`;
 
-  const userMsg = `Website URL: ${url.trim()}\n\n${bcLines.length ? `Brand Core:\n${bcLines.join('\n')}` : 'No brand core — assess against best practices.'}`;
+  const userMsg = `Website URL: ${url.trim()}\n\n${bcLines.length ? `Brand Core:\n${bcLines.join('\n')}` : 'No brand core â€” assess against best practices.'}`;
 
   try {
     const raw = await _aimlText('website-monitor', system, userMsg, { max_tokens: 1200 });
@@ -2761,7 +2783,7 @@ Rules:
   }
 });
 
-// ── POST /api/market-research ─────────────────────────────────────
+// â”€â”€ POST /api/market-research â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 app.post('/api/market-research', requireSubIfAuthed, async (req, res) => {
   const { brandCore } = req.body;
 
@@ -2784,13 +2806,13 @@ Return ONLY valid JSON with zero markdown, matching this exact structure:
 
 {
   "market": {
-    "name": "Market / industry name (3–5 words)",
+    "name": "Market / industry name (3â€“5 words)",
     "size": "Market scale description (e.g. '$12B global market')",
     "growth": "Growth trajectory (e.g. 'Growing 18% YoY')",
     "maturity": "emerging | growing | mature | declining"
   },
   "trends": [
-    { "title": "Short trend name (3–5 words)", "desc": "2–3 sentence explanation of the trend and its relevance", "impact": "high | medium | low" },
+    { "title": "Short trend name (3â€“5 words)", "desc": "2â€“3 sentence explanation of the trend and its relevance", "impact": "high | medium | low" },
     { "title": "...", "desc": "...", "impact": "..." },
     { "title": "...", "desc": "...", "impact": "..." },
     { "title": "...", "desc": "...", "impact": "..." }
@@ -2802,20 +2824,20 @@ Return ONLY valid JSON with zero markdown, matching this exact structure:
   ],
   "competitive": {
     "intensity": "high | medium | low",
-    "dynamics": "3–4 sentence summary of the competitive landscape",
+    "dynamics": "3â€“4 sentence summary of the competitive landscape",
     "whitespace": "Key underserved gap or opportunity area (1 sentence)"
   },
-  "summary": "3–4 sentence strategic summary of the market and the brand's position within it"
+  "summary": "3â€“4 sentence strategic summary of the market and the brand's position within it"
 }
 
 Rules:
-- Be specific to the actual industry — no generic boilerplate
+- Be specific to the actual industry â€” no generic boilerplate
 - All trend, segment, and competitive data should be actionable
 - Tailor segments and whitespace to the brand's specific positioning`;
 
   const userMsg = bcLines.length
     ? `Brand Core:\n${bcLines.join('\n')}`
-    : 'No brand core provided — analyze a general D2C brand in a competitive consumer market.';
+    : 'No brand core provided â€” analyze a general D2C brand in a competitive consumer market.';
 
   try {
     const raw = await _aimlText('market-research', system, userMsg, { max_tokens: 1800 });
@@ -2835,7 +2857,7 @@ Rules:
   }
 });
 
-// ── POST /api/opportunities ────────────────────────────────────────
+// â”€â”€ POST /api/opportunities â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 app.post('/api/opportunities', requireSubIfAuthed, async (req, res) => {
   const { brandCore, marketResearch, competitorReport } = req.body;
 
@@ -2872,27 +2894,27 @@ Return ONLY valid JSON with zero markdown, matching this exact structure:
 {
   "opportunities": [
     {
-      "title": "Short opportunity title (4–7 words)",
+      "title": "Short opportunity title (4â€“7 words)",
       "category": "content | product | market | partnership | positioning | community",
-      "desc": "2–3 sentences describing the opportunity and why it exists now",
+      "desc": "2â€“3 sentences describing the opportunity and why it exists now",
       "why": "1 sentence: why this specific brand is positioned to capture it",
       "effort": "low | medium | high",
       "impact": "low | medium | high",
       "action": "Specific, actionable first step (1 sentence starting with a verb)"
     }
   ],
-  "summary": "2–3 sentence strategic overview of the opportunity landscape for this brand"
+  "summary": "2â€“3 sentence strategic overview of the opportunity landscape for this brand"
 }
 
 Rules:
 - All 5 opportunities must be distinct categories
-- Be specific to this brand — no generic 'improve your social media' suggestions
+- Be specific to this brand â€” no generic 'improve your social media' suggestions
 - Rank opportunities from highest impact to lowest in the array
 - Every 'action' must be a concrete, executable next step`;
 
   const userMsg = ctxLines.length
     ? `Context:\n${ctxLines.join('\n')}`
-    : 'No context provided — identify opportunities for an early-stage consumer brand in a competitive market.';
+    : 'No context provided â€” identify opportunities for an early-stage consumer brand in a competitive market.';
 
   try {
     const raw = await _aimlText('opportunities', system, userMsg, { max_tokens: 1600 });
@@ -2912,20 +2934,367 @@ Rules:
   }
 });
 
-// ── Public routes — all served by index.html (router handles view) ──
+// â”€â”€ Campaign Generation Engine â€” full 11-step AI campaign package â”€â”€
+// Receives: { product, goal, platforms, mode }
+// mode='concepts' â†’ 3 concept cards (used by create wizard)
+// mode='full'     â†’ complete agency-grade campaign package
+app.post('/api/ai/create-ad', requireSubIfAuthed, async (req, res) => {
+  console.log('[create-ad] ← route handler entered');
+  console.log('[create-ad] req.body keys:', Object.keys(req.body || {}));
+  const { product, goal, platforms, mode, brandCore, productImages } = req.body;
+  console.log('[create-ad] product:', (product || '').slice(0, 60), '| mode:', mode, '| platform:', req.body.platform, '| platforms:', platforms);
+  if (!product) {
+    console.log('[create-ad] 400 — product missing');
+    return res.status(400).json({ error: 'product is required' });
+  }
+
+  /* Build brand context block â€” injected into system prompt when Brand Brain is active */
+  function _buildCampaignBrandSection(bc) {
+    if (!bc || !bc.name) return '';
+    const lines = [
+      `\n\nBRAND BRAIN CONTEXT (CRITICAL â€” this is the user's real brand, use it throughout the campaign):`,
+      `Brand Name: ${bc.name}`,
+    ];
+    if (bc.website)     lines.push(`Website: ${bc.website}`);
+    if (bc.description) lines.push(`Company Description: ${bc.description}`);
+    if (bc.story)       lines.push(`Brand Story: ${bc.story}`);
+    if (bc.audience)    lines.push(`Target Audience: ${bc.audience}`);
+    if (bc.usp)         lines.push(`Unique Selling Proposition: ${bc.usp}`);
+    if (bc.toneOfVoice) lines.push(`Tone of Voice: ${bc.toneOfVoice}`);
+    if (bc.competitors) lines.push(`Competitors: ${bc.competitors}`);
+    if (bc.colors)      lines.push(`Brand Colours: ${bc.colors}`);
+    lines.push(`\nIMPORTANT RULES:`);
+    lines.push(`- Use "${bc.name}" as the brand name throughout all copy`);
+    if (bc.toneOfVoice) lines.push(`- Match tone exactly: ${bc.toneOfVoice}`);
+    if (bc.usp) lines.push(`- Lead with the USP in every hook and headline`);
+    if (bc.audience) lines.push(`- Audience targeting must reflect: ${bc.audience}`);
+    lines.push(`- The campaignName must include the brand name`);
+    return lines.join('\n');
+  }
+
+  const brandSection = _buildCampaignBrandSection(brandCore);
+  const productImageNote = (Array.isArray(productImages) && productImages.length)
+    ? `\n\nPRODUCT ASSETS: The user has uploaded ${productImages.length} product image(s). Describe visual concepts that showcase the actual product photography â€” not stock imagery. Reference realistic product shots in imagePrompts.`
+    : '';
+
+  /* Prefer single-platform selection (V2 flow) */
+  const platform = req.body.platform || (Array.isArray(platforms) && platforms[0]) || 'google';
+  const platList = Array.isArray(platforms) && platforms.length
+    ? platforms.join(', ')
+    : 'Google Ads, Meta Ads, TikTok Ads';
+  console.log('[create-ad] resolved platform:', platform, '| mode:', mode, '| brandCore:', brandCore ? brandCore.name : 'none', '| productImages:', productImages ? productImages.length : 0);
+
+  if (mode === 'concepts') {
+    console.log('[create-ad] → mode=concepts branch');
+    const system = `You are Oriven AI â€” a senior marketing strategist and creative director.
+Generate exactly 5 campaign concepts for the product/service described.
+Reply ONLY with valid JSON array (no markdown, no extra text):
+[{"angle":"Performance","color":"#3ecf8e","audience":"...","hook":"...","headline":"...","text":"...","cta":"...","creative":"...","visual":"...","platforms":"${platList}"},
+ {"angle":"Transformation","color":"#63b3ff",...},
+ {"angle":"Problem / Solution","color":"#FBBC04",...},
+ {"angle":"Social Proof","color":"#a855f7",...},
+ {"angle":"Urgency","color":"#ff6b7a",...}]
+- angle: exact string as shown
+- hook: scroll-stopping 6-10 word hook
+- headline: punchy ad headline (max 10 words)
+- text: compelling primary ad copy (2-3 sentences)
+- cta: action CTA (max 4 words)
+- creative: brief creative direction (1 sentence)
+- visual: visual description (1 sentence)${brandSection ? '\n\n' + brandSection.trim() : ''}`;
+
+    const conceptsUserMsg = brandCore && brandCore.name
+      ? `Brand: ${brandCore.name}\nProduct/Service: ${product}\nGoal: ${goal || 'Sales'}\nPlatforms: ${platList}`
+      : `Product/Service: ${product}\nGoal: ${goal || 'Sales'}\nPlatforms: ${platList}`;
+    try {
+      const raw = await _aimlText('ads-copy', system, conceptsUserMsg, { max_tokens: 1800 });
+      const cleaned = raw.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/i, '').trim();
+      const concepts = JSON.parse(cleaned);
+      return res.json({ ok: true, data: { concepts } });
+    } catch (err) {
+      console.error('[create-ad concepts] error:', err.message);
+      return res.status(500).json({ ok: false, error: err.message || 'Generation failed' });
+    }
+  }
+
+  // mode === 'full' â€” focused per-platform campaign package
+  console.log('[create-ad] → mode=full branch — building system prompt for platform:', platform);
+  const CONCEPTS_SCHEMA = `”concepts”: [
+    {"angle":"Performance","name":"...","color":"#3ecf8e","targetAudience":"...","hook":"...","marketingAngle":"...","offer":"...","cta":"...","adCopy":{"headline":"...","primaryText":"...","description":"...","benefits":["...","..."],"emotionalTriggers":["...","..."]}},
+    {"angle":"Problem / Solution","name":"...","color":"#FBBC04","targetAudience":"...","hook":"...","marketingAngle":"...","offer":"...","cta":"...","adCopy":{"headline":"...","primaryText":"...","description":"...","benefits":["...","..."],"emotionalTriggers":["...","..."]}},
+    {"angle":"Transformation","name":"...","color":"#63b3ff","targetAudience":"...","hook":"...","marketingAngle":"...","offer":"...","cta":"...","adCopy":{"headline":"...","primaryText":"...","description":"...","benefits":["...","..."],"emotionalTriggers":["...","..."]}}
+  ]`;
+
+  const VISUAL_SCHEMA = `"visualConcepts": [
+    {"conceptRef":"Performance","visualConcept":"...","composition":"...","lighting":"...","subject":"...","emotion":"...","imagePrompts":["cinematic prompt 1","cinematic prompt 2"]},
+    {"conceptRef":"Problem / Solution","visualConcept":"...","composition":"...","lighting":"...","subject":"...","emotion":"...","imagePrompts":["...","..."]},
+    {"conceptRef":"Transformation","visualConcept":"...","composition":"...","lighting":"...","subject":"...","emotion":"...","imagePrompts":["...","..."]}
+  ]`;
+
+  const STRATEGY_SCHEMA = `"strategy": {
+    "businessType":"...","targetAudience":"...","positioning":"...","usps":["...","...","..."],
+    "painPoints":["...","..."],"objections":["...","..."],"goal":"${goal||'Sales'}",
+    "budgetRecommendation":"...","angle":"...","offer":"..."
+  }`;
+
+  let platformSchema, platformRules;
+  if (platform === 'meta') {
+    platformSchema = `"metaAds": {
+    "primaryText":"...","headline":"...","description":"...","cta":"Shop Now",
+    "targetAudience":"...","placements":["Facebook Feed","Instagram Feed","Stories"],
+    "campaignObjective":"${goal||'Conversions'}",
+    "carouselIdeas":["...","...","..."],"imageConcepts":["...","...","..."],
+    "retargetingVariation":"...","lookalikeVariation":"..."
+  }`;
+    platformRules = `- primaryText: 125 characters max, hook in first line
+- headline: 40 characters max
+- description: 30 characters max
+- Write for mobile-first, thumb-stopping creative`;
+  } else if (platform === 'tiktok') {
+    platformSchema = `"tiktokAds": {
+    "hook":"...","opening3Seconds":"...","script":"...","creatorStyleConcept":"...",
+    "ugcConcept":"...","cta":"...","targetAudience":"...","campaignObjective":"${goal||'Traffic'}",
+    "trendingStyleSuggestions":["...","...","..."]
+  }`;
+    platformRules = `- hook: 1-2 sentences, first 3 seconds of video, scroll-stopping
+- script: full word-for-word video script with [0:00], [0:05] etc timestamps, 30-60 seconds
+- creatorStyleConcept: describe a specific TikTok creator style to emulate
+- trendingStyleSuggestions: current TikTok trend formats that fit this product`;
+  } else {
+    // google (default)
+    platformSchema = `"googleAds": {
+    "headlines":["h1","h2","h3","h4","h5","h6","h7","h8","h9","h10","h11","h12","h13","h14","h15"],
+    "descriptions":["d1","d2","d3","d4"],
+    "keywords":["kw1","kw2","kw3","kw4","kw5","kw6","kw7","kw8","kw9","kw10"],
+    "negativeKeywords":["nk1","nk2","nk3","nk4","nk5"],
+    "searchIntent":"...","biddingStrategy":"...",
+    "callouts":["c1","c2","c3","c4","c5","c6"],
+    "structuredSnippets":["s1","s2","s3","s4"],
+    "sitelinks":["sl1","sl2","sl3","sl4"]
+  }`;
+    platformRules = `- headlines: max 30 characters each, exactly 15, no punctuation at end
+- descriptions: max 90 characters each, exactly 4, include CTA
+- keywords: mix of broad, phrase and exact intent keywords
+- negativeKeywords: 5 negative keywords to exclude irrelevant traffic
+- sitelinks: 4 page names that make sense for this product`;
+  }
+
+  const system = `You are Oriven AI â€” a senior marketing strategist, creative director, and platform specialist.
+Generate a focused ${platform === 'meta' ? 'Meta Ads' : platform === 'tiktok' ? 'TikTok Ads' : 'Google Ads'} campaign package.
+Reply ONLY with valid JSON â€” no markdown fences, no extra text.
+
+Required JSON structure:
+{
+  "campaignName": "...",
+  "platform": "${platform}",
+  ${STRATEGY_SCHEMA},
+  ${CONCEPTS_SCHEMA},
+  ${platformSchema},
+  ${VISUAL_SCHEMA},
+  "performancePrediction": {
+    "ctr": "2.4%", "creativeStrength": 85, "offerStrength": 80,
+    "audienceMatch": 88, "conversionPotential": "High", "explanation": "..."
+  }
+}
+
+Platform rules:
+${platformRules}
+- All copy must be specific to the actual product â€” no generic placeholders
+- Performance scores are integers 0-100
+- conversionPotential: "High", "Medium", or "Low"${brandSection}${productImageNote}`;
+
+  const userMsg = brandCore && brandCore.name
+    ? `Brand: ${brandCore.name}\nProduct/Service: ${product}\nGoal: ${goal || 'Sales'}\nPlatform: ${platform}`
+    : `Product/Service: ${product}\nGoal: ${goal || 'Sales'}\nPlatform: ${platform}`;
+
+  console.log(`[create-ad] System prompt length: ${system.length} | userMsg length: ${userMsg.length}`);
+  console.log('[create-ad] Calling _aimlText — this is the AML call');
+
+  try {
+    console.log(`[create-ad] Text generation started — platform: ${platform}, product: ${product.slice(0,60)}`);
+    const raw = await _aimlText('ads-copy', system, userMsg, { max_tokens: 8000 });
+    console.log(`[create-ad] Text generation complete — raw length: ${raw.length}`);
+    let cleaned = raw.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/i, '').trim();
+    let pkg;
+    try {
+      pkg = JSON.parse(cleaned);
+    } catch (parseErr) {
+      const detail = `JSON parse failed: ${parseErr.message} | raw length: ${raw.length} | tail: ${raw.slice(-120)}`;
+      console.error('[create-ad full] JSON parse error:', detail);
+      return res.status(500).json({ ok: false, error: detail });
+    }
+    console.log(`[create-ad] Package ready — keys: ${Object.keys(pkg).join(', ')} | visualConcepts: ${(pkg.visualConcepts||[]).length}`);
+    pkg.platform = platform; // ensure frontend renderer knows which platform
+    return res.json({ ok: true, data: pkg });
+  } catch (err) {
+    console.error('[create-ad full] error:', err.message);
+    return res.status(500).json({ ok: false, error: err.message || 'Generation failed' });
+  }
+});
+
+// -- Campaign Publishing -- Google Ads -------------------------------------
+// POST /api/publish/google
+// Creates a paused Google Ads campaign with ad groups, keywords, and RSAs.
+// Receives: { pkg } where pkg is the full campaign package from /api/ai/create-ad
+app.post('/api/publish/google', requireSubscription, async (req, res) => {
+  try {
+    const user = await getUserFromToken(req);
+    if (!user) return res.status(401).json({ ok: false, error: 'Unauthorized' });
+
+    const { pkg } = req.body || {};
+    if (!pkg) return res.status(400).json({ ok: false, error: 'Campaign package required' });
+
+    const { accessToken, customerId, loginCustomerId } = await _getGadsAccess(user);
+
+    const g = pkg.googleAds || {};
+    const s = pkg.strategy  || {};
+    const campaignName = pkg.campaignName || s.goal || 'Oriven Campaign';
+
+    async function _gadsMutate(resource, operations) {
+      const url = 'https://googleads.googleapis.com/v24/customers/' + customerId + '/' + resource + ':mutate';
+      const headers = {
+        'Authorization':   'Bearer ' + accessToken,
+        'developer-token': process.env.GOOGLE_ADS_DEVELOPER_TOKEN || '',
+        'Content-Type':    'application/json',
+      };
+      if (loginCustomerId && loginCustomerId !== customerId) headers['login-customer-id'] = loginCustomerId;
+      const r = await fetch(url, { method: 'POST', headers, body: JSON.stringify({ operations }) });
+      const d = await r.json();
+      if (!r.ok) throw Object.assign(new Error(JSON.stringify(d.error || d)), { status: r.status });
+      return d;
+    }
+
+    // 1. Campaign budget
+    const budgetRes = await _gadsMutate('campaignBudgets', [{
+      create: { name: campaignName + ' Budget', amountMicros: 10000000, deliveryMethod: 'STANDARD' }
+    }]);
+    const budgetResourceName = budgetRes.results[0].resourceName;
+
+    // 2. Campaign (PAUSED - user activates after review)
+    const campaignRes = await _gadsMutate('campaigns', [{
+      create: {
+        name: campaignName,
+        advertisingChannelType: 'SEARCH',
+        status: 'PAUSED',
+        campaignBudget: budgetResourceName,
+        targetSpend: {},
+      }
+    }]);
+    const campaignResourceName = campaignRes.results[0].resourceName;
+    const campaignId = campaignResourceName.split('/').pop();
+
+    // 3. Ad group
+    const adGroupRes = await _gadsMutate('adGroups', [{
+      create: {
+        name: (g.adGroups && g.adGroups[0] && g.adGroups[0].name) || (campaignName + ' Ad Group'),
+        campaign: campaignResourceName,
+        status: 'ENABLED',
+        type: 'SEARCH_STANDARD',
+      }
+    }]);
+    const adGroupResourceName = adGroupRes.results[0].resourceName;
+
+    // 4. Keywords (first 20)
+    const keywords = (g.keywords || []).slice(0, 20);
+    if (keywords.length) {
+      await _gadsMutate('adGroupCriteria', keywords.map(kw => ({
+        create: { adGroup: adGroupResourceName, text: kw, matchType: 'BROAD', status: 'ENABLED' }
+      })));
+    }
+
+    // 5. Responsive Search Ad
+    const headlines     = (g.headlines    || []).slice(0, 15).map(h => ({ text: String(h).slice(0, 30) }));
+    const descriptions  = (g.descriptions || []).slice(0,  4).map(d => ({ text: String(d).slice(0, 90) }));
+    if (headlines.length >= 3 && descriptions.length >= 2) {
+      await _gadsMutate('adGroupAds', [{
+        create: {
+          adGroup: adGroupResourceName,
+          status: 'ENABLED',
+          ad: {
+            responsiveSearchAd: { headlines, descriptions },
+            finalUrls: ['https://example.com'],
+          }
+        }
+      }]);
+    }
+
+    console.log('[publish/google] Campaign created:', campaignId, 'for user', user.id);
+    return res.json({ ok: true, campaignId, campaignResourceName, platform: 'google', status: 'paused' });
+  } catch (err) {
+    console.error('[publish/google] error:', err.message);
+    return res.status(err.status || 500).json({ ok: false, error: err.message || 'Failed to publish to Google Ads' });
+  }
+});
+
+// -- Campaign Publishing -- Meta Ads ----------------------------------------
+// POST /api/publish/meta
+// Creates a paused Meta Ads campaign with ad set.
+// Receives: { pkg } where pkg is the full campaign package from /api/ai/create-ad
+app.post('/api/publish/meta', requireSubscription, async (req, res) => {
+  try {
+    const user = await getUserFromToken(req);
+    if (!user) return res.status(401).json({ ok: false, error: 'Unauthorized' });
+
+    const { pkg } = req.body || {};
+    if (!pkg) return res.status(400).json({ ok: false, error: 'Campaign package required' });
+
+    const { accessToken, accountId } = await _getMetaAccess(user);
+
+    const s = pkg.strategy || {};
+    const campaignName = pkg.campaignName || s.goal || 'Oriven Campaign';
+    const META_API = 'https://graph.facebook.com/v20.0';
+
+    async function _metaPost(endpoint, body) {
+      const r = await fetch(META_API + endpoint, {
+        method:  'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body:    JSON.stringify({ ...body, access_token: accessToken }),
+      });
+      const d = await r.json();
+      if (!r.ok || d.error) throw Object.assign(new Error(d.error ? d.error.message : ('Meta API HTTP ' + r.status)), { status: r.status, metaCode: d.error && d.error.code });
+      return d;
+    }
+
+    const objectiveMap = { Sales: 'OUTCOME_SALES', Leads: 'OUTCOME_LEADS', Traffic: 'OUTCOME_TRAFFIC', Awareness: 'OUTCOME_AWARENESS' };
+    const objective = objectiveMap[s.goal] || 'OUTCOME_TRAFFIC';
+
+    // 1. Campaign (PAUSED)
+    const campaign = await _metaPost('/act_' + accountId + '/campaigns', {
+      name: campaignName, objective, status: 'PAUSED', special_ad_categories: [],
+    });
+
+    // 2. Ad set
+    const adSet = await _metaPost('/act_' + accountId + '/adsets', {
+      name: campaignName + ' Ad Set',
+      campaign_id: campaign.id,
+      status: 'PAUSED',
+      daily_budget: 1000,
+      billing_event: 'IMPRESSIONS',
+      optimization_goal: 'REACH',
+      targeting: { age_min: 18, age_max: 65, geo_locations: { countries: ['US'] } },
+    });
+
+    console.log('[publish/meta] Campaign created:', campaign.id, 'AdSet:', adSet.id, 'for user', user.id);
+    return res.json({ ok: true, campaignId: campaign.id, adSetId: adSet.id, platform: 'meta', status: 'paused' });
+  } catch (err) {
+    console.error('[publish/meta] error:', err.message);
+    return res.status(err.status || 500).json({ ok: false, error: err.message || 'Failed to publish to Meta Ads' });
+  }
+});
+
+// â”€â”€ Public routes â€” all served by index.html (router handles view) â”€â”€
 app.get('/signup',     function(req, res) { res.sendFile(path.resolve(__dirname, '..', '..', 'index.html')); });
 app.get('/login',      function(req, res) { res.sendFile(path.resolve(__dirname, '..', '..', 'index.html')); });
 app.get('/plan',       function(req, res) { res.redirect(302, '/app'); });
 app.get('/onboarding', function(req, res) { res.redirect(302, '/app?tour=1'); });
 
-// ── /app → ORIVEN application ─────────────────────────────────────
+// â”€â”€ /app â†’ ORIVEN application â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 app.get('/app', function(req, res) {
   res.sendFile(path.resolve(__dirname, '..', '..', 'app.html'));
 });
 
-// ════════════════════════════════════════════════════════════════
+// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 // GOOGLE ADS OAUTH
-// ════════════════════════════════════════════════════════════════
+// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 
 const GOOGLE_CLIENT_ID     = process.env.GOOGLE_CLIENT_ID     || '';
 const GOOGLE_CLIENT_SECRET = process.env.GOOGLE_CLIENT_SECRET || '';
@@ -2947,11 +3316,11 @@ const GOOGLE_ADS_DEVELOPER_TOKEN = process.env.GOOGLE_ADS_DEVELOPER_TOKEN || '';
 // Returns { accounts: [{customer_id, name, currency, timezone}], error }
 async function _fetchGoogleAdsAccounts(accessToken) {
   if (!GOOGLE_ADS_DEVELOPER_TOKEN) {
-    console.warn('[Google Ads] GOOGLE_ADS_DEVELOPER_TOKEN not set — skipping account fetch');
+    console.warn('[Google Ads] GOOGLE_ADS_DEVELOPER_TOKEN not set â€” skipping account fetch');
     return { accounts: [], error: 'GOOGLE_ADS_DEVELOPER_TOKEN not configured' };
   }
 
-  const GADS_TIMEOUT_MS = 10000; // 10 s — well inside Render's 30 s limit
+  const GADS_TIMEOUT_MS = 10000; // 10 s â€” well inside Render's 30 s limit
   const headers = {
     'Authorization':   'Bearer ' + accessToken,
     'developer-token': GOOGLE_ADS_DEVELOPER_TOKEN
@@ -2964,7 +3333,7 @@ async function _fetchGoogleAdsAccounts(accessToken) {
       .finally(function() { clearTimeout(tid); });
   }
 
-  // Step 1 — list all customer resource names the token can access
+  // Step 1 â€” list all customer resource names the token can access
   let resourceNames;
   try {
     const listUrl = 'https://googleads.googleapis.com/v24/customers:listAccessibleCustomers';
@@ -3004,7 +3373,7 @@ async function _fetchGoogleAdsAccounts(accessToken) {
   console.log('[Google Ads] accessible customer IDs:', customerIds);
   if (customerIds.length === 0) return { accounts: [], error: null };
 
-  // Step 2 — fetch name, currency, manager flag, status for each direct customer (up to 20)
+  // Step 2 â€” fetch name, currency, manager flag, status for each direct customer (up to 20)
   const accounts = [];
   for (const customerId of customerIds.slice(0, 20)) {
     let acctName   = customerId;
@@ -3054,7 +3423,7 @@ async function _fetchGoogleAdsAccounts(accessToken) {
       status:      acctStatus
     });
 
-    // For manager accounts — fetch direct (level=1) non-manager sub-clients
+    // For manager accounts â€” fetch direct (level=1) non-manager sub-clients
     if (isManager) {
       try {
         const subUrl = 'https://googleads.googleapis.com/v24/customers/' + customerId + '/googleAds:search';
@@ -3102,7 +3471,7 @@ async function _fetchGoogleAdsAccounts(accessToken) {
   return { accounts, error: null };
 }
 
-// State store: random hex → { userId, expires }. Expires after 10 min.
+// State store: random hex â†’ { userId, expires }. Expires after 10 min.
 const _googleOAuthStates = new Map();
 setInterval(function() {
   const now = Date.now();
@@ -3111,7 +3480,7 @@ setInterval(function() {
   }
 }, 5 * 60 * 1000);
 
-// GET /api/google/auth-url — authenticated, returns the Google OAuth URL
+// GET /api/google/auth-url â€” authenticated, returns the Google OAuth URL
 app.get('/api/google/auth-url', async (req, res) => {
   const user = await getUserFromToken(req);
   if (!user) return res.status(401).json({ error: 'Authentication required' });
@@ -3132,26 +3501,25 @@ app.get('/api/google/auth-url', async (req, res) => {
   res.json({ url: 'https://accounts.google.com/o/oauth2/v2/auth?' + params.toString() });
 });
 
-// GET /auth/google/callback — OAuth callback from Google
+// GET /auth/google/callback â€” OAuth callback from Google
 app.get('/auth/google/callback', async (req, res) => {
   const { code, state, error } = req.query;
   // Mirror the GOOGLE_REDIRECT_URI detection logic: explicit env var wins,
   // then fall back to Render (production) vs localhost (local dev).
-  const frontendBase = process.env.FRONTEND_URL
-    || (process.env.RENDER ? 'https://orivenai.com' : 'http://localhost:5500');
+  const frontendBase = FRONTEND_URL;
 
   if (error) {
     console.error('[Google OAuth] Denied or error:', error);
-    return res.redirect(frontendBase + '/app.html?google_error=' + encodeURIComponent(error));
+    return res.redirect(frontendBase + '/app?google_error=' + encodeURIComponent(error));
   }
   if (!code || !state) {
-    return res.redirect(frontendBase + '/app.html?google_error=missing_params');
+    return res.redirect(frontendBase + '/app?google_error=missing_params');
   }
 
   const stateData = _googleOAuthStates.get(state);
   if (!stateData || stateData.expires < Date.now()) {
     _googleOAuthStates.delete(state);
-    return res.redirect(frontendBase + '/app.html?google_error=invalid_state');
+    return res.redirect(frontendBase + '/app?google_error=invalid_state');
   }
   _googleOAuthStates.delete(state);
   const userId = stateData.userId;
@@ -3172,11 +3540,11 @@ app.get('/auth/google/callback', async (req, res) => {
     tokens = await tokenRes.json();
     if (tokens.error) {
       console.error('[Google OAuth] Token exchange error:', tokens.error, tokens.error_description);
-      return res.redirect(frontendBase + '/app.html?google_error=token_exchange');
+      return res.redirect(frontendBase + '/app?google_error=token_exchange');
     }
   } catch (err) {
     console.error('[Google OAuth] Token exchange network error:', err.message);
-    return res.redirect(frontendBase + '/app.html?google_error=network');
+    return res.redirect(frontendBase + '/app?google_error=network');
   }
 
   let googleEmail = null;
@@ -3212,14 +3580,14 @@ app.get('/auth/google/callback', async (req, res) => {
 
   if (dbError) {
     console.error('[Google OAuth] DB upsert error:', dbError.message);
-    return res.redirect(frontendBase + '/app.html?google_error=db');
+    return res.redirect(frontendBase + '/app?google_error=db');
   }
 
-  console.log('[Google OAuth] ✅ Connected | user:', userId, '| email:', googleEmail, '| accounts:', gadsAccounts.length);
-  return res.redirect(frontendBase + '/app.html?google_connected=1');
+  console.log('[Google OAuth] âœ… Connected | user:', userId, '| email:', googleEmail, '| accounts:', gadsAccounts.length);
+  return res.redirect(frontendBase + '/app?google_connected=1');
 });
 
-// GET /api/google/status — return connection status for the authenticated user
+// GET /api/google/status â€” return connection status for the authenticated user
 app.get('/api/google/status', async (req, res) => {
   const user = await getUserFromToken(req);
   if (!user) return res.status(401).json({ error: 'Authentication required' });
@@ -3249,7 +3617,7 @@ app.get('/api/google/status', async (req, res) => {
   });
 });
 
-// GET /api/google/accounts — re-fetch accessible Google Ads accounts and store them
+// GET /api/google/accounts â€” re-fetch accessible Google Ads accounts and store them
 app.get('/api/google/accounts', async (req, res) => {
   console.log('[Accounts] request received');
   try {
@@ -3274,8 +3642,8 @@ app.get('/api/google/accounts', async (req, res) => {
     // Refresh access token if expired
     let accessToken = integration.access_token;
     if (integration.token_expiry && new Date(integration.token_expiry) < new Date()) {
-      if (!integration.refresh_token) return res.status(401).json({ error: 'Token expired — reconnect Google Ads' });
-      console.log('[Accounts] token expired, refreshing…');
+      if (!integration.refresh_token) return res.status(401).json({ error: 'Token expired â€” reconnect Google Ads' });
+      console.log('[Accounts] token expired, refreshingâ€¦');
       try {
         const refreshRes = await fetch('https://oauth2.googleapis.com/token', {
           method:  'POST',
@@ -3290,7 +3658,7 @@ app.get('/api/google/accounts', async (req, res) => {
         const refreshed = await refreshRes.json();
         if (refreshed.error) {
           console.error('[Accounts] token refresh failed:', refreshed.error);
-          return res.status(401).json({ error: 'Token refresh failed — reconnect Google Ads' });
+          return res.status(401).json({ error: 'Token refresh failed â€” reconnect Google Ads' });
         }
         accessToken = refreshed.access_token;
         await supabaseAdmin.from('integrations').update({
@@ -3304,9 +3672,9 @@ app.get('/api/google/accounts', async (req, res) => {
       }
     }
 
-    console.log('[Accounts] calling _fetchGoogleAdsAccounts…');
+    console.log('[Accounts] calling _fetchGoogleAdsAccountsâ€¦');
     const { accounts, error: gadsErr } = await _fetchGoogleAdsAccounts(accessToken);
-    console.log('[Accounts] result — accounts:', accounts.length, '| error:', gadsErr);
+    console.log('[Accounts] result â€” accounts:', accounts.length, '| error:', gadsErr);
 
     if (gadsErr && accounts.length === 0) {
       return res.status(503).json({ error: gadsErr });
@@ -3326,7 +3694,7 @@ app.get('/api/google/accounts', async (req, res) => {
   }
 });
 
-// POST /api/google/disconnect — revoke and delete integration
+// POST /api/google/disconnect â€” revoke and delete integration
 app.post('/api/google/disconnect', async (req, res) => {
   const user = await getUserFromToken(req);
   if (!user) return res.status(401).json({ error: 'Authentication required' });
@@ -3355,7 +3723,7 @@ app.post('/api/google/disconnect', async (req, res) => {
   res.json({ success: true });
 });
 
-// POST /api/google/active-account — set the active Google Ads account for a user
+// POST /api/google/active-account â€” set the active Google Ads account for a user
 app.post('/api/google/active-account', async (req, res) => {
   try {
     const user = await getUserFromToken(req);
@@ -3392,23 +3760,22 @@ app.post('/api/google/active-account', async (req, res) => {
   }
 });
 
-// GET /auth/google — server-side redirect to Google OAuth consent screen.
+// GET /auth/google â€” server-side redirect to Google OAuth consent screen.
 // Accepts ?token= (Supabase JWT) so the frontend can build a plain link or
 // window.location redirect without a separate fetch call.
 // Example: window.location.href = '/auth/google?token=' + supabaseSession.access_token
 app.get('/auth/google', async (req, res) => {
-  const frontendBase = process.env.FRONTEND_URL
-    || (process.env.RENDER ? 'https://orivenai.com' : 'http://localhost:5500');
+  const frontendBase = FRONTEND_URL;
 
   if (!GOOGLE_CLIENT_ID || !GOOGLE_CLIENT_SECRET) {
     console.warn('[Google OAuth] /auth/google hit but credentials not configured');
-    return res.redirect(frontendBase + '/app.html?google_error=not_configured');
+    return res.redirect(frontendBase + '/app?google_error=not_configured');
   }
 
   const token = (req.query.token || '').toString().trim();
   if (!token) {
     console.warn('[Google OAuth] /auth/google hit with no token');
-    return res.redirect(frontendBase + '/app.html?google_error=missing_token');
+    return res.redirect(frontendBase + '/app?google_error=missing_token');
   }
 
   let userId;
@@ -3416,12 +3783,12 @@ app.get('/auth/google', async (req, res) => {
     const { data, error } = await supabaseAdmin.auth.getUser(token);
     if (error || !data || !data.user) {
       console.warn('[Google OAuth] /auth/google invalid token:', error && error.message);
-      return res.redirect(frontendBase + '/app.html?google_error=invalid_token');
+      return res.redirect(frontendBase + '/app?google_error=invalid_token');
     }
     userId = data.user.id;
   } catch (err) {
     console.error('[Google OAuth] /auth/google token validation threw:', err.message);
-    return res.redirect(frontendBase + '/app.html?google_error=auth_error');
+    return res.redirect(frontendBase + '/app?google_error=auth_error');
   }
 
   const state = crypto.randomBytes(16).toString('hex');
@@ -3437,11 +3804,11 @@ app.get('/auth/google', async (req, res) => {
     state
   });
 
-  console.log('[Google OAuth] Redirecting user', userId, '→ Google consent screen');
+  console.log('[Google OAuth] Redirecting user', userId, 'â†’ Google consent screen');
   res.redirect('https://accounts.google.com/o/oauth2/v2/auth?' + params.toString());
 });
 
-// GET /api/google-ads/accounts — spec-exact endpoint
+// GET /api/google-ads/accounts â€” spec-exact endpoint
 // Returns: { accounts: [{ customer_id, account_name, currency_code, is_manager, status }] }
 // Reuses the same token-refresh logic and _fetchGoogleAdsAccounts helper.
 app.get('/api/google-ads/accounts', async (req, res) => {
@@ -3466,9 +3833,9 @@ app.get('/api/google-ads/accounts', async (req, res) => {
 
     if (intg.token_expiry && new Date(intg.token_expiry) < new Date()) {
       if (!intg.refresh_token) {
-        return res.status(401).json({ error: 'Token expired — reconnect Google Ads' });
+        return res.status(401).json({ error: 'Token expired â€” reconnect Google Ads' });
       }
-      console.log('[google-ads/accounts] Token expired — refreshing…');
+      console.log('[google-ads/accounts] Token expired â€” refreshingâ€¦');
       const rfRes  = await fetch('https://oauth2.googleapis.com/token', {
         method:  'POST',
         headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
@@ -3482,7 +3849,7 @@ app.get('/api/google-ads/accounts', async (req, res) => {
       const rfData = await rfRes.json();
       if (!rfRes.ok || rfData.error || !rfData.access_token) {
         console.error('[google-ads/accounts] Token refresh failed:', rfData.error);
-        return res.status(401).json({ error: 'Token refresh failed — reconnect Google Ads' });
+        return res.status(401).json({ error: 'Token refresh failed â€” reconnect Google Ads' });
       }
       accessToken = rfData.access_token;
       await supabaseAdmin.from('integrations').update({
@@ -3517,7 +3884,7 @@ app.get('/api/google-ads/accounts', async (req, res) => {
   }
 });
 
-// GET /api/google-ads/campaigns — spec-exact endpoint
+// GET /api/google-ads/campaigns â€” spec-exact endpoint
 // Returns: { campaigns: [{ campaign_name, campaign_id, status, clicks, impressions, cost, ctr, conversions }] }
 // ?date_range= LAST_7_DAYS | LAST_14_DAYS | LAST_30_DAYS | LAST_90_DAYS (default: LAST_30_DAYS)
 app.get('/api/google-ads/campaigns', async (req, res) => {
@@ -3580,9 +3947,9 @@ app.get('/api/google-ads/campaigns', async (req, res) => {
   }
 });
 
-// ════════════════════════════════════════════════════════════════
+// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 // TIKTOK ADS INTEGRATION
-// ════════════════════════════════════════════════════════════════
+// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 
 const TIKTOK_APP_ID     = process.env.TIKTOK_APP_ID     || '';
 const TIKTOK_APP_SECRET = process.env.TIKTOK_APP_SECRET || '';
@@ -3599,7 +3966,7 @@ setInterval(function() {
   }
 }, 5 * 60 * 1000);
 
-// GET /api/tiktok/auth-url — returns TikTok OAuth authorization URL
+// GET /api/tiktok/auth-url â€” returns TikTok OAuth authorization URL
 app.get('/api/tiktok/auth-url', async (req, res) => {
   const user = await getUserFromToken(req);
   if (!user) return res.status(401).json({ error: 'Authentication required' });
@@ -3617,24 +3984,23 @@ app.get('/api/tiktok/auth-url', async (req, res) => {
   res.json({ url: 'https://business-api.tiktok.com/portal/auth?' + params.toString() });
 });
 
-// GET /auth/tiktok/callback — OAuth callback from TikTok
+// GET /auth/tiktok/callback â€” OAuth callback from TikTok
 app.get('/auth/tiktok/callback', async (req, res) => {
   const { auth_code, state, error } = req.query;
-  const frontendBase = process.env.FRONTEND_URL
-    || (process.env.RENDER ? 'https://orivenai.com' : 'http://localhost:5500');
+  const frontendBase = FRONTEND_URL;
 
   if (error) {
     console.error('[TikTok OAuth] Error from provider:', error);
-    return res.redirect(frontendBase + '/app.html?tiktok_error=' + encodeURIComponent(error));
+    return res.redirect(frontendBase + '/app?tiktok_error=' + encodeURIComponent(error));
   }
   if (!auth_code || !state) {
-    return res.redirect(frontendBase + '/app.html?tiktok_error=missing_params');
+    return res.redirect(frontendBase + '/app?tiktok_error=missing_params');
   }
 
   const stateData = _tiktokOAuthStates.get(state);
   if (!stateData || stateData.expires < Date.now()) {
     _tiktokOAuthStates.delete(state);
-    return res.redirect(frontendBase + '/app.html?tiktok_error=invalid_state');
+    return res.redirect(frontendBase + '/app?tiktok_error=invalid_state');
   }
   _tiktokOAuthStates.delete(state);
   const userId = stateData.userId;
@@ -3643,11 +4009,11 @@ app.get('/auth/tiktok/callback', async (req, res) => {
   // POST https://business-api.tiktok.com/open_api/v1.3/oauth2/access_token/
   // body: { app_id, secret, auth_code }
   // response: { data: { access_token, advertiser_ids: [], scope: "" } }
-  console.log('[TikTok OAuth] Placeholder callback — auth_code received, real exchange not implemented');
-  return res.redirect(frontendBase + '/app.html?tiktok_error=not_implemented');
+  console.log('[TikTok OAuth] Placeholder callback â€” auth_code received, real exchange not implemented');
+  return res.redirect(frontendBase + '/app?tiktok_error=not_implemented');
 });
 
-// GET /api/tiktok/status — return TikTok connection status for the authenticated user
+// GET /api/tiktok/status â€” return TikTok connection status for the authenticated user
 app.get('/api/tiktok/status', async (req, res) => {
   const user = await getUserFromToken(req);
   if (!user) return res.status(401).json({ error: 'Authentication required' });
@@ -3671,7 +4037,7 @@ app.get('/api/tiktok/status', async (req, res) => {
   });
 });
 
-// GET /api/tiktok/accounts — re-fetch accessible TikTok Ads accounts
+// GET /api/tiktok/accounts â€” re-fetch accessible TikTok Ads accounts
 app.get('/api/tiktok/accounts', async (req, res) => {
   const user = await getUserFromToken(req);
   if (!user) return res.status(401).json({ error: 'Authentication required' });
@@ -3682,7 +4048,7 @@ app.get('/api/tiktok/accounts', async (req, res) => {
   res.status(503).json({ error: 'TikTok account fetch not yet implemented' });
 });
 
-// POST /api/tiktok/disconnect — delete TikTok integration row
+// POST /api/tiktok/disconnect â€” delete TikTok integration row
 app.post('/api/tiktok/disconnect', async (req, res) => {
   const user = await getUserFromToken(req);
   if (!user) return res.status(401).json({ error: 'Authentication required' });
@@ -3701,7 +4067,7 @@ app.post('/api/tiktok/disconnect', async (req, res) => {
   res.json({ ok: true });
 });
 
-// POST /api/tiktok/active-account — set active TikTok Ads account for a user
+// POST /api/tiktok/active-account â€” set active TikTok Ads account for a user
 app.post('/api/tiktok/active-account', async (req, res) => {
   const user = await getUserFromToken(req);
   if (!user) return res.status(401).json({ error: 'Authentication required' });
@@ -3729,21 +4095,21 @@ app.post('/api/tiktok/active-account', async (req, res) => {
   res.json({ ok: true, active_ad_account });
 });
 
-// GET /api/ads/tiktok/overview — placeholder for TikTok campaign KPIs
+// GET /api/ads/tiktok/overview â€” placeholder for TikTok campaign KPIs
 app.get('/api/ads/tiktok/overview', async (req, res) => {
   // TODO: implement using TikTok Reporting API
   // POST https://business-api.tiktok.com/open_api/v1.3/report/integrated/get/
   res.status(503).json({ error: 'TikTok Ads reporting not yet implemented' });
 });
 
-// GET /api/ads/tiktok/campaigns — placeholder for TikTok campaign list
+// GET /api/ads/tiktok/campaigns â€” placeholder for TikTok campaign list
 app.get('/api/ads/tiktok/campaigns', async (req, res) => {
   // TODO: implement using TikTok Campaign API
   // GET https://business-api.tiktok.com/open_api/v1.3/campaign/get/
   res.status(503).json({ error: 'TikTok Ads campaigns not yet implemented' });
 });
 
-// ════════════════════════════════════════════════════════════════
+// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 // META ADS INTEGRATION
 // Uses Facebook Marketing API v21.0
 //
@@ -3753,7 +4119,7 @@ app.get('/api/ads/tiktok/campaigns', async (req, res) => {
 //     ADD COLUMN IF NOT EXISTS meta_user_name    TEXT,
 //     ADD COLUMN IF NOT EXISTS meta_user_id      TEXT,
 //     ADD COLUMN IF NOT EXISTS meta_ads_accounts JSONB DEFAULT '[]';
-// ════════════════════════════════════════════════════════════════
+// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 
 const META_APP_ID     = process.env.META_APP_ID     || '';
 const META_APP_SECRET = process.env.META_APP_SECRET || '';
@@ -3765,7 +4131,7 @@ const META_SCOPES  = 'ads_read,ads_management,business_management';
 const META_API_VER = 'v21.0';
 const META_GRAPH   = 'https://graph.facebook.com/' + META_API_VER;
 
-// CSRF state store — same 10-minute expiry pattern as Google / TikTok
+// CSRF state store â€” same 10-minute expiry pattern as Google / TikTok
 const _metaOAuthStates = new Map();
 setInterval(function() {
   const now = Date.now();
@@ -3774,10 +4140,10 @@ setInterval(function() {
   }
 }, 5 * 60 * 1000);
 
-// ── Helper: authenticated Meta Graph API call ─────────────────────────────────
+// â”€â”€ Helper: authenticated Meta Graph API call â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 // Throws on any API error (including 200 + error body from Facebook).
-// Error code 190/102 → maps to HTTP 401 (expired/invalid token).
-// Error code 200     → maps to HTTP 403 (missing permission).
+// Error code 190/102 â†’ maps to HTTP 401 (expired/invalid token).
+// Error code 200     â†’ maps to HTTP 403 (missing permission).
 async function _metaFetch(path, accessToken, queryParams) {
   const params = new URLSearchParams({ access_token: accessToken });
   if (queryParams) {
@@ -3798,7 +4164,7 @@ async function _metaFetch(path, accessToken, queryParams) {
   if (data.error) {
     const msg  = data.error.message || ('Meta API error code ' + data.error.code);
     const code = data.error.code;
-    console.error('[MetaAPI]', path, '→', msg, '| code:', code, '| type:', data.error.type);
+    console.error('[MetaAPI]', path, 'â†’', msg, '| code:', code, '| type:', data.error.type);
     const e    = new Error(msg);
     e.metaCode = code;
     e.metaType = data.error.type;
@@ -3811,7 +4177,7 @@ async function _metaFetch(path, accessToken, queryParams) {
   return data;
 }
 
-// ── Helper: resolve valid token + active account for a user ──────────────────
+// â”€â”€ Helper: resolve valid token + active account for a user â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 // Throws with .status set so routes can return it directly.
 async function _getMetaAccess(user) {
   const { data: intg, error } = await supabaseAdmin
@@ -3825,12 +4191,12 @@ async function _getMetaAccess(user) {
     const e = new Error('Meta Ads not connected'); e.status = 400; throw e;
   }
   if (intg.token_expiry && new Date(intg.token_expiry) < new Date()) {
-    const e = new Error('Meta access token expired — reconnect Meta Ads in Integrations'); e.status = 401; throw e;
+    const e = new Error('Meta access token expired â€” reconnect Meta Ads in Integrations'); e.status = 401; throw e;
   }
 
   const active = intg.active_ad_account;
   if (!active || !active.account_id) {
-    const e = new Error('No active Meta Ads account selected — go to Integrations and choose an account.'); e.status = 400; throw e;
+    const e = new Error('No active Meta Ads account selected â€” go to Integrations and choose an account.'); e.status = 400; throw e;
   }
   // Meta ad account IDs are prefixed with 'act_'
   const accountId = active.account_id.startsWith('act_')
@@ -3840,7 +4206,7 @@ async function _getMetaAccess(user) {
   return { accessToken: intg.access_token, accountId, accountName: active.account_name || accountId };
 }
 
-// ── Helper: fetch all accessible Meta ad accounts ────────────────────────────
+// â”€â”€ Helper: fetch all accessible Meta ad accounts â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 async function _fetchMetaAdAccounts(accessToken) {
   const data = await _metaFetch('/me/adaccounts', accessToken, {
     fields: 'id,name,currency,account_status,timezone_name',
@@ -3857,12 +4223,12 @@ async function _fetchMetaAdAccounts(accessToken) {
   });
 }
 
-// ── Helper: map Oriven date range to Meta date_preset ────────────────────────
+// â”€â”€ Helper: map Oriven date range to Meta date_preset â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 function _metaDatePreset(range) {
   return { LAST_7_DAYS: 'last_7d', LAST_14_DAYS: 'last_14d', LAST_30_DAYS: 'last_30d', LAST_90_DAYS: 'last_90d' }[range] || 'last_30d';
 }
 
-// ── Helper: sum conversion actions from Meta insights.actions array ──────────
+// â”€â”€ Helper: sum conversion actions from Meta insights.actions array â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 function _metaConversions(actions) {
   const convTypes = new Set([
     'offsite_conversion.fb_pixel_purchase',
@@ -3876,31 +4242,30 @@ function _metaConversions(actions) {
     .reduce(function(sum, a) { return sum + Number(a.value || 0); }, 0);
 }
 
-// GET /auth/meta — server-side redirect to Facebook Login
-// Accepts ?token= (Supabase JWT) — avoids a separate API call from the frontend.
+// GET /auth/meta â€” server-side redirect to Facebook Login
+// Accepts ?token= (Supabase JWT) â€” avoids a separate API call from the frontend.
 // Frontend usage: window.location.href = '/auth/meta?token=' + session.access_token
 app.get('/auth/meta', async (req, res) => {
-  const frontendBase = process.env.FRONTEND_URL
-    || (process.env.RENDER ? 'https://orivenai.com' : 'http://localhost:5500');
+  const frontendBase = FRONTEND_URL;
 
   if (!META_APP_ID || !META_APP_SECRET) {
     console.warn('[Meta OAuth] /auth/meta hit but credentials not configured');
-    return res.redirect(frontendBase + '/app.html?meta_error=not_configured');
+    return res.redirect(frontendBase + '/app?meta_error=not_configured');
   }
 
   const token = (req.query.token || '').toString().trim();
-  if (!token) return res.redirect(frontendBase + '/app.html?meta_error=missing_token');
+  if (!token) return res.redirect(frontendBase + '/app?meta_error=missing_token');
 
   let userId;
   try {
     const { data, error } = await supabaseAdmin.auth.getUser(token);
     if (error || !data || !data.user) {
-      return res.redirect(frontendBase + '/app.html?meta_error=invalid_token');
+      return res.redirect(frontendBase + '/app?meta_error=invalid_token');
     }
     userId = data.user.id;
   } catch (err) {
     console.error('[Meta OAuth] Token validation error:', err.message);
-    return res.redirect(frontendBase + '/app.html?meta_error=auth_error');
+    return res.redirect(frontendBase + '/app?meta_error=auth_error');
   }
 
   const state = crypto.randomBytes(16).toString('hex');
@@ -3914,33 +4279,32 @@ app.get('/auth/meta', async (req, res) => {
     response_type: 'code'
   });
 
-  console.log('[Meta OAuth] Redirecting user', userId, '→ Facebook Login');
+  console.log('[Meta OAuth] Redirecting user', userId, 'â†’ Facebook Login');
   res.redirect('https://www.facebook.com/' + META_API_VER + '/dialog/oauth?' + params.toString());
 });
 
-// GET /auth/meta/callback — OAuth callback from Facebook
+// GET /auth/meta/callback â€” OAuth callback from Facebook
 app.get('/auth/meta/callback', async (req, res) => {
   const { code, state, error, error_description } = req.query;
-  const frontendBase = process.env.FRONTEND_URL
-    || (process.env.RENDER ? 'https://orivenai.com' : 'http://localhost:5500');
+  const frontendBase = FRONTEND_URL;
 
   if (error) {
     console.error('[Meta OAuth] Error from Facebook:', error, error_description);
-    return res.redirect(frontendBase + '/app.html?meta_error=' + encodeURIComponent(error));
+    return res.redirect(frontendBase + '/app?meta_error=' + encodeURIComponent(error));
   }
   if (!code || !state) {
-    return res.redirect(frontendBase + '/app.html?meta_error=missing_params');
+    return res.redirect(frontendBase + '/app?meta_error=missing_params');
   }
 
   const stateData = _metaOAuthStates.get(state);
   if (!stateData || stateData.expires < Date.now()) {
     _metaOAuthStates.delete(state);
-    return res.redirect(frontendBase + '/app.html?meta_error=invalid_state');
+    return res.redirect(frontendBase + '/app?meta_error=invalid_state');
   }
   _metaOAuthStates.delete(state);
   const userId = stateData.userId;
 
-  // ── Step 1: Exchange code for short-lived user access token ─────────────
+  // â”€â”€ Step 1: Exchange code for short-lived user access token â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   let shortToken;
   try {
     const tokenRes = await fetch(META_GRAPH + '/oauth/access_token', {
@@ -3956,16 +4320,16 @@ app.get('/auth/meta/callback', async (req, res) => {
     const tokenData = await tokenRes.json();
     if (tokenData.error || !tokenData.access_token) {
       console.error('[Meta OAuth] Code exchange error:', tokenData.error);
-      return res.redirect(frontendBase + '/app.html?meta_error=token_exchange');
+      return res.redirect(frontendBase + '/app?meta_error=token_exchange');
     }
     shortToken = tokenData.access_token;
     console.log('[Meta OAuth] Short-lived token obtained');
   } catch (err) {
     console.error('[Meta OAuth] Token exchange network error:', err.message);
-    return res.redirect(frontendBase + '/app.html?meta_error=network');
+    return res.redirect(frontendBase + '/app?meta_error=network');
   }
 
-  // ── Step 2: Exchange for long-lived token (valid ~60 days) ──────────────
+  // â”€â”€ Step 2: Exchange for long-lived token (valid ~60 days) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   let accessToken = shortToken;
   let tokenExpiry = new Date(Date.now() + 58 * 24 * 60 * 60 * 1000).toISOString(); // safe 58-day default
   try {
@@ -3993,7 +4357,7 @@ app.get('/auth/meta/callback', async (req, res) => {
     console.warn('[Meta OAuth] Token extension network error (using short-lived):', err.message);
   }
 
-  // ── Step 3: Fetch Facebook user info ────────────────────────────────────
+  // â”€â”€ Step 3: Fetch Facebook user info â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   let metaUserName = null;
   let metaUserId   = null;
   try {
@@ -4004,7 +4368,7 @@ app.get('/auth/meta/callback', async (req, res) => {
     console.warn('[Meta OAuth] Could not fetch /me:', err.message);
   }
 
-  // ── Step 4: Fetch accessible ad accounts ────────────────────────────────
+  // â”€â”€ Step 4: Fetch accessible ad accounts â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   let adAccounts = [];
   try {
     adAccounts = await _fetchMetaAdAccounts(accessToken);
@@ -4013,7 +4377,7 @@ app.get('/auth/meta/callback', async (req, res) => {
     console.warn('[Meta OAuth] Could not fetch ad accounts:', err.message);
   }
 
-  // ── Step 5: Upsert into Supabase ────────────────────────────────────────
+  // â”€â”€ Step 5: Upsert into Supabase â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   const { error: dbError } = await supabaseAdmin
     .from('integrations')
     .upsert({
@@ -4030,14 +4394,14 @@ app.get('/auth/meta/callback', async (req, res) => {
 
   if (dbError) {
     console.error('[Meta OAuth] DB upsert error:', dbError.message);
-    return res.redirect(frontendBase + '/app.html?meta_error=db');
+    return res.redirect(frontendBase + '/app?meta_error=db');
   }
 
-  console.log('[Meta OAuth] ✅ Connected | user:', userId, '| name:', metaUserName, '| accounts:', adAccounts.length);
-  return res.redirect(frontendBase + '/app.html?meta_connected=1');
+  console.log('[Meta OAuth] âœ… Connected | user:', userId, '| name:', metaUserName, '| accounts:', adAccounts.length);
+  return res.redirect(frontendBase + '/app?meta_connected=1');
 });
 
-// GET /api/meta/status — connection status for the authenticated user
+// GET /api/meta/status â€” connection status for the authenticated user
 app.get('/api/meta/status', async (req, res) => {
   const user = await getUserFromToken(req);
   if (!user) return res.status(401).json({ error: 'Authentication required' });
@@ -4065,7 +4429,7 @@ app.get('/api/meta/status', async (req, res) => {
   });
 });
 
-// GET /api/meta/accounts — re-fetch accessible ad accounts from Facebook
+// GET /api/meta/accounts â€” re-fetch accessible ad accounts from Facebook
 app.get('/api/meta/accounts', async (req, res) => {
   try {
     const user = await getUserFromToken(req);
@@ -4081,7 +4445,7 @@ app.get('/api/meta/accounts', async (req, res) => {
     if (fetchErr) return res.status(500).json({ error: 'Database error' });
     if (!intg)    return res.status(404).json({ error: 'Meta Ads not connected' });
     if (intg.token_expiry && new Date(intg.token_expiry) < new Date()) {
-      return res.status(401).json({ error: 'Meta token expired — reconnect Meta Ads' });
+      return res.status(401).json({ error: 'Meta token expired â€” reconnect Meta Ads' });
     }
 
     const accounts = await _fetchMetaAdAccounts(intg.access_token);
@@ -4098,7 +4462,7 @@ app.get('/api/meta/accounts', async (req, res) => {
   }
 });
 
-// POST /api/meta/disconnect — revoke permissions and delete integration row
+// POST /api/meta/disconnect â€” revoke permissions and delete integration row
 app.post('/api/meta/disconnect', async (req, res) => {
   const user = await getUserFromToken(req);
   if (!user) return res.status(401).json({ error: 'Authentication required' });
@@ -4132,7 +4496,7 @@ app.post('/api/meta/disconnect', async (req, res) => {
   res.json({ ok: true });
 });
 
-// POST /api/meta/active-account — set the active Meta Ads account for a user
+// POST /api/meta/active-account â€” set the active Meta Ads account for a user
 app.post('/api/meta/active-account', async (req, res) => {
   try {
     const user = await getUserFromToken(req);
@@ -4166,7 +4530,7 @@ app.post('/api/meta/active-account', async (req, res) => {
   }
 });
 
-// GET /api/meta/campaigns — campaign list with Marketing API performance data
+// GET /api/meta/campaigns â€” campaign list with Marketing API performance data
 // ?date_range= LAST_7_DAYS | LAST_14_DAYS | LAST_30_DAYS | LAST_90_DAYS
 app.get('/api/meta/campaigns', async (req, res) => {
   try {
@@ -4213,7 +4577,7 @@ app.get('/api/meta/campaigns', async (req, res) => {
   }
 });
 
-// GET /api/meta/adsets — ad set list with performance metrics
+// GET /api/meta/adsets â€” ad set list with performance metrics
 app.get('/api/meta/adsets', async (req, res) => {
   try {
     const user = await getUserFromToken(req);
@@ -4257,7 +4621,7 @@ app.get('/api/meta/adsets', async (req, res) => {
   }
 });
 
-// GET /api/meta/ads — individual ads with creative preview fields and performance
+// GET /api/meta/ads â€” individual ads with creative preview fields and performance
 // Creative fields returned for ad preview panel:
 //   headline, primary_text, call_to_action, image_url, video_thumbnail, destination_url
 app.get('/api/meta/ads', async (req, res) => {
@@ -4319,9 +4683,9 @@ app.get('/api/meta/ads', async (req, res) => {
   }
 });
 
-// ════════════════════════════════════════════════════════════════
-// ADS DASHBOARD — campaign data, AI analysis, recommendations
-// ════════════════════════════════════════════════════════════════
+// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+// ADS DASHBOARD â€” campaign data, AI analysis, recommendations
+// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 
 // Resolve a valid Google Ads access token + active account for a user.
 // Refreshes token if expired. Throws with .status set for HTTP codes.
@@ -4341,7 +4705,7 @@ async function _getGadsAccess(user) {
 
   if (intg.token_expiry && new Date(intg.token_expiry) < new Date()) {
     if (!intg.refresh_token) {
-      const e = new Error('Token expired — reconnect Google Ads'); e.status = 401; throw e;
+      const e = new Error('Token expired â€” reconnect Google Ads'); e.status = 401; throw e;
     }
     const rfRes  = await fetch('https://oauth2.googleapis.com/token', {
       method:  'POST',
@@ -4355,7 +4719,7 @@ async function _getGadsAccess(user) {
     });
     const rfData = await rfRes.json();
     if (!rfRes.ok || !rfData.access_token) {
-      const e = new Error('Token refresh failed — reconnect Google Ads'); e.status = 401; throw e;
+      const e = new Error('Token refresh failed â€” reconnect Google Ads'); e.status = 401; throw e;
     }
     accessToken = rfData.access_token;
     await supabaseAdmin.from('integrations').update({
@@ -4368,7 +4732,7 @@ async function _getGadsAccess(user) {
   console.log('[GadsAccess] active_ad_account from DB:', JSON.stringify(active));
 
   if (!active || !active.account_id) {
-    const e = new Error('No active Google Ads account selected — go to Integrations and choose an account.'); e.status = 400; throw e;
+    const e = new Error('No active Google Ads account selected â€” go to Integrations and choose an account.'); e.status = 400; throw e;
   }
 
   if (active.is_manager) {
@@ -4405,7 +4769,7 @@ async function _gadsQuery(accessToken, customerId, query, loginCustomerId) {
   };
 
   const requestBody = JSON.stringify({ query });
-  console.log('[GAQL] ▶ POST', url);
+  console.log('[GAQL] â–¶ POST', url);
   console.log('[GAQL]   customer_id (URL)   :', customerId);
   console.log('[GAQL]   login-customer-id    :', effectiveLoginId);
   console.log('[GAQL]   query               :', query.trim().replace(/\s+/g, ' '));
@@ -4416,10 +4780,10 @@ async function _gadsQuery(accessToken, customerId, query, loginCustomerId) {
       .finally(() => clearTimeout(tid));
     const text = await res.text();
 
-    console.log('[GAQL] ◀ HTTP', res.status, url);
+    console.log('[GAQL] â—€ HTTP', res.status, url);
 
     if (!res.ok) {
-      // Parse and log the full Google Ads error payload — no truncation
+      // Parse and log the full Google Ads error payload â€” no truncation
       let parsed = null;
       try { parsed = JSON.parse(text); } catch (_) {}
 
@@ -4442,7 +4806,7 @@ async function _gadsQuery(accessToken, customerId, query, loginCustomerId) {
         });
       }
 
-      console.error('[GAQL] ✗ FULL ERROR BODY:', text);
+      console.error('[GAQL] âœ— FULL ERROR BODY:', text);
       console.error('[GAQL]   status       :', statusCode);
       console.error('[GAQL]   message      :', message);
       console.error('[GAQL]   errorCodes   :', errorCodes.join(' | '));
@@ -4458,7 +4822,7 @@ async function _gadsQuery(accessToken, customerId, query, loginCustomerId) {
     }
 
     const data = JSON.parse(text);
-    console.log('[GAQL] ✓ results:', (data.results || []).length);
+    console.log('[GAQL] âœ“ results:', (data.results || []).length);
     return data.results || [];
   } catch (err) {
     if (err.name === 'AbortError') throw new Error('Google Ads API timed out (>20 s)');
@@ -4466,7 +4830,7 @@ async function _gadsQuery(accessToken, customerId, query, loginCustomerId) {
   }
 }
 
-// ── GET /api/ads/overview — account KPIs + campaign list ─────────
+// â”€â”€ GET /api/ads/overview â€” account KPIs + campaign list â”€â”€â”€â”€â”€â”€â”€â”€â”€
 app.get('/api/ads/overview', async (req, res) => {
   let _diagCustomerId = null, _diagLoginId = null, _diagActive = null, _diagQuery = null;
   try {
@@ -4581,7 +4945,7 @@ app.get('/api/ads/overview', async (req, res) => {
   }
 });
 
-// ── GET /api/ads/campaigns — dedicated campaigns list endpoint ────
+// â”€â”€ GET /api/ads/campaigns â€” dedicated campaigns list endpoint â”€â”€â”€â”€
 app.get('/api/ads/campaigns', async (req, res) => {
   try {
     const user = await getUserFromToken(req);
@@ -4658,7 +5022,7 @@ app.get('/api/ads/campaigns', async (req, res) => {
   }
 });
 
-// ── GET /api/ads/campaign/:id — ads + keywords for one campaign ──
+// â”€â”€ GET /api/ads/campaign/:id â€” ads + keywords for one campaign â”€â”€
 app.get('/api/ads/campaign/:id', async (req, res) => {
   try {
     const user = await getUserFromToken(req);
@@ -4916,7 +5280,7 @@ app.get('/api/ads/campaign/:id', async (req, res) => {
   }
 });
 
-// ── GET /api/ads/campaign/:id/assets — resolve image asset URLs ──
+// â”€â”€ GET /api/ads/campaign/:id/assets â€” resolve image asset URLs â”€â”€
 // Fetches actual image URLs for asset resource names returned in the
 // responsive_display_ad.marketing_images / logo_images arrays.
 app.get('/api/ads/campaign/:id/assets', async (req, res) => {
@@ -4962,9 +5326,9 @@ app.get('/api/ads/campaign/:id/assets', async (req, res) => {
   }
 });
 
-// ── POST /api/ads/analyze — self-contained AI analysis ──────────
+// â”€â”€ POST /api/ads/analyze â€” self-contained AI analysis â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 // Fetches fresh data directly from Google Ads API. Accepts only
-// { date_range } from the request body — no client data passthrough.
+// { date_range } from the request body â€” no client data passthrough.
 app.post('/api/ads/analyze', async (req, res) => {
   try {
     const user = await getUserFromToken(req);
@@ -4978,7 +5342,7 @@ app.post('/api/ads/analyze', async (req, res) => {
     // Fetch all data in parallel from Google Ads API
     const [campResults, kwResults, stResults, adResults] = await Promise.all([
 
-      // Campaigns — performance totals
+      // Campaigns â€” performance totals
       _gadsQuery(accessToken, customerId, `
         SELECT
           campaign.id, campaign.name, campaign.status,
@@ -4992,7 +5356,7 @@ app.post('/api/ads/analyze', async (req, res) => {
         LIMIT 50
       `, loginCustomerId),
 
-      // Keywords — top spenders for quality analysis
+      // Keywords â€” top spenders for quality analysis
       _gadsQuery(accessToken, customerId, `
         SELECT
           ad_group_criterion.keyword.text,
@@ -5007,7 +5371,7 @@ app.post('/api/ads/analyze', async (req, res) => {
         LIMIT 50
       `, loginCustomerId).catch(() => []),
 
-      // Search terms — detect irrelevant queries and wasted spend
+      // Search terms â€” detect irrelevant queries and wasted spend
       _gadsQuery(accessToken, customerId, `
         SELECT
           search_term_view.search_term,
@@ -5023,7 +5387,7 @@ app.post('/api/ads/analyze', async (req, res) => {
         LIMIT 50
       `, loginCustomerId).catch(() => []),
 
-      // Ads — detect low-performing creatives
+      // Ads â€” detect low-performing creatives
       _gadsQuery(accessToken, customerId, `
         SELECT
           ad_group_ad.status,
@@ -5057,34 +5421,34 @@ app.post('/api/ads/analyze', async (req, res) => {
         conversions: cv, cpa: cv > 0 ? sp / cv : 0, roas: sp > 0 ? vl / sp : 0 };
     });
 
-    // Keywords summary — top 15 by spend
+    // Keywords summary â€” top 15 by spend
     const kwLines = kwResults.slice(0, 15).map(r => {
       const agc = r.adGroupCriterion || {}, kw = agc.keyword || {}, m = r.metrics || {};
       const sp = Number(m.costMicros || 0) / 1e6;
       const im = Number(m.impressions || 0), cl = Number(m.clicks || 0);
       const cv = Number(m.conversions || 0);
-      return `[${kw.matchType || '?'}] "${kw.text}" | ${r.campaign?.name || ''} | €${f(sp)} spend | CTR: ${im > 0 ? f((cl/im)*100) : '0.00'}% | Conv: ${f(cv)}`;
+      return `[${kw.matchType || '?'}] "${kw.text}" | ${r.campaign?.name || ''} | â‚¬${f(sp)} spend | CTR: ${im > 0 ? f((cl/im)*100) : '0.00'}% | Conv: ${f(cv)}`;
     });
 
     // Search terms with spend but zero conversions (wasted spend candidates)
     const wastedLines = stResults.filter(r => {
       const m = r.metrics || {};
-      return Number(m.costMicros || 0) > 500000 && Number(m.conversions || 0) === 0; // >€0.50
+      return Number(m.costMicros || 0) > 500000 && Number(m.conversions || 0) === 0; // >â‚¬0.50
     }).slice(0, 10).map(r => {
       const st = r.searchTermView || {}, m = r.metrics || {};
-      return `"${st.searchTerm}" | ${r.campaign?.name || ''} | €${f(Number(m.costMicros || 0)/1e6)} | ${m.clicks || 0} clicks | 0 conv`;
+      return `"${st.searchTerm}" | ${r.campaign?.name || ''} | â‚¬${f(Number(m.costMicros || 0)/1e6)} | ${m.clicks || 0} clicks | 0 conv`;
     });
 
     // Campaigns with high spend and zero conversions (budget efficiency)
     const zeroCampLines = campaigns.filter(c => c.spend > 5 && c.conversions === 0).map(c =>
-      `${c.name} | €${f(c.spend)} spend | ${c.clicks} clicks | 0 conversions`
+      `${c.name} | â‚¬${f(c.spend)} spend | ${c.clicks} clicks | 0 conversions`
     );
 
     const campSummary = campaigns.map(c =>
-      `${c.name} | ${c.status} | €${f(c.spend)} | ${c.impressions} impr | ${c.clicks} clicks | CTR: ${f(c.ctr)}% | Conv: ${f(c.conversions)} | CPA: €${c.cpa > 0 ? f(c.cpa) : 'N/A'} | ROAS: ${f(c.roas)}x`
+      `${c.name} | ${c.status} | â‚¬${f(c.spend)} | ${c.impressions} impr | ${c.clicks} clicks | CTR: ${f(c.ctr)}% | Conv: ${f(c.conversions)} | CPA: â‚¬${c.cpa > 0 ? f(c.cpa) : 'N/A'} | ROAS: ${f(c.roas)}x`
     ).join('\n');
 
-    const system = `You are a senior Google Ads performance analyst. Analyze this account data and return ONLY valid JSON — no markdown, no code fences, no explanation. Start your response with {.
+    const system = `You are a senior Google Ads performance analyst. Analyze this account data and return ONLY valid JSON â€” no markdown, no code fences, no explanation. Start your response with {.
 
 Return exactly this structure:
 {
@@ -5117,7 +5481,7 @@ Rules: max 6 findings, max 6 recommendations, 3 strengths, 3 weaknesses, 3 oppor
 
     const userMsg = `Account: ${accountName} (ID: ${customerId}) | Period: ${range}
 
-TOTALS — Spend: €${f(totalSpend)} | Impressions: ${totalImpr} | Clicks: ${totalClicks} | CTR: ${totalImpr > 0 ? f((totalClicks/totalImpr)*100) : '0.00'}% | Conversions: ${f(totalConv)} | CPA: €${totalConv > 0 ? f(totalSpend/totalConv) : 'N/A'} | ROAS: ${totalSpend > 0 ? f(totalConvVal/totalSpend) : '0.00'}x | Revenue: €${f(totalConvVal)}
+TOTALS â€” Spend: â‚¬${f(totalSpend)} | Impressions: ${totalImpr} | Clicks: ${totalClicks} | CTR: ${totalImpr > 0 ? f((totalClicks/totalImpr)*100) : '0.00'}% | Conversions: ${f(totalConv)} | CPA: â‚¬${totalConv > 0 ? f(totalSpend/totalConv) : 'N/A'} | ROAS: ${totalSpend > 0 ? f(totalConvVal/totalSpend) : '0.00'}x | Revenue: â‚¬${f(totalConvVal)}
 
 CAMPAIGNS (by spend):
 ${campSummary || 'No campaign spend in this period'}
@@ -5129,7 +5493,7 @@ SEARCH TERMS WITH SPEND BUT ZERO CONVERSIONS (potential wasted spend):
 ${wastedLines.length > 0 ? wastedLines.join('\n') : 'None identified'}
 
 HIGH-SPEND CAMPAIGNS WITH ZERO CONVERSIONS:
-${zeroCampLines.length > 0 ? zeroCampLines.join('\n') : 'None — all campaigns with spend have conversions'}`;
+${zeroCampLines.length > 0 ? zeroCampLines.join('\n') : 'None â€” all campaigns with spend have conversions'}`;
 
     const raw = await _aimlText('text-copy', system, userMsg, { max_tokens: 2200 });
 
@@ -5138,7 +5502,7 @@ ${zeroCampLines.length > 0 ? zeroCampLines.join('\n') : 'None — all campaigns 
       parsed = JSON.parse(raw.replace(/^```json\s*/i, '').replace(/```\s*$/, '').trim());
     } catch (_) {
       const m = raw.match(/\{[\s\S]*\}/);
-      if (!m) { console.error('[Ads/analyze] unparseable AI response:', raw.slice(0, 300)); return res.status(500).json({ error: 'AI response could not be parsed — try again' }); }
+      if (!m) { console.error('[Ads/analyze] unparseable AI response:', raw.slice(0, 300)); return res.status(500).json({ error: 'AI response could not be parsed â€” try again' }); }
       parsed = JSON.parse(m[0]);
     }
 
@@ -5159,7 +5523,7 @@ ${zeroCampLines.length > 0 ? zeroCampLines.join('\n') : 'None — all campaigns 
   }
 });
 
-// ── POST /api/ads/recommend — self-contained AI copy + keyword recs
+// â”€â”€ POST /api/ads/recommend â€” self-contained AI copy + keyword recs
 // Fetches fresh campaign and keyword data directly from Google Ads.
 // Accepts only { date_range } from the request body.
 app.post('/api/ads/recommend', async (req, res) => {
@@ -5201,7 +5565,7 @@ app.post('/api/ads/recommend', async (req, res) => {
         LIMIT 30
       `, loginCustomerId).catch(() => []),
 
-      // Search terms with spend but no conversions → negative keyword candidates
+      // Search terms with spend but no conversions â†’ negative keyword candidates
       _gadsQuery(accessToken, customerId, `
         SELECT
           search_term_view.search_term,
@@ -5224,23 +5588,23 @@ app.post('/api/ads/recommend', async (req, res) => {
       const im = Number(m.impressions || 0), cl = Number(m.clicks || 0);
       const cv = Number(m.conversions || 0), vl = Number(m.conversionsValue || 0);
       totalSpend += sp; totalImpr += im; totalClicks += cl; totalConv += cv; totalConvVal += vl;
-      return `${c.name} | ${c.status || ''} | ${c.advertisingChannelType || ''} | Spend: €${f(sp)} | CTR: ${im > 0 ? f((cl/im)*100) : '0.00'}% | Conv: ${f(cv)} | CPA: €${cv > 0 ? f(sp/cv) : 'N/A'} | ROAS: ${sp > 0 ? f(vl/sp) : '0.00'}x`;
+      return `${c.name} | ${c.status || ''} | ${c.advertisingChannelType || ''} | Spend: â‚¬${f(sp)} | CTR: ${im > 0 ? f((cl/im)*100) : '0.00'}% | Conv: ${f(cv)} | CPA: â‚¬${cv > 0 ? f(sp/cv) : 'N/A'} | ROAS: ${sp > 0 ? f(vl/sp) : '0.00'}x`;
     }).join('\n');
 
     const kwSummary = kwResults.slice(0, 20).map(r => {
       const agc = r.adGroupCriterion || {}, kw = agc.keyword || {}, m = r.metrics || {};
       const sp = Number(m.costMicros || 0) / 1e6;
       const im = Number(m.impressions || 0), cl = Number(m.clicks || 0);
-      return `[${kw.matchType || '?'}] "${kw.text}" | ${r.campaign?.name || ''} | €${f(sp)} | CTR: ${im > 0 ? f((cl/im)*100) : '0.00'}% | Conv: ${f(Number(m.conversions || 0))}`;
+      return `[${kw.matchType || '?'}] "${kw.text}" | ${r.campaign?.name || ''} | â‚¬${f(sp)} | CTR: ${im > 0 ? f((cl/im)*100) : '0.00'}% | Conv: ${f(Number(m.conversions || 0))}`;
     }).join('\n');
 
     // Search terms with spend but no conversions = negative keyword candidates
     const negCandidates = stResults.filter(r => Number(r.metrics?.conversions || 0) === 0).slice(0, 15).map(r => {
       const st = r.searchTermView || {}, m = r.metrics || {};
-      return `"${st.searchTerm}" | ${r.campaign?.name || ''} | €${f(Number(m.costMicros || 0)/1e6)} | ${m.clicks || 0} clicks | 0 conv`;
+      return `"${st.searchTerm}" | ${r.campaign?.name || ''} | â‚¬${f(Number(m.costMicros || 0)/1e6)} | ${m.clicks || 0} clicks | 0 conv`;
     }).join('\n');
 
-    const system = `You are an expert Google Ads copywriter and performance strategist. Return ONLY valid JSON — no markdown, no code fences, no explanation. Start your response with {.
+    const system = `You are an expert Google Ads copywriter and performance strategist. Return ONLY valid JSON â€” no markdown, no code fences, no explanation. Start your response with {.
 
 Return exactly this structure:
 {
@@ -5258,15 +5622,15 @@ Return exactly this structure:
 }
 
 Rules:
-- 15 headlines (benefit-focused, ≤30 chars each, varied angles)
-- 10 descriptions (include a CTA, ≤90 chars each, specific to this business)
+- 15 headlines (benefit-focused, â‰¤30 chars each, varied angles)
+- 10 descriptions (include a CTA, â‰¤90 chars each, specific to this business)
 - 10 keyword suggestions based on gaps in existing keyword coverage
 - 10 negative keywords (use the search term data provided to identify irrelevant queries)
 - One budget recommendation per campaign with actual numbers`;
 
     const userMsg = `Account: ${accountName} | Period: ${range}
 
-TOTALS — Spend: €${f(totalSpend)} | CTR: ${totalImpr > 0 ? f((totalClicks/totalImpr)*100) : '0.00'}% | Conv: ${f(totalConv)} | CPA: €${totalConv > 0 ? f(totalSpend/totalConv) : 'N/A'} | ROAS: ${totalSpend > 0 ? f(totalConvVal/totalSpend) : '0.00'}x
+TOTALS â€” Spend: â‚¬${f(totalSpend)} | CTR: ${totalImpr > 0 ? f((totalClicks/totalImpr)*100) : '0.00'}% | Conv: ${f(totalConv)} | CPA: â‚¬${totalConv > 0 ? f(totalSpend/totalConv) : 'N/A'} | ROAS: ${totalSpend > 0 ? f(totalConvVal/totalSpend) : '0.00'}x
 
 CAMPAIGNS:
 ${campSummary || 'No campaign spend in this period'}
@@ -5284,7 +5648,7 @@ ${negCandidates || 'None with significant spend'}`;
       parsed = JSON.parse(raw.replace(/^```json\s*/i, '').replace(/```\s*$/, '').trim());
     } catch (_) {
       const m = raw.match(/\{[\s\S]*\}/);
-      if (!m) { console.error('[Ads/recommend] unparseable AI response:', raw.slice(0, 300)); return res.status(500).json({ error: 'AI response could not be parsed — try again' }); }
+      if (!m) { console.error('[Ads/recommend] unparseable AI response:', raw.slice(0, 300)); return res.status(500).json({ error: 'AI response could not be parsed â€” try again' }); }
       parsed = JSON.parse(m[0]);
     }
 
@@ -5296,7 +5660,7 @@ ${negCandidates || 'None with significant spend'}`;
   }
 });
 
-// GET /api/google/diag — non-destructive diagnostic: token state + dev token presence
+// GET /api/google/diag â€” non-destructive diagnostic: token state + dev token presence
 app.get('/api/google/diag', async (req, res) => {
   try {
     const user = await getUserFromToken(req);
@@ -5324,7 +5688,7 @@ app.get('/api/google/diag', async (req, res) => {
   }
 });
 
-// GET /api/debug/routes — list all registered Express routes
+// GET /api/debug/routes â€” list all registered Express routes
 // Express 5 stores the router at app.router; Express 4 uses app._router.
 app.get('/api/debug/routes', function(req, res) {
   try {
@@ -5352,28 +5716,24 @@ app.get('/api/debug/routes', function(req, res) {
   }
 });
 
-// ── Fallback — after all routes ──────────────────────────────────
-// /api/* and /auth/* are backend-only paths — return JSON 404 so callers
+// â”€â”€ Fallback â€” after all routes â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// /api/* and /auth/* are backend-only paths â€” return JSON 404 so callers
 // get parseable JSON instead of an HTML error page.
-// All other paths (e.g. /, /signup, /login) redirect to the frontend domain
-// or serve the local app file in development. The backend never serves
-// index.html on Render because the frontend lives on orivenai.com.
+// All other paths redirect to /app (new UI served by this backend on Render,
+// or served directly from disk in local dev).
 app.use(function(req, res) {
   if (req.path.startsWith('/api/') || req.path.startsWith('/auth/')) {
     console.warn('[404]', req.method, req.url);
     return res.status(404).json({ error: 'Route not found: ' + req.method + ' ' + req.url });
   }
 
-  // On Render: frontend is a separate static site — redirect there.
+  // On Render: unknown paths redirect to the app.
   // In local dev: serve the file from the repo root if it exists.
-  var frontendBase = process.env.FRONTEND_URL
-    || (process.env.RENDER ? 'https://orivenai.com' : null);
-
-  if (frontendBase) {
-    return res.redirect(302, frontendBase + req.path + (req.url.includes('?') ? req.url.slice(req.url.indexOf('?')) : ''));
+  if (process.env.RENDER) {
+    return res.redirect(302, FRONTEND_URL + '/app');
   }
 
-  // Local dev fallback — serve the requested file; 404 cleanly if missing.
+  // Local dev fallback â€” serve the requested file; 404 cleanly if missing.
   var filePath = path.resolve(__dirname, '..', '..', req.path === '/' ? 'index.html' : req.path.replace(/^\//, ''));
   res.sendFile(filePath, function(err) {
     if (err) {
@@ -5382,7 +5742,7 @@ app.use(function(req, res) {
   });
 });
 
-// ── Global error handler — catches unhandled errors in routes ───
+// â”€â”€ Global error handler â€” catches unhandled errors in routes â”€â”€â”€
 // Express requires exactly 4 arguments for error handlers.
 app.use(function(err, req, res, _next) {
   console.error('[ServerError]', req.method, req.url, err.message);
@@ -5400,12 +5760,12 @@ app.use(function(err, req, res, _next) {
   });
 });
 
-// ── Daily cron: delete unverified accounts older than 14 days ───
-// Runs at 02:00 UTC every day. Safe to re-run — only targets accounts
+// â”€â”€ Daily cron: delete unverified accounts older than 14 days â”€â”€â”€
+// Runs at 02:00 UTC every day. Safe to re-run â€” only targets accounts
 // where email_verified = false AND created_at < 14 days ago.
 cron.schedule('0 2 * * *', async () => {
   const cutoff = new Date(Date.now() - 14 * 24 * 60 * 60 * 1000).toISOString();
-  console.log(`[Cron] Cleanup run — cutoff: ${cutoff}`);
+  console.log(`[Cron] Cleanup run â€” cutoff: ${cutoff}`);
   try {
     const { data: stale, error } = await supabaseAdmin
       .from('profiles')
@@ -5465,12 +5825,12 @@ app.listen(PORT, async () => {
     const found = _checkStack.some(function(l) {
       return l.route && l.route.path === path && l.route.methods[method.toLowerCase()];
     });
-    console.log('[Startup] Route', sig, found ? '✅ registered' : '❌ NOT FOUND');
+    console.log('[Startup] Route', sig, found ? 'âœ… registered' : 'âŒ NOT FOUND');
   });
   console.log('[Startup] META_APP_ID loaded:', !!META_APP_ID);
   console.log('[Startup] META_APP_SECRET loaded:', !!META_APP_SECRET);
 
-  // Live Supabase admin connectivity test — runs every server start
+  // Live Supabase admin connectivity test â€” runs every server start
   console.log('[Startup] Testing Supabase admin client...');
   try {
     const { data, error } = await supabaseAdmin
@@ -5479,13 +5839,13 @@ app.listen(PORT, async () => {
       .limit(1);
 
     if (error) {
-      console.error('[Startup] ❌ Supabase admin query FAILED:', error.message, '| code:', error.code);
+      console.error('[Startup] âŒ Supabase admin query FAILED:', error.message, '| code:', error.code);
       if (error.code === '42501') {
-        console.error('[Startup]    RLS blocked the query — SUPABASE_SERVICE_ROLE_KEY is wrong');
-        console.error('[Startup]    Fix: get the service_role key from Supabase Dashboard → Settings → API');
+        console.error('[Startup]    RLS blocked the query â€” SUPABASE_SERVICE_ROLE_KEY is wrong');
+        console.error('[Startup]    Fix: get the service_role key from Supabase Dashboard â†’ Settings â†’ API');
       }
     } else {
-      console.log('[Startup] ✅ Supabase admin client can read profiles table');
+      console.log('[Startup] âœ… Supabase admin client can read profiles table');
       if (data && data.length > 0) {
         console.log('[Startup]    Sample row:', JSON.stringify(data[0]));
       } else {
@@ -5493,6 +5853,7 @@ app.listen(PORT, async () => {
       }
     }
   } catch (e) {
-    console.error('[Startup] ❌ Supabase admin test threw an exception:', e.message);
+    console.error('[Startup] âŒ Supabase admin test threw an exception:', e.message);
   }
 });
+
