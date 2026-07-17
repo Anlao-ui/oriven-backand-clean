@@ -3289,7 +3289,12 @@ app.post('/api/publish/meta', requireSubscription, async (req, res) => {
       is_adset_budget_sharing_enabled: false,
     });
 
-    // 2. Ad set
+    // 2. Ad set — fetch pixel attached to the account (required for OFFSITE_CONVERSIONS)
+    const pixelData = await _metaFetch('/' + accountId + '/adspixels', accessToken, { fields: 'id,name', limit: '10' });
+    const pixelId = (pixelData.data && pixelData.data[0]) ? pixelData.data[0].id : null;
+    if (!pixelId) throw Object.assign(new Error('No Meta Pixel found for this ad account. Add a pixel in Meta Events Manager.'), { status: 400 });
+    console.log('[publish/meta] pixel_id:', pixelId);
+
     const adSetPayload = {
       name: campaignName + ' Ad Set',
       campaign_id: campaign.id,
@@ -3299,6 +3304,7 @@ app.post('/api/publish/meta', requireSubscription, async (req, res) => {
       optimization_goal: 'OFFSITE_CONVERSIONS',
       bid_strategy: 'LOWEST_COST_WITHOUT_CAP',
       is_adset_budget_sharing_enabled: false,
+      promoted_object: { pixel_id: pixelId, custom_event_type: 'PURCHASE' },
       targeting: { age_min: 18, age_max: 65, geo_locations: { countries: ['US'] } },
     };
     console.log('[META ADSET PAYLOAD]', JSON.stringify(adSetPayload, null, 2));
