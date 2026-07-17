@@ -3295,6 +3295,7 @@ app.post('/api/publish/meta', requireSubscription, async (req, res) => {
       daily_budget: 1000,
       billing_event: 'IMPRESSIONS',
       optimization_goal: 'REACH',
+      is_adset_budget_sharing_enabled: false,
       targeting: { age_min: 18, age_max: 65, geo_locations: { countries: ['US'] } },
     });
 
