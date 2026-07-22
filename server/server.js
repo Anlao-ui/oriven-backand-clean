@@ -3145,6 +3145,10 @@ app.post('/api/publish/google', requireSubscription, async (req, res) => {
 
     const { accessToken, customerId, loginCustomerId } = await _getGadsAccess(user);
 
+    console.log('[Google Publish]');
+    console.log('  user     :', user.id);
+    console.log('  customer :', customerId);
+
     const g = pkg.googleAds || {};
     const s = pkg.strategy  || {};
     const campaignName = pkg.campaignName || s.goal || 'Oriven Campaign';
@@ -3165,7 +3169,11 @@ app.post('/api/publish/google', requireSubscription, async (req, res) => {
 
     // 1. Campaign budget
     const budgetRes = await _gadsMutate('campaignBudgets', [{
-      create: { name: campaignName + ' Budget', amountMicros: 10000000, deliveryMethod: 'STANDARD' }
+      create: { name: campaignName + ' Budget', amountMicros: (function(){
+        var budgetRec = s.budgetRecommendation;
+        var amt = (typeof budgetRec === 'object' && budgetRec ? (budgetRec.amount || budgetRec.daily || 10) : (Number(budgetRec) || 10));
+        return String(Math.round(amt * 1e6));
+      })(), deliveryMethod: 'STANDARD' }
     }]);
     const budgetResourceName = budgetRes.results[0].resourceName;
 
@@ -3211,7 +3219,11 @@ app.post('/api/publish/google', requireSubscription, async (req, res) => {
           status: 'ENABLED',
           ad: {
             responsiveSearchAd: { headlines, descriptions },
-            finalUrls: ['https://example.com'],
+            finalUrls: [(function(){
+              var u = (s.landingPageUrl || g.finalUrl || pkg.websiteUrl || s.websiteUrl || '').trim();
+              if (!u) { console.warn('[publish/google] No finalUrl in package — using placeholder'); u = 'https://example.com'; }
+              return u;
+            })()],
           }
         }
       }]);
@@ -3291,6 +3303,9 @@ app.post('/api/publish/meta', requireSubscription, async (req, res) => {
 
     // 2. Ad set — fetch pixel attached to the account (required for OFFSITE_CONVERSIONS)
     const pixelData = await _metaFetch('/' + accountId + '/adspixels', accessToken, { fields: 'id,name', limit: '10' });
+    console.log('[publish/meta] pixel lookup accountId:', accountId);
+    console.log('[publish/meta] pixel lookup raw response:', JSON.stringify(pixelData, null, 2));
+    console.log('[publish/meta] pixel lookup data array:', JSON.stringify(pixelData.data));
     const pixelId = (pixelData.data && pixelData.data[0]) ? pixelData.data[0].id : null;
     if (!pixelId) throw Object.assign(new Error('No Meta Pixel found for this ad account. Add a pixel in Meta Events Manager.'), { status: 400 });
     console.log('[publish/meta] pixel_id:', pixelId);
@@ -3315,6 +3330,62 @@ app.post('/api/publish/meta', requireSubscription, async (req, res) => {
   } catch (err) {
     console.error('[publish/meta] fatal:', err.message, '| code:', err.metaCode || '—', '| subcode:', err.metaSubcode || '—');
     return res.status(err.status || 500).json({ ok: false, error: err.message || 'Failed to publish to Meta Ads' });
+  }
+});
+
+// -- Campaign Publishing -- TikTok Ads ----------------------------------------
+// POST /api/publish/tiktok
+app.post('/api/publish/tiktok', requireSubscription, async (req, res) => {
+  try {
+    const user = await getUserFromToken(req);
+    if (!user) return res.status(401).json({ ok: false, error: 'Unauthorized' });
+
+    const { pkg } = req.body || {};
+    if (!pkg) return res.status(400).json({ ok: false, error: 'Campaign package required' });
+
+    const { accessToken, advertiserId } = await _getTikTokAccess(user);
+
+    const s   = pkg.strategy  || {};
+    const tik = pkg.tiktokAds || {};
+    const campaignName = pkg.campaignName || s.goal || 'Oriven TikTok Campaign';
+
+    const OBJECTIVE_MAP = {
+      awareness:       'REACH',
+      traffic:         'TRAFFIC',
+      app_install:     'APP_INSTALL',
+      video_views:     'VIDEO_VIEWS',
+      lead_generation: 'LEAD_GENERATION',
+      conversions:     'CONVERSIONS',
+      engagement:      'ENGAGEMENT',
+      product_sales:   'PRODUCT_SALES'
+    };
+    const rawObjective = (tik.objective || s.goal || 'traffic').toLowerCase().replace(/s+/g, '_');
+    const objective = OBJECTIVE_MAP[rawObjective] || 'TRAFFIC';
+
+    const rawBudget = tik.budget || s.dailyBudget || s.budget || 30;
+    const budget = Math.max(10, parseFloat(String(rawBudget).replace(/[^0-9.]/g, '')) || 30);
+
+    console.log('[publish/tiktok] advertiser:', advertiserId);
+    console.log('[publish/tiktok] name:', campaignName, '| objective:', objective, '| budget:', budget);
+
+    const campaignData = await _tiktokPost('/campaign/create/', accessToken, {
+      advertiser_id:      advertiserId,
+      campaign_name:      campaignName,
+      objective_type:     objective,
+      budget_mode:        'BUDGET_MODE_DAY',
+      budget:             budget,
+      operation_status:   'DISABLE',
+      special_industries: []
+    });
+
+    const campaignId = campaignData && campaignData.campaign_id;
+    if (!campaignId) throw new Error('TikTok did not return a campaign_id');
+
+    console.log('[publish/tiktok] Created campaign:', campaignId);
+    return res.json({ ok: true, campaignId: String(campaignId), platform: 'tiktok', status: 'paused' });
+  } catch (err) {
+    console.error('[publish/tiktok] fatal:', err.message, '| tiktok_code:', err.tikTokCode || '--');
+    return res.status(err.status || 500).json({ ok: false, error: err.message || 'Failed to publish TikTok campaign', tiktok_code: err.tikTokCode || null });
   }
 });
 
@@ -3987,6 +4058,12 @@ app.get('/api/google-ads/campaigns', async (req, res) => {
 // â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 // TIKTOK ADS INTEGRATION
 // â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+//
+// Required Supabase columns on the `integrations` table
+// (run once in the SQL editor before using this integration):
+//   ALTER TABLE integrations
+//     ADD COLUMN IF NOT EXISTS tiktok_display_name TEXT,
+//     ADD COLUMN IF NOT EXISTS tiktok_ads_accounts JSONB DEFAULT '[]';
 
 const TIKTOK_APP_ID     = process.env.TIKTOK_APP_ID     || '';
 const TIKTOK_APP_SECRET = process.env.TIKTOK_APP_SECRET || '';
@@ -4003,7 +4080,354 @@ setInterval(function() {
   }
 }, 5 * 60 * 1000);
 
+const TIKTOK_API = 'https://business-api.tiktok.com/open_api/v1.3';
+
+// ── Helper: authenticated GET to TikTok Business API ────────────────────
+async function _tiktokFetch(path, accessToken, queryParams) {
+  const params = new URLSearchParams(queryParams || {});
+  const url = TIKTOK_API + path + (params.toString() ? '?' + params.toString() : '');
+  let res, data;
+  try {
+    res  = await fetch(url, { headers: { 'Access-Token': accessToken, 'Accept': 'application/json' } });
+    data = await res.json();
+  } catch (netErr) {
+    const e = new Error('TikTok API network error: ' + netErr.message);
+    e.status = 503;
+    throw e;
+  }
+  console.log('[TikTokAPI GET]', path, '| code:', data.code, '| message:', data.message);
+  if (data.code !== 0) {
+    const msg = data.message || ('TikTok API error code ' + data.code);
+    console.error('[TikTokAPI GET]', path, '→', msg, '| code:', data.code, '| full:', JSON.stringify(data));
+    const e = new Error(msg);
+    e.tikTokCode = data.code;
+    e.status = (data.code === 40001 || data.code === 40105 || data.code === 40106) ? 401
+             : (data.code === 40002 || data.code === 40007) ? 403
+             : 503;
+    throw e;
+  }
+  return data.data;
+}
+
+// ── Helper: authenticated POST to TikTok Business API ────────────────────
+async function _tiktokPost(path, accessToken, body) {
+  const url = TIKTOK_API + path;
+  console.log('[TikTok POST]', url);
+  console.log('[TikTok POST] body:', JSON.stringify(body, null, 2));
+  let res, data;
+  try {
+    res  = await fetch(url, {
+      method:  'POST',
+      headers: { 'Access-Token': accessToken, 'Content-Type': 'application/json' },
+      body:    JSON.stringify(body)
+    });
+    data = await res.json();
+  } catch (netErr) {
+    const e = new Error('TikTok API network error: ' + netErr.message);
+    e.status = 503;
+    throw e;
+  }
+  console.log('[TikTok POST] response code:', data.code, '| message:', data.message);
+  if (data.code !== 0) {
+    const msg = data.message || ('TikTok API error code ' + data.code);
+    console.error('[TikTokAPIPost]', path, '→', msg, '| code:', data.code);
+    console.error('[TikTokAPIPost] full body:', JSON.stringify(data));
+    const e = new Error(msg);
+    e.tikTokCode = data.code;
+    e.status = (data.code === 40001 || data.code === 40105 || data.code === 40106) ? 401
+             : (data.code === 40002 || data.code === 40007) ? 403
+             : 503;
+    throw e;
+  }
+  return data.data;
+}
+
+// ── Helper: resolve valid token + active advertiser for a user ────────────────
+async function _getTikTokAccess(user) {
+  const { data: intg, error } = await supabaseAdmin
+    .from('integrations')
+    .select('access_token, token_expiry, active_ad_account')
+    .eq('user_id', user.id)
+    .eq('provider', 'tiktok_ads')
+    .maybeSingle();
+  if (error || !intg) {
+    const e = new Error('TikTok Ads not connected'); e.status = 400; throw e;
+  }
+  if (intg.token_expiry && new Date(intg.token_expiry) < new Date()) {
+    const e = new Error('TikTok access token expired — reconnect TikTok Ads in Integrations'); e.status = 401; throw e;
+  }
+  const active = intg.active_ad_account;
+  if (!active || !active.account_id) {
+    const e = new Error('No active TikTok Ads account selected — go to Integrations and choose an account.'); e.status = 400; throw e;
+  }
+  return {
+    accessToken:  intg.access_token,
+    advertiserId: String(active.account_id),
+    accountName:  active.account_name || active.account_id
+  };
+}
+
+// ── Helper: fetch advertiser list from TikTok ────────────────────────────
+async function _fetchTikTokAdvertisers(accessToken) {
+  const url = TIKTOK_API + '/oauth2/advertiser/get/?' + new URLSearchParams({
+    access_token: accessToken,
+    app_id:       TIKTOK_APP_ID,
+    secret:       TIKTOK_APP_SECRET
+  }).toString();
+  let res, data;
+  try {
+    res  = await fetch(url, { headers: { Accept: 'application/json' } });
+    data = await res.json();
+  } catch (netErr) {
+    const e = new Error('TikTok API network error: ' + netErr.message);
+    e.status = 503;
+    throw e;
+  }
+  if (data.code !== 0) {
+    const msg = data.message || ('TikTok API error code ' + data.code);
+    console.error('[TikTok Advertisers]', msg, '| code:', data.code);
+    const e = new Error(msg); e.tikTokCode = data.code; e.status = 503; throw e;
+  }
+  return ((data.data && data.data.list) || []).map(function(a) {
+    return {
+      account_id:   String(a.advertiser_id),
+      account_name: a.advertiser_name || '',
+      currency:     a.currency        || '',
+      timezone:     a.timezone        || ''
+    };
+  });
+}
+
 // GET /api/tiktok/auth-url â€” returns TikTok OAuth authorization URL
+
+// ── Google Ads Campaign Management Routes ────────────────────────────────────
+
+// GET /api/google/campaigns – campaign list for Ads Manager
+app.get('/api/google/campaigns', async (req, res) => {
+  try {
+    const user = await getUserFromToken(req);
+    if (!user) return res.status(401).json({ error: 'Authentication required' });
+    const { accessToken, customerId, loginCustomerId, activeAccount } = await _getGadsAccess(user);
+    console.log('[Google Campaigns] Fetching | user:', user.id, '| customer:', customerId);
+    const results = await _gadsQuery(accessToken, customerId, [
+      'SELECT',
+      '  campaign.id,',
+      '  campaign.name,',
+      '  campaign.status,',
+      '  campaign.advertising_channel_type,',
+      '  campaign.start_date,',
+      '  campaign.resource_name,',
+      '  campaign_budget.amount_micros,',
+      '  campaign_budget.resource_name',
+      'FROM campaign',
+      "WHERE campaign.status != 'REMOVED'",
+      'ORDER BY campaign.id DESC',
+      'LIMIT 100'
+    ].join(' '), loginCustomerId);
+    const campaigns = results.map(function(r) {
+      const c  = r.campaign       || {};
+      const cb = r.campaignBudget || {};
+      return {
+        campaign_id:       String(c.id || ''),
+        campaign_name:     c.name || 'Unnamed',
+        campaign_resource: c.resourceName || '',
+        status:            c.status || 'UNKNOWN',
+        channel_type:      c.advertisingChannelType || '',
+        start_date:        c.startDate || null,
+        budget_micros:     Number(cb.amountMicros || 0),
+        budget_resource:   cb.resourceName || ''
+      };
+    });
+    console.log('[Google Campaigns] Returned', campaigns.length, 'campaigns | customer:', customerId);
+    res.json({ campaigns, customer_id: customerId, currency: (activeAccount && activeAccount.currency) || 'USD' });
+  } catch (err) {
+    console.error('[Google Campaigns] error:', err.message);
+    res.status(err.status || 500).json({ error: err.message });
+  }
+});
+
+// GET /api/google/campaign/:id – single campaign
+app.get('/api/google/campaign/:id', async (req, res) => {
+  try {
+    const user = await getUserFromToken(req);
+    if (!user) return res.status(401).json({ error: 'Authentication required' });
+    const campaignId = String(req.params.id).replace(/[^0-9]/g, '');
+    if (!campaignId) return res.status(400).json({ error: 'Invalid campaign ID' });
+    const { accessToken, customerId, loginCustomerId, activeAccount } = await _getGadsAccess(user);
+    console.log('[Google Campaign Fetch]', campaignId, '| user:', user.id, '| customer:', customerId);
+    const q = [
+      'SELECT campaign.id, campaign.name, campaign.status,',
+      '  campaign.advertising_channel_type, campaign.start_date,',
+      '  campaign.resource_name, campaign_budget.amount_micros,',
+      '  campaign_budget.resource_name',
+      'FROM campaign',
+      'WHERE campaign.id = ' + campaignId,
+      'LIMIT 1'
+    ].join(' ');
+    const results = await _gadsQuery(accessToken, customerId, q, loginCustomerId);
+    if (!results.length) return res.status(404).json({ error: 'Campaign not found' });
+    const r  = results[0];
+    const c  = r.campaign       || {};
+    const cb = r.campaignBudget || {};
+    res.json({ campaign: {
+      campaign_id:       String(c.id || ''),
+      campaign_name:     c.name || 'Unnamed',
+      campaign_resource: c.resourceName || '',
+      status:            c.status || 'UNKNOWN',
+      channel_type:      c.advertisingChannelType || '',
+      start_date:        c.startDate || null,
+      budget_micros:     Number(cb.amountMicros || 0),
+      budget_resource:   cb.resourceName || '',
+      currency:          (activeAccount && activeAccount.currency) || 'USD'
+    }});
+  } catch (err) {
+    console.error('[Google Campaign Fetch] FAILED', req.params.id, ':', err.message);
+    res.status(err.status || 500).json({ error: err.message });
+  }
+});
+
+// PATCH /api/google/campaign/:id – update name and/or budget
+app.patch('/api/google/campaign/:id', async (req, res) => {
+  try {
+    const user = await getUserFromToken(req);
+    if (!user) return res.status(401).json({ error: 'Authentication required' });
+    const campaignId = String(req.params.id).replace(/[^0-9]/g, '');
+    if (!campaignId) return res.status(400).json({ error: 'Invalid campaign ID' });
+    const { accessToken, customerId, loginCustomerId } = await _getGadsAccess(user);
+    const { name, daily_budget } = req.body || {};
+    if (!name && daily_budget === undefined) return res.status(400).json({ error: 'Nothing to update' });
+    const campaignResource = 'customers/' + customerId + '/campaigns/' + campaignId;
+    console.log('[Google Campaign Edit] campaign:', campaignId, '| user:', user.id, '| customer:', customerId,
+      '| name:', name || '(unchanged)', '| budget:', daily_budget !== undefined ? daily_budget : '(unchanged)');
+    if (name && String(name).trim()) {
+      await _gadsMutate(accessToken, customerId, 'campaigns', [{
+        updateMask: 'name',
+        update: { resourceName: campaignResource, name: String(name).trim() }
+      }], loginCustomerId);
+    }
+    if (daily_budget !== undefined) {
+      const bQ = 'SELECT campaign_budget.resource_name FROM campaign WHERE campaign.id = ' + campaignId + ' LIMIT 1';
+      const bR = await _gadsQuery(accessToken, customerId, bQ, loginCustomerId);
+      if (!bR.length) return res.status(404).json({ error: 'Campaign not found' });
+      const budgetResource = (bR[0].campaignBudget || {}).resourceName;
+      if (!budgetResource) return res.status(400).json({ error: 'Campaign has no detached budget' });
+      await _gadsMutate(accessToken, customerId, 'campaignBudgets', [{
+        updateMask: 'amountMicros',
+        update: { resourceName: budgetResource, amountMicros: String(Math.round(Number(daily_budget) * 1e6)) }
+      }], loginCustomerId);
+    }
+    console.log('[Google Campaign Edit] OK');
+    res.json({ ok: true });
+  } catch (err) {
+    console.error('[Google Campaign Edit] FAILED', req.params.id, '| gadsErr:', (err.gadsErrorCodes || []).join(','), '|', err.message);
+    res.status(err.status || 500).json({ error: err.message });
+  }
+});
+
+// POST /api/google/campaign/:id/pause
+app.post('/api/google/campaign/:id/pause', async (req, res) => {
+  try {
+    const user = await getUserFromToken(req);
+    if (!user) return res.status(401).json({ error: 'Authentication required' });
+    const campaignId = String(req.params.id).replace(/[^0-9]/g, '');
+    if (!campaignId) return res.status(400).json({ error: 'Invalid campaign ID' });
+    const { accessToken, customerId, loginCustomerId } = await _getGadsAccess(user);
+    console.log('[Google Campaign Pause] campaign:', campaignId, '| user:', user.id, '| customer:', customerId);
+    await _gadsMutate(accessToken, customerId, 'campaigns', [{
+      updateMask: 'status',
+      update: { resourceName: 'customers/' + customerId + '/campaigns/' + campaignId, status: 'PAUSED' }
+    }], loginCustomerId);
+    console.log('[Google Campaign Pause] OK');
+    res.json({ ok: true, status: 'PAUSED' });
+  } catch (err) {
+    console.error('[Google Campaign Pause] FAILED', req.params.id, '| gadsErr:', (err.gadsErrorCodes || []).join(','), '|', err.message);
+    res.status(err.status || 500).json({ error: err.message });
+  }
+});
+
+// POST /api/google/campaign/:id/resume
+app.post('/api/google/campaign/:id/resume', async (req, res) => {
+  try {
+    const user = await getUserFromToken(req);
+    if (!user) return res.status(401).json({ error: 'Authentication required' });
+    const campaignId = String(req.params.id).replace(/[^0-9]/g, '');
+    if (!campaignId) return res.status(400).json({ error: 'Invalid campaign ID' });
+    const { accessToken, customerId, loginCustomerId } = await _getGadsAccess(user);
+    console.log('[Google Campaign Resume] campaign:', campaignId, '| user:', user.id, '| customer:', customerId);
+    await _gadsMutate(accessToken, customerId, 'campaigns', [{
+      updateMask: 'status',
+      update: { resourceName: 'customers/' + customerId + '/campaigns/' + campaignId, status: 'ENABLED' }
+    }], loginCustomerId);
+    console.log('[Google Campaign Resume] OK');
+    res.json({ ok: true, status: 'ENABLED' });
+  } catch (err) {
+    console.error('[Google Campaign Resume] FAILED', req.params.id, '| gadsErr:', (err.gadsErrorCodes || []).join(','), '|', err.message);
+    res.status(err.status || 500).json({ error: err.message });
+  }
+});
+
+// DELETE /api/google/campaign/:id – remove campaign from Google Ads
+app.delete('/api/google/campaign/:id', async (req, res) => {
+  try {
+    const user = await getUserFromToken(req);
+    if (!user) return res.status(401).json({ error: 'Authentication required' });
+    const campaignId = String(req.params.id).replace(/[^0-9]/g, '');
+    if (!campaignId) return res.status(400).json({ error: 'Invalid campaign ID' });
+    const { accessToken, customerId, loginCustomerId } = await _getGadsAccess(user);
+    console.log('[Google Campaign Delete] campaign:', campaignId, '| user:', user.id, '| customer:', customerId);
+    await _gadsMutate(accessToken, customerId, 'campaigns', [{
+      remove: 'customers/' + customerId + '/campaigns/' + campaignId
+    }], loginCustomerId);
+    console.log('[Google Campaign Delete] OK — campaign removed');
+    res.json({ ok: true, removed: true });
+  } catch (err) {
+    console.error('[Google Campaign Delete] FAILED', req.params.id, '| gadsErr:', (err.gadsErrorCodes || []).join(','), '|', err.message);
+    res.status(err.status || 500).json({ error: err.message });
+  }
+});
+
+// GET /auth/tiktok -- server-side redirect to TikTok OAuth consent screen
+// Frontend usage: window.location.href = '/auth/tiktok?token=' + session.access_token
+app.get('/auth/tiktok', async (req, res) => {
+  const frontendBase = FRONTEND_URL;
+
+  if (!TIKTOK_APP_ID || !TIKTOK_APP_SECRET) {
+    console.warn('[TikTok OAuth] /auth/tiktok hit but credentials not configured');
+    return res.redirect(frontendBase + '/app?tiktok_error=not_configured');
+  }
+
+  const token = (req.query.token || '').toString().trim();
+  if (!token) return res.redirect(frontendBase + '/app?tiktok_error=missing_token');
+
+  let userId;
+  try {
+    const { data, error } = await supabaseAdmin.auth.getUser(token);
+    if (error || !data || !data.user) {
+      return res.redirect(frontendBase + '/app?tiktok_error=invalid_token');
+    }
+    userId = data.user.id;
+  } catch (err) {
+    console.error('[TikTok OAuth] Token validation error:', err.message);
+    return res.redirect(frontendBase + '/app?tiktok_error=auth_error');
+  }
+
+  const state = crypto.randomBytes(16).toString('hex');
+  _tiktokOAuthStates.set(state, { userId, expires: Date.now() + 10 * 60 * 1000 });
+
+  const params = new URLSearchParams({
+    app_id:       TIKTOK_APP_ID,
+    state,
+    redirect_uri: TIKTOK_REDIRECT_URI
+  });
+
+  const authUrl = 'https://business-api.tiktok.com/portal/auth?' + params.toString();
+  console.log('[TikTok OAuth /auth/tiktok] redirect_uri sent to TikTok:', TIKTOK_REDIRECT_URI);
+  console.log('[TikTok OAuth /auth/tiktok] full OAuth URL:', authUrl);
+  console.log('[TikTok OAuth] Redirecting user', userId, '→ TikTok Login');
+  res.redirect(authUrl);
+});
+
+// GET /api/tiktok/auth-url -- returns TikTok OAuth URL as JSON (for frontend-driven flows)
 app.get('/api/tiktok/auth-url', async (req, res) => {
   const user = await getUserFromToken(req);
   if (!user) return res.status(401).json({ error: 'Authentication required' });
@@ -4017,14 +4441,17 @@ app.get('/api/tiktok/auth-url', async (req, res) => {
     state:        state,
     redirect_uri: TIKTOK_REDIRECT_URI
   });
-  // TODO: replace with real TikTok auth URL once app is registered
-  res.json({ url: 'https://business-api.tiktok.com/portal/auth?' + params.toString() });
+  const authUrl = 'https://business-api.tiktok.com/portal/auth?' + params.toString();
+  console.log('[TikTok auth-url] redirect_uri sent to TikTok:', TIKTOK_REDIRECT_URI);
+  console.log('[TikTok auth-url] full OAuth URL:', authUrl);
+  res.json({ url: authUrl });
 });
 
 // GET /auth/tiktok/callback â€” OAuth callback from TikTok
 app.get('/auth/tiktok/callback', async (req, res) => {
   const { auth_code, state, error } = req.query;
   const frontendBase = FRONTEND_URL;
+  console.log('[TikTok Callback Step 1] Received | auth_code:', auth_code ? auth_code.slice(0,8)+'...' : 'MISSING', '| state:', state ? state.slice(0,8)+'...' : 'MISSING', '| error:', error || 'none');
 
   if (error) {
     console.error('[TikTok OAuth] Error from provider:', error);
@@ -4042,12 +4469,93 @@ app.get('/auth/tiktok/callback', async (req, res) => {
   _tiktokOAuthStates.delete(state);
   const userId = stateData.userId;
 
-  // TODO: exchange auth_code for access_token via TikTok token endpoint
-  // POST https://business-api.tiktok.com/open_api/v1.3/oauth2/access_token/
-  // body: { app_id, secret, auth_code }
-  // response: { data: { access_token, advertiser_ids: [], scope: "" } }
-  console.log('[TikTok OAuth] Placeholder callback â€” auth_code received, real exchange not implemented');
-  return res.redirect(frontendBase + '/app?tiktok_error=not_implemented');
+  // Step 1: Exchange auth_code for access_token
+  let accessToken, refreshToken, tokenExpiry, advertiserIds = [];
+  try {
+    const tokenRes = await fetch(TIKTOK_API + '/oauth2/access_token/', {
+      method:  'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body:    JSON.stringify({ app_id: TIKTOK_APP_ID, secret: TIKTOK_APP_SECRET, auth_code })
+    });
+    const tokenData = await tokenRes.json();
+    console.log('[TikTok Callback Step 2] Token exchange response | code:', tokenData.code, '| message:', tokenData.message, '| full data keys:', tokenData.data ? Object.keys(tokenData.data).join(',') : 'null');
+    console.log('[TikTok OAuth] Token exchange code:', tokenData.code, '| message:', tokenData.message);
+    if (tokenData.code !== 0 || !tokenData.data || !tokenData.data.access_token) {
+      console.error('[TikTok OAuth] Token exchange failed:', tokenData.message, '| code:', tokenData.code);
+      return res.redirect(frontendBase + '/app?tiktok_error=token_exchange');
+    }
+    accessToken   = tokenData.data.access_token;
+    refreshToken  = tokenData.data.refresh_token  || null;
+    advertiserIds = tokenData.data.advertiser_ids  || [];
+    // token_expiry_ts is a Unix timestamp in seconds
+    tokenExpiry   = tokenData.data.token_expiry_ts
+      ? new Date(tokenData.data.token_expiry_ts * 1000).toISOString()
+      : new Date(Date.now() + 23 * 60 * 60 * 1000).toISOString(); // 23h fallback
+    console.log('[TikTok OAuth] Access token obtained | expires:', tokenExpiry, '| advertisers:', advertiserIds.length);
+  } catch (err) {
+    console.error('[TikTok OAuth] Token exchange network error:', err.message);
+    return res.redirect(frontendBase + '/app?tiktok_error=network');
+  }
+
+  // Step 2: Fetch advertiser details (names, currencies, timezones)
+  let adAccounts = [];
+  try {
+    adAccounts = await _fetchTikTokAdvertisers(accessToken);
+    console.log('[TikTok Callback Step 3] Fetched advertisers:', adAccounts.length, '| ids from token:', advertiserIds.join(','));
+    console.log('[TikTok OAuth] Fetched', adAccounts.length, 'advertiser(s)');
+    // Filter to only the IDs the user actually authorized
+    if (advertiserIds.length > 0) {
+      const idSet = new Set(advertiserIds.map(String));
+      adAccounts = adAccounts.filter(function(a) { return idSet.has(String(a.account_id)); });
+    }
+  } catch (err) {
+    console.warn('[TikTok OAuth] Could not fetch advertiser details:', err.message);
+    // Fall back to ID-only entries
+    adAccounts = advertiserIds.map(function(id) {
+      return { account_id: String(id), account_name: 'Advertiser ' + id, currency: '', timezone: '' };
+    });
+  }
+
+  // Step 3: Pick display name from first advertiser
+  const displayName = adAccounts.length > 0
+    ? adAccounts[0].account_name
+    : (advertiserIds[0] ? String(advertiserIds[0]) : null);
+
+  // Step 4: Upsert into Supabase
+  console.log('[TikTok Callback Step 4] Upserting to Supabase | user:', userId, '| displayName:', displayName, '| accounts:', adAccounts.length, '| tokenExpiry:', tokenExpiry);
+  const { data: upsertData, error: dbError } = await supabaseAdmin
+    .from('integrations')
+    .upsert({
+      user_id:             userId,
+      provider:            'tiktok_ads',
+      tiktok_display_name: displayName,
+      access_token:        accessToken,
+      refresh_token:       refreshToken,
+      token_expiry:        tokenExpiry,
+      connected_at:        new Date().toISOString(),
+      tiktok_ads_accounts: adAccounts
+    }, { onConflict: 'user_id,provider' })
+    .select('user_id, provider, tiktok_display_name, token_expiry, tiktok_ads_accounts');
+
+  console.log('[TikTok Callback Step 4] Upsert result | error:', dbError ? dbError.message : 'none', '| returned rows:', upsertData ? upsertData.length : 0);
+
+  if (dbError) {
+    console.error('[TikTok Callback Step 4] DB upsert FAILED:', JSON.stringify(dbError));
+    return res.redirect(frontendBase + '/app?tiktok_error=db');
+  }
+
+  // Step 5: Read-back verification
+  const { data: readBack, error: readErr } = await supabaseAdmin
+    .from('integrations')
+    .select('user_id, provider, tiktok_display_name, connected_at, token_expiry, tiktok_ads_accounts, active_ad_account')
+    .eq('user_id', userId)
+    .eq('provider', 'tiktok_ads')
+    .maybeSingle();
+  console.log('[TikTok Callback Step 5] DB read-back | error:', readErr ? readErr.message : 'none');
+  console.log('[TikTok Callback Step 5] DB read-back | data:', JSON.stringify(readBack));
+
+  console.log('[TikTok Callback] Success | user:', userId, '| name:', displayName, '| accounts:', adAccounts.length);
+  return res.redirect(frontendBase + '/app?tiktok_connected=1');
 });
 
 // GET /api/tiktok/status â€” return TikTok connection status for the authenticated user
@@ -4055,6 +4563,7 @@ app.get('/api/tiktok/status', async (req, res) => {
   const user = await getUserFromToken(req);
   if (!user) return res.status(401).json({ error: 'Authentication required' });
 
+  console.log('[TikTok Status] Querying integrations for user:', user.id);
   const { data, error } = await supabaseAdmin
     .from('integrations')
     .select('tiktok_display_name, connected_at, token_expiry, tiktok_ads_accounts, active_ad_account')
@@ -4062,27 +4571,53 @@ app.get('/api/tiktok/status', async (req, res) => {
     .eq('provider', 'tiktok_ads')
     .maybeSingle();
 
-  if (error) return res.status(500).json({ error: 'Database error' });
-  if (!data)  return res.json({ connected: false });
+  console.log('[TikTok Status] Query result | error:', error ? error.message : 'none', '| data:', data ? JSON.stringify(data) : 'null');
+  if (error) { console.error('[TikTok Status] DB error:', JSON.stringify(error)); return res.status(500).json({ error: 'Database error', detail: error.message }); }
+  if (!data)  { console.log('[TikTok Status] No row found — not connected'); return res.json({ connected: false }); }
 
+  const tokenExpired = data.token_expiry && new Date(data.token_expiry) < new Date();
   res.json({
-    connected:            true,
-    tiktok_display_name:  data.tiktok_display_name  || null,
-    connected_at:         data.connected_at          || null,
-    tiktok_ads_accounts:  data.tiktok_ads_accounts   || [],
-    active_ad_account:    data.active_ad_account      || null
+    connected:           !tokenExpired,
+    status:              tokenExpired ? 'expired' : 'connected',
+    tiktok_display_name: data.tiktok_display_name  || null,
+    connected_at:        data.connected_at          || null,
+    token_expiry:        data.token_expiry           || null,
+    tiktok_ads_accounts: data.tiktok_ads_accounts   || [],
+    active_ad_account:   data.active_ad_account      || null
   });
 });
 
 // GET /api/tiktok/accounts â€” re-fetch accessible TikTok Ads accounts
 app.get('/api/tiktok/accounts', async (req, res) => {
-  const user = await getUserFromToken(req);
-  if (!user) return res.status(401).json({ error: 'Authentication required' });
-  // TODO: fetch from TikTok Business API:
-  // GET https://business-api.tiktok.com/open_api/v1.3/oauth2/advertiser/get/
-  // header: Access-Token: <access_token>
-  // Returns list of { advertiser_id, advertiser_name, currency, timezone }
-  res.status(503).json({ error: 'TikTok account fetch not yet implemented' });
+  try {
+    const user = await getUserFromToken(req);
+    if (!user) return res.status(401).json({ error: 'Authentication required' });
+
+    const { data: intg, error: fetchErr } = await supabaseAdmin
+      .from('integrations')
+      .select('access_token, token_expiry')
+      .eq('user_id', user.id)
+      .eq('provider', 'tiktok_ads')
+      .maybeSingle();
+
+    if (fetchErr) return res.status(500).json({ error: 'Database error' });
+    if (!intg)    return res.status(404).json({ error: 'TikTok Ads not connected' });
+    if (intg.token_expiry && new Date(intg.token_expiry) < new Date()) {
+      return res.status(401).json({ error: 'TikTok token expired — reconnect TikTok Ads' });
+    }
+
+    const accounts = await _fetchTikTokAdvertisers(intg.access_token);
+
+    await supabaseAdmin.from('integrations')
+      .update({ tiktok_ads_accounts: accounts })
+      .eq('user_id', user.id)
+      .eq('provider', 'tiktok_ads');
+
+    res.json({ accounts });
+  } catch (err) {
+    console.error('[tiktok/accounts]', err.message);
+    res.status(err.status || 500).json({ error: err.message, tiktok_code: err.tikTokCode || null });
+  }
 });
 
 // POST /api/tiktok/disconnect â€” delete TikTok integration row
@@ -4130,6 +4665,102 @@ app.post('/api/tiktok/active-account', async (req, res) => {
     return res.status(500).json({ error: 'Could not update active account' });
   }
   res.json({ ok: true, active_ad_account });
+});
+
+// GET /api/tiktok/campaigns -- campaign list with status and budget
+app.get('/api/tiktok/campaigns', async (req, res) => {
+  try {
+    const user = await getUserFromToken(req);
+    if (!user) return res.status(401).json({ error: 'Authentication required' });
+
+    const { accessToken, advertiserId } = await _getTikTokAccess(user);
+
+    const data = await _tiktokFetch('/campaign/get/', accessToken, {
+      advertiser_id: advertiserId,
+      fields:        JSON.stringify(['campaign_id','campaign_name','status','operation_status','objective_type','budget','budget_mode','create_time']),
+      page_size:     '100'
+    });
+
+    const campaigns = ((data && data.list) || []).map(function(c) {
+      return {
+        campaign_id:   String(c.campaign_id),
+        campaign_name: c.campaign_name   || 'Unnamed',
+        status:        c.operation_status || c.status || 'UNKNOWN',
+        objective:     c.objective_type  || '',
+        budget:        c.budget          || 0,
+        budget_mode:   c.budget_mode     || '',
+        created_time:  c.create_time ? new Date(c.create_time * 1000).toISOString() : null
+      };
+    });
+
+    console.log('[tiktok/campaigns] Returned', campaigns.length, 'campaigns | advertiser:', advertiserId);
+    res.json({ campaigns, advertiser_id: advertiserId });
+  } catch (err) {
+    console.error('[tiktok/campaigns]', err.message);
+    res.status(err.status || 500).json({ error: err.message, tiktok_code: err.tikTokCode || null });
+  }
+});
+
+// POST /api/tiktok/campaign/:id/pause
+app.post('/api/tiktok/campaign/:id/pause', async (req, res) => {
+  try {
+    const user = await getUserFromToken(req);
+    if (!user) return res.status(401).json({ error: 'Authentication required' });
+    const { accessToken, advertiserId } = await _getTikTokAccess(user);
+    const campaignId = req.params.id;
+    console.log('[TikTok Campaign Pause] campaign:', campaignId, '| advertiser:', advertiserId);
+    await _tiktokPost('/campaign/status/update/', accessToken, {
+      advertiser_id:    advertiserId,
+      campaign_ids:     [campaignId],
+      operation_status: 'DISABLE'
+    });
+    console.log('[TikTok Campaign Pause] OK');
+    res.json({ ok: true, status: 'DISABLE' });
+  } catch (err) {
+    console.error('[TikTok Campaign Pause] FAILED', req.params.id, '|', err.message);
+    res.status(err.status || 500).json({ error: err.message });
+  }
+});
+
+// POST /api/tiktok/campaign/:id/resume
+app.post('/api/tiktok/campaign/:id/resume', async (req, res) => {
+  try {
+    const user = await getUserFromToken(req);
+    if (!user) return res.status(401).json({ error: 'Authentication required' });
+    const { accessToken, advertiserId } = await _getTikTokAccess(user);
+    const campaignId = req.params.id;
+    console.log('[TikTok Campaign Resume] campaign:', campaignId, '| advertiser:', advertiserId);
+    await _tiktokPost('/campaign/status/update/', accessToken, {
+      advertiser_id:    advertiserId,
+      campaign_ids:     [campaignId],
+      operation_status: 'ENABLE'
+    });
+    console.log('[TikTok Campaign Resume] OK');
+    res.json({ ok: true, status: 'ENABLE' });
+  } catch (err) {
+    console.error('[TikTok Campaign Resume] FAILED', req.params.id, '|', err.message);
+    res.status(err.status || 500).json({ error: err.message });
+  }
+});
+
+// DELETE /api/tiktok/campaign/:id
+app.delete('/api/tiktok/campaign/:id', async (req, res) => {
+  try {
+    const user = await getUserFromToken(req);
+    if (!user) return res.status(401).json({ error: 'Authentication required' });
+    const { accessToken, advertiserId } = await _getTikTokAccess(user);
+    const campaignId = req.params.id;
+    console.log('[TikTok Campaign Delete] campaign:', campaignId, '| advertiser:', advertiserId);
+    await _tiktokPost('/campaign/delete/', accessToken, {
+      advertiser_id: advertiserId,
+      campaign_ids:  [campaignId]
+    });
+    console.log('[TikTok Campaign Delete] OK');
+    res.json({ ok: true, deleted: true });
+  } catch (err) {
+    console.error('[TikTok Campaign Delete] FAILED', req.params.id, '|', err.message);
+    res.status(err.status || 500).json({ error: err.message });
+  }
 });
 
 // GET /api/ads/tiktok/overview â€” placeholder for TikTok campaign KPIs
@@ -4216,6 +4847,72 @@ async function _metaFetch(path, accessToken, queryParams) {
 
 // â”€â”€ Helper: resolve valid token + active account for a user â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 // Throws with .status set so routes can return it directly.
+
+// ── Helper: POST to Meta Graph API (module-level) ────────────────────
+async function _metaApiPost(path, accessToken, params) {
+  const body = new URLSearchParams({ access_token: accessToken });
+  if (params) Object.entries(params).forEach(([k, v]) => body.set(k, String(v)));
+  const url = META_GRAPH + path;
+  let res, data;
+  try {
+    res  = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body });
+    data = await res.json();
+  } catch (netErr) {
+    const e = new Error('Meta API network error: ' + netErr.message);
+    e.status = 503;
+    throw e;
+  }
+  if (data.error) {
+    const e   = data.error;
+    const msg = e.message || ('Meta API error code ' + e.code);
+    console.error('[MetaAPIPost] Error at', path);
+    console.error('  message    :', e.message          || '—');
+    console.error('  code       :', e.code             || '—');
+    console.error('  subcode    :', e.error_subcode    || '—');
+    console.error('  type       :', e.type             || '—');
+    console.error('  user_title :', e.error_user_title || '—');
+    console.error('  user_msg   :', e.error_user_msg   || '—');
+    console.error('  fbtrace_id :', e.fbtrace_id       || '—');
+    console.error('  full body  :', JSON.stringify(data));
+    const err       = new Error(msg);
+    err.metaCode    = e.code;
+    err.metaSubcode = e.error_subcode;
+    err.status      = res.status;
+    throw err;
+  }
+  return data;
+}
+
+// ── Helper: DELETE via Meta Graph API ────────────────────────────────────────
+async function _metaApiDelete(path, accessToken) {
+  const url = META_GRAPH + path + '?access_token=' + encodeURIComponent(accessToken);
+  let res, data;
+  try {
+    res  = await fetch(url, { method: 'DELETE' });
+    data = await res.json();
+  } catch (netErr) {
+    const e = new Error('Meta API network error: ' + netErr.message);
+    e.status = 503;
+    throw e;
+  }
+  if (data.error) {
+    const e   = data.error;
+    const msg = e.message || ('Meta API error code ' + e.code);
+    console.error('[MetaAPIDelete] Error at', path);
+    console.error('  message    :', e.message          || '—');
+    console.error('  code       :', e.code             || '—');
+    console.error('  subcode    :', e.error_subcode    || '—');
+    console.error('  fbtrace_id :', e.fbtrace_id       || '—');
+    console.error('  full body  :', JSON.stringify(data));
+    const err       = new Error(msg);
+    err.metaCode    = e.code;
+    err.metaSubcode = e.error_subcode;
+    err.status      = res.status;
+    throw err;
+  }
+  return data;
+}
+
 async function _getMetaAccess(user) {
   const { data: intg, error } = await supabaseAdmin
     .from('integrations')
@@ -4280,6 +4977,26 @@ function _metaConversions(actions) {
     .filter(function(a) { return convTypes.has(a.action_type); })
     .reduce(function(sum, a) { return sum + Number(a.value || 0); }, 0);
 }
+
+// GET /api/meta/auth-url -- returns Meta OAuth URL as JSON (matches Google/TikTok pattern)
+// Frontend calls: apiFetch('/api/meta/auth-url').then(r => window.location.href = r.data.url)
+app.get('/api/meta/auth-url', async (req, res) => {
+  const user = await getUserFromToken(req);
+  if (!user) return res.status(401).json({ error: 'Authentication required' });
+  if (!META_APP_ID || !META_APP_SECRET) {
+    return res.status(503).json({ error: 'Meta OAuth not configured on server' });
+  }
+  const state = crypto.randomBytes(16).toString('hex');
+  _metaOAuthStates.set(state, { userId: user.id, expires: Date.now() + 10 * 60 * 1000 });
+  const params = new URLSearchParams({
+    client_id:     META_APP_ID,
+    redirect_uri:  META_REDIRECT_URI,
+    scope:         META_SCOPES,
+    state,
+    response_type: 'code'
+  });
+  res.json({ url: 'https://www.facebook.com/' + META_API_VER + '/dialog/oauth?' + params.toString() });
+});
 
 // GET /auth/meta â€” server-side redirect to Facebook Login
 // Accepts ?token= (Supabase JWT) â€” avoids a separate API call from the frontend.
@@ -4583,7 +5300,7 @@ app.get('/api/meta/campaigns', async (req, res) => {
     const datePreset = _metaDatePreset(range);
 
     const campData = await _metaFetch('/' + accountId + '/campaigns', accessToken, {
-      fields:           'id,name,status,objective,insights.date_preset(' + datePreset + '){spend,impressions,clicks,ctr,actions}',
+      fields:           'id,name,status,objective,daily_budget,lifetime_budget,created_time,insights.date_preset(' + datePreset + '){spend,impressions,clicks,ctr,actions}',
       limit:            '100',
       effective_status: '["ACTIVE","PAUSED","ARCHIVED"]'
     });
@@ -4604,7 +5321,10 @@ app.get('/api/meta/campaigns', async (req, res) => {
         impressions,
         clicks,
         ctr:           parseFloat(ctr.toFixed(4)),
-        conversions:   parseFloat(conversions.toFixed(2))
+        conversions:   parseFloat(conversions.toFixed(2)),
+        daily_budget:   c.daily_budget   ? parseInt(c.daily_budget,   10) : null,
+        lifetime_budget: c.lifetime_budget ? parseInt(c.lifetime_budget, 10) : null,
+        created_time:   c.created_time  || null
       };
     });
 
@@ -4613,6 +5333,115 @@ app.get('/api/meta/campaigns', async (req, res) => {
   } catch (err) {
     console.error('[meta/campaigns]', err.message);
     res.status(err.status || 500).json({ error: err.message, meta_code: err.metaCode || null });
+  }
+});
+
+// GET /api/meta/campaign/:id – single campaign with full fields
+app.get('/api/meta/campaign/:id', async (req, res) => {
+  try {
+    const user = await getUserFromToken(req);
+    if (!user) return res.status(401).json({ error: 'Authentication required' });
+    const { accessToken, accountId } = await _getMetaAccess(user);
+    console.log('[Meta Campaign Fetch] campaign:', req.params.id, '| user:', user.id, '| account:', accountId);
+    const data = await _metaFetch('/' + req.params.id, accessToken, {
+      fields: 'id,name,status,objective,daily_budget,lifetime_budget,created_time'
+    });
+    res.json({ campaign: data });
+  } catch (err) {
+    console.error('[Meta Campaign Fetch] FAILED campaign:', req.params.id, '|', err.message, '| metaCode:', err.metaCode || '—', '| metaSubcode:', err.metaSubcode || '—');
+    res.status(err.status || 500).json({ error: err.message });
+  }
+});
+
+// PATCH /api/meta/campaign/:id – update name and/or daily_budget
+app.patch('/api/meta/campaign/:id', async (req, res) => {
+  try {
+    const user = await getUserFromToken(req);
+    if (!user) return res.status(401).json({ error: 'Authentication required' });
+    const { accessToken, accountId } = await _getMetaAccess(user);
+    const { name, daily_budget } = req.body || {};
+    const params = {};
+    if (name !== undefined && String(name).trim()) params.name = String(name).trim();
+    if (daily_budget !== undefined) params.daily_budget = String(Math.round(Number(daily_budget)));
+    if (!Object.keys(params).length) return res.status(400).json({ error: 'Nothing to update' });
+    console.log('[Meta Campaign Edit]');
+    console.log('  campaign :', req.params.id);
+    console.log('  user     :', user.id);
+    console.log('  account  :', accountId);
+    console.log('  fields   :', JSON.stringify(params));
+    await _metaApiPost('/' + req.params.id, accessToken, params);
+    console.log('[Meta Campaign Edit] OK');
+    res.json({ ok: true });
+  } catch (err) {
+    console.error('[Meta Campaign Edit] FAILED campaign:', req.params.id, '| code:', err.metaCode || '—', '| subcode:', err.metaSubcode || '—', '|', err.message);
+    res.status(err.status || 500).json({ error: err.message });
+  }
+});
+
+// POST /api/meta/campaign/:id/pause
+app.post('/api/meta/campaign/:id/pause', async (req, res) => {
+  try {
+    const user = await getUserFromToken(req);
+    if (!user) return res.status(401).json({ error: 'Authentication required' });
+    const { accessToken, accountId } = await _getMetaAccess(user);
+    console.log('[Meta Campaign Pause]');
+    console.log('  campaign :', req.params.id);
+    console.log('  user     :', user.id);
+    console.log('  account  :', accountId);
+    await _metaApiPost('/' + req.params.id, accessToken, { status: 'PAUSED' });
+    console.log('[Meta Campaign Pause] OK');
+    res.json({ ok: true, status: 'PAUSED' });
+  } catch (err) {
+    console.error('[Meta Campaign Pause] FAILED campaign:', req.params.id, '| code:', err.metaCode || '—', '| subcode:', err.metaSubcode || '—', '|', err.message);
+    res.status(err.status || 500).json({ error: err.message });
+  }
+});
+
+// POST /api/meta/campaign/:id/resume
+app.post('/api/meta/campaign/:id/resume', async (req, res) => {
+  try {
+    const user = await getUserFromToken(req);
+    if (!user) return res.status(401).json({ error: 'Authentication required' });
+    const { accessToken, accountId } = await _getMetaAccess(user);
+    console.log('[Meta Campaign Resume]');
+    console.log('  campaign :', req.params.id);
+    console.log('  user     :', user.id);
+    console.log('  account  :', accountId);
+    await _metaApiPost('/' + req.params.id, accessToken, { status: 'ACTIVE' });
+    console.log('[Meta Campaign Resume] OK');
+    res.json({ ok: true, status: 'ACTIVE' });
+  } catch (err) {
+    console.error('[Meta Campaign Resume] FAILED campaign:', req.params.id, '| code:', err.metaCode || '—', '| subcode:', err.metaSubcode || '—', '|', err.message);
+    res.status(err.status || 500).json({ error: err.message });
+  }
+});
+
+// DELETE /api/meta/campaign/:id – archive (or true-delete) a campaign
+app.delete('/api/meta/campaign/:id', async (req, res) => {
+  try {
+    const user = await getUserFromToken(req);
+    if (!user) return res.status(401).json({ error: 'Authentication required' });
+    const { accessToken, accountId } = await _getMetaAccess(user);
+    console.log('[Meta Campaign Delete]');
+    console.log('  campaign :', req.params.id);
+    console.log('  user     :', user.id);
+    console.log('  account  :', accountId);
+
+    let deleted = false, archived = false;
+    try {
+      await _metaApiDelete('/' + req.params.id, accessToken);
+      deleted = true;
+      console.log('[Meta Campaign Delete] True delete succeeded');
+    } catch (delErr) {
+      console.log('[Meta Campaign Delete] True delete failed (code:', delErr.metaCode, ') — falling back to ARCHIVED');
+      await _metaApiPost('/' + req.params.id, accessToken, { status: 'ARCHIVED' });
+      archived = true;
+      console.log('[Meta Campaign Delete] Archived campaign');
+    }
+    res.json({ ok: true, deleted, archived });
+  } catch (err) {
+    console.error('[Meta Campaign Delete] FAILED campaign:', req.params.id, '| code:', err.metaCode || '—', '| subcode:', err.metaSubcode || '—', '|', err.message);
+    res.status(err.status || 500).json({ error: err.message });
   }
 });
 
@@ -4870,6 +5699,58 @@ async function _gadsQuery(accessToken, customerId, query, loginCustomerId) {
 }
 
 // â”€â”€ GET /api/ads/overview â€” account KPIs + campaign list â”€â”€â”€â”€â”€â”€â”€â”€â”€
+
+// ── Module-level Google Ads mutate helper ────────────────────────────────────
+async function _gadsMutate(accessToken, customerId, resource, operations, loginCustomerId) {
+  if (!GOOGLE_ADS_DEVELOPER_TOKEN) throw Object.assign(new Error('Google Ads developer token not configured'), { status: 500 });
+  const effectiveLoginId = loginCustomerId || customerId;
+  const url = 'https://googleads.googleapis.com/v24/customers/' + customerId + '/' + resource + ':mutate';
+  const headers = {
+    'Authorization':     'Bearer ' + accessToken,
+    'developer-token':   GOOGLE_ADS_DEVELOPER_TOKEN,
+    'Content-Type':      'application/json',
+    'login-customer-id': effectiveLoginId
+  };
+  console.log('[GAdsMutate] POST', resource, '| customer:', customerId, '| login:', effectiveLoginId);
+  const ctrl = new AbortController();
+  const tid  = setTimeout(() => ctrl.abort(), 20000);
+  let r, text;
+  try {
+    r    = await fetch(url, { method: 'POST', headers, body: JSON.stringify({ operations }), signal: ctrl.signal });
+    text = await r.text();
+  } catch (fetchErr) {
+    clearTimeout(tid);
+    if (fetchErr.name === 'AbortError') throw new Error('Google Ads mutate timed out (>20 s) on ' + resource);
+    throw fetchErr;
+  }
+  clearTimeout(tid);
+  let d;
+  try { d = JSON.parse(text); } catch(_) { d = {}; }
+  if (!r.ok) {
+    const gErr = (d.error && d.error.details && d.error.details[0]) || {};
+    const errCodes = [];
+    if (Array.isArray(gErr.errors)) {
+      gErr.errors.forEach(function(e) {
+        if (e.errorCode) errCodes.push(JSON.stringify(e.errorCode));
+        if (e.message)   errCodes.push('msg:' + e.message);
+      });
+    }
+    const msg = (d.error && d.error.message) || ('Google Ads API HTTP ' + r.status);
+    console.error('[GAdsMutate] FAILED', resource);
+    console.error('  message    :', msg);
+    console.error('  HTTP status:', r.status);
+    console.error('  errorCodes :', errCodes.join(' | ') || '—');
+    console.error('  full body  :', text.slice(0, 2000));
+    const err = new Error(msg);
+    err.status = r.status;
+    err.gadsStatus = d.error;
+    err.gadsErrorCodes = errCodes;
+    throw err;
+  }
+  console.log('[GAdsMutate] OK', resource, JSON.stringify((d.results || []).map(function(r){ return r.resourceName; })));
+  return d;
+}
+
 app.get('/api/ads/overview', async (req, res) => {
   let _diagCustomerId = null, _diagLoginId = null, _diagActive = null, _diagQuery = null;
   try {
@@ -5849,6 +6730,7 @@ app.listen(PORT, async () => {
     'GET /api/google-ads/campaigns'
   ];
   const _metaRoutes = [
+    'GET /api/meta/auth-url',
     'GET /auth/meta',
     'GET /auth/meta/callback',
     'GET /api/meta/status',
@@ -5859,7 +6741,20 @@ app.listen(PORT, async () => {
     'GET /api/meta/adsets',
     'GET /api/meta/ads'
   ];
-  _googleRoutes.concat(_metaRoutes).forEach(function(sig) {
+  const _tiktokRoutes = [
+    'GET /auth/tiktok',
+    'GET /auth/tiktok/callback',
+    'GET /api/tiktok/status',
+    'GET /api/tiktok/accounts',
+    'POST /api/tiktok/disconnect',
+    'POST /api/tiktok/active-account',
+    'GET /api/tiktok/campaigns',
+    'POST /api/tiktok/campaign/:id/pause',
+    'POST /api/tiktok/campaign/:id/resume',
+    'DELETE /api/tiktok/campaign/:id',
+    'POST /api/publish/tiktok'
+  ];
+  _googleRoutes.concat(_metaRoutes).concat(_tiktokRoutes).forEach(function(sig) {
     const [method, path] = sig.split(' ');
     const found = _checkStack.some(function(l) {
       return l.route && l.route.path === path && l.route.methods[method.toLowerCase()];
@@ -5868,6 +6763,8 @@ app.listen(PORT, async () => {
   });
   console.log('[Startup] META_APP_ID loaded:', !!META_APP_ID);
   console.log('[Startup] META_APP_SECRET loaded:', !!META_APP_SECRET);
+  console.log('[Startup] TIKTOK_APP_ID loaded:', !!TIKTOK_APP_ID);
+  console.log('[Startup] TIKTOK_APP_SECRET loaded:', !!TIKTOK_APP_SECRET);
 
   // Live Supabase admin connectivity test â€” runs every server start
   console.log('[Startup] Testing Supabase admin client...');
