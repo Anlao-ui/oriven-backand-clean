@@ -1,4 +1,4 @@
-﻿const express = require('express');
+const express = require('express');
 const cors = require('cors');
 const Stripe = require('stripe');
 const { createClient } = require('@supabase/supabase-js');
@@ -20,6 +20,10 @@ console.log(
 
 const app = express();
 const PORT = parseInt(process.env.PORT || '5500', 10);
+
+const toolRouter = require('./services/toolRouter');
+require('./tools/campaignTools'); // registers Tool Router entries as a side effect
+require('./tools/businessTools'); // V7 Phase 1 — registers remember_business_fact
 
 console.log(
   "[Config] Stripe key suffix:",
@@ -339,8 +343,45 @@ app.post('/api/stripe-webhook', express.raw({ type: 'application/json' }), async
 app.use(express.json({ limit: '20mb' }));
 app.use(express.urlencoded({ limit: '20mb', extended: true }));
 
+// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+// V8 â€” Creative Engine (Epic 1). Not a rewrite of the working generator
+// routes below â€” a thin, shared coordination layer: one Business Brain
+// context wrapper (reuses _gatherBusinessContext, defined further down in
+// this file), one registry of creative "kinds" for the generic
+// variations/improve/library routes, one fire-and-forget asset-recording
+// helper. Every existing generator route stays exactly as it was, plus
+// these small additions.
+// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+async function _creativeContext(userId) {
+  return userId ? _gatherBusinessContext(userId).catch(() => null) : null;
+}
+
+const CREATIVE_KINDS = {
+  headline:    { label: 'Headline' },
+  cta:         { label: 'CTA' },
+  hook:        { label: 'Hook' },
+  description: { label: 'Description' },
+  image_idea:  { label: 'Image idea' },
+  video_angle: { label: 'Video angle' },
+  emotional:   { label: 'Emotional variant' },
+  premium:     { label: 'Premium variant' },
+  luxury:      { label: 'Luxury variant' },
+  urgency:     { label: 'Urgency variant' }
+};
+
+// Fire-and-forget, same non-blocking style as services/eventLog.js â€” a
+// storage hiccup must never break a generation response.
+async function _recordCreativeAsset(userId, row) {
+  if (!userId) return;
+  try {
+    await supabaseAdmin.from('creative_assets').insert(Object.assign({ user_id: userId }, row));
+  } catch (err) {
+    console.warn('[CreativeEngine] asset record failed:', err.message);
+  }
+}
+
 // â”€â”€ Web generator â€” registered immediately after json middleware â”€â”€
-app.post('/api/generate-web', async (req, res) => {
+app.post('/api/generate-web', requireSubIfAuthed, async (req, res) => {
   const {
     brand_name, product, goal,
     style, animations, sections,
@@ -387,7 +428,8 @@ app.post('/api/generate-web', async (req, res) => {
 
   console.log('[Web] Anthropic â†’ generating brand-aligned landing page');
 
-  const systemPrompt = `You are a senior web designer and frontend engineer who builds pixel-perfect, brand-aligned landing pages.
+  const _bizCtx = await _creativeContext(req.user && req.user.id);
+  const systemPrompt = `You are a senior web designer and frontend engineer who builds pixel-perfect, brand-aligned landing pages.${_bizCtx ? `\n\nBUSINESS KNOWLEDGE (real, stored data about this business — reflect it in the copy instead of generic placeholder text):\n${_bizCtx.text}` : ''}
 
 Generate a complete, production-ready HTML landing page that STRICTLY follows the brand identity provided in the brief.
 
@@ -431,26 +473,13 @@ OUTPUT: Return ONLY the HTML document. No explanation, no preamble, no markdown 
     }
 
     console.log(`[Web] page ready â€” ${html.length} chars`);
+    _recordCreativeAsset(req.user && req.user.id, { kind: 'landing_page', title: brand_name || product || 'Landing page', content: { html }, source_route: '/api/generate-web' });
     res.json({ html });
   } catch (err) {
     console.error('[Web] Anthropic error:', err.message);
     res.status(500).json({ error: 'Failed to generate website' });
   }
 });
-
-// â”€â”€ Service key guard â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-// Call at the top of any route that needs a specific env var.
-// Returns true if the key exists; otherwise sends a 503 and returns false.
-function _requireEnv(key, res, label) {
-  const val = process.env[key];
-  if (!val || val === 'missing') {
-    const svc = label || key;
-    console.error('[503] ' + key + ' is not configured');
-    res.status(503).json({ error: svc + ' is not configured. Set ' + key + ' in environment variables.' });
-    return false;
-  }
-  return true;
-}
 
 // â”€â”€ Auth helper â€” verify Supabase JWT and return user â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 async function getUserFromToken(req) {
@@ -597,27 +626,6 @@ function extractHtml(raw) {
 }
 
 
-// â”€â”€ Extract a concise image prompt from a structured brief via AIML â”€
-async function _briefToDallEPrompt(fullBrief, contextHint) {
-  const system = `You are a visual art director. Convert the following structured brief into a single image generation prompt.
-
-The prompt must:
-- Be 150â€“300 characters
-- Describe a specific, photorealistic or design-art visual scene
-- Reference brand colours from the brief by name or hex if present â€” e.g. "neon green (#B7FF2A) accent on black background"
-- Match the composition, mood, and format requirements in the brief
-- NOT mention text, headlines, logos, buttons, or UI elements
-- NOT start with "Generate" or "Create" â€” just describe what is seen
-
-Output ONLY the image prompt. No labels. No explanation. No quotes.`;
-
-  const userMsg = (contextHint ? 'Context: ' + contextHint + '\n\n' : '')
-    + 'Brief:\n' + fullBrief.slice(0, 2000);
-
-  const result = await _aimlText('visuals-copy', system, userMsg, { max_tokens: 200 });
-  return result.trim().slice(0, 450);
-}
-
 // â”€â”€ Text â€” Anthropic only â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 // Used by: Text, Brand Assistant, Ideas, Video
 // â”€â”€ Shared helper: format BrandCore context for AI prompts â”€â”€â”€â”€â”€â”€
@@ -643,11 +651,6 @@ function _sizeToRatio(size) {
   return map[size] || '1:1';
 }
 
-function _ratioToSize(ratio) {
-  const map = { '1:1': '1024x1024', '9:16': '1024x1536', '16:9': '1536x1024' };
-  return map[ratio] || '1024x1024';
-}
-
 async function _aimlText(taskType, system, user, opts = {}) {
   const router = require('./services/modelRouter');
   const route  = router.routeTask(taskType);
@@ -671,6 +674,14 @@ async function _aimlVision(taskType, system, user, imageDataUrl, opts = {}) {
   return aiml.generateTextWithVision(system, user, imageDataUrl, { model: route.model, ...opts });
 }
 
+// Multi-turn chat — messages is a full [{role,content}, ...] array (system + history + latest user turn).
+async function _aimlChat(messages, opts = {}) {
+  const router = require('./services/modelRouter');
+  const route  = router.routeTask('chat');
+  const aiml   = require('./providers/aimlProvider');
+  return aiml.generateText(messages, null, { model: route.model, ...opts });
+}
+
 // â”€â”€ Image prompt builder â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 // Turns a brief into a focused image generation prompt via Anthropic,
 // then the caller passes the result to _aimlImage for rendering.
@@ -681,19 +692,21 @@ async function _briefToImagePrompt(brief, contextHint, taskType) {
   return _aimlText(taskType || 'visuals-copy', system, user, { max_tokens: 300 });
 }
 
-app.post('/api/generate-text', async (req, res) => {
+app.post('/api/generate-text', requireSubIfAuthed, async (req, res) => {
   const { prompt, type, brandContext } = req.body;
   if (!prompt) return res.status(400).json({ error: 'prompt is required' });
 
   const brandSection = _buildBrandSection(brandContext);
   const hasBrand     = brandSection.length > 0;
+  const _bizCtx = await _creativeContext(req.user && req.user.id);
+  const bizSection = _bizCtx ? `\n\nBUSINESS KNOWLEDGE (real, stored data about this business — use it instead of generic copy):\n${_bizCtx.text}` : '';
 
   console.log(`[Text/${type || 'default'}] Anthropic â†’ prompt received | brand: ${hasBrand ? brandContext.name : 'none'}`);
 
   let systemPrompt;
 
   if (type === 'assistant') {
-    systemPrompt = `You are a smart, helpful AI assistant for brand owners and marketers. You have deep knowledge of marketing, branding, strategy, copywriting, campaigns, content, and creative direction.${hasBrand ? `\n\nYou have access to the user's brand context below. Use it when it's relevant to their question â€” but don't reference it in every response. When someone says "hi" or makes small talk, just respond naturally and briefly.\n\nBRAND CONTEXT (draw on this when relevant):\n${brandSection}` : ''}
+    systemPrompt = `You are a smart, helpful AI assistant for brand owners and marketers. You have deep knowledge of marketing, branding, strategy, copywriting, campaigns, content, and creative direction.${hasBrand ? `\n\nYou have access to the user's brand context below. Use it when it's relevant to their question â€” but don't reference it in every response. When someone says "hi" or makes small talk, just respond naturally and briefly.\n\nBRAND CONTEXT (draw on this when relevant):\n${brandSection}` : ''}${bizSection}
 
 Be conversational and natural. Match the energy of the message â€” brief for casual, thorough for strategic questions. Think like a knowledgeable colleague, not a branded bot. Never start with hollow affirmations like "Great!" or "Absolutely!". Be direct.`;
 
@@ -702,16 +715,17 @@ Be conversational and natural. Match the energy of the message â€” brief fo
 Generate structured, professional content based on the brief provided.
 Output must be specific, intentional, and ready to use â€” no preamble, no meta-commentary, no filler.
 Never respond conversationally. Never say "Sure!" or "Great!" or explain what you're about to do.
-Just produce the requested content, formatted cleanly and directly.${hasBrand ? `\n\nBRAND CONTEXT â€” every output must reflect this brand identity exactly:\n${brandSection}` : ''}`;
+Just produce the requested content, formatted cleanly and directly.${hasBrand ? `\n\nBRAND CONTEXT â€” every output must reflect this brand identity exactly:\n${brandSection}` : ''}${bizSection}`;
 
   } else {
     systemPrompt = `You are a senior brand copywriter. Generate professional brand content based on the brief.
-Be specific and direct. No preamble or filler.${hasBrand ? `\n\nBRAND CONTEXT:\n${brandSection}` : ''}`;
+Be specific and direct. No preamble or filler.${hasBrand ? `\n\nBRAND CONTEXT:\n${brandSection}` : ''}${bizSection}`;
   }
 
   try {
     const result = await _aimlText('text-copy', systemPrompt, prompt);
     console.log(`[Text/${type || 'default'}] AIML â†’ response ready`);
+    _recordCreativeAsset(req.user && req.user.id, { kind: type || 'text', title: prompt.slice(0, 80), content: { text: result }, source_route: '/api/generate-text' });
     res.json({ result });
   } catch (err) {
     console.error(`[Text/${type || 'default'}] AIML error:`, err.message);
@@ -722,10 +736,11 @@ Be specific and direct. No preamble or filler.${hasBrand ? `\n\nBRAND CONTEXT:\n
 // â”€â”€ Email Designer â€” Anthropic â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 // Used by: Email Designer generator
 // Receives: { prompt }  Returns: { html }
-app.post('/api/generate-email', async (req, res) => {
+app.post('/api/generate-email', requireSubIfAuthed, async (req, res) => {
   const { prompt } = req.body;
   if (!prompt) return res.status(400).json({ error: 'prompt is required' });
 
+  const _bizCtx = await _creativeContext(req.user && req.user.id);
   const system = `You are an expert email marketing designer and copywriter. Generate a complete, production-ready HTML email.
 
 CRITICAL: Output ONLY raw HTML starting with <!DOCTYPE html>. No markdown. No code fences. No explanation. No """ or \`\`\` wrappers. The very first character must be <.
@@ -741,10 +756,11 @@ DESIGN REQUIREMENTS:
 - Use web-safe fonts (Arial, Georgia, Helvetica)
 - Every section must have visible content â€” no blank areas
 - CTA button must be a styled table cell with solid background colour, not a plain link
-- Write all copy based on the brief â€” zero placeholder text`;
+- Write all copy based on the brief â€” zero placeholder text${_bizCtx ? `\n\nBUSINESS KNOWLEDGE (real, stored data about this business — reflect it instead of generic placeholder copy):\n${_bizCtx.text}` : ''}`;
 
   try {
     const html = extractHtml(await _aimlText('email', system, prompt, { max_tokens: 4096 }));
+    _recordCreativeAsset(req.user && req.user.id, { kind: 'email', title: prompt.slice(0, 80), content: { html }, source_route: '/api/generate-email' });
     res.json({ html });
   } catch (err) {
     console.error('[Email] AIML error:', err.message);
@@ -759,7 +775,8 @@ app.post('/api/generate-deck', requireSubIfAuthed, async (req, res) => {
   const { prompt } = req.body;
   if (!prompt) return res.status(400).json({ error: 'prompt is required' });
 
-  const system = `You are a world-class presentation designer and strategist. Generate a complete slide deck with rich visual structure.
+  const _bizCtx = await _creativeContext(req.user && req.user.id);
+  const system = `You are a world-class presentation designer and strategist. Generate a complete slide deck with rich visual structure.${_bizCtx ? `\n\nBUSINESS KNOWLEDGE (real, stored data about this business — reflect it in the deck's content):\n${_bizCtx.text}` : ''}
 
 CRITICAL: Respond with ONLY a valid JSON object. No markdown. No code fences. No explanation. Start directly with {
 
@@ -809,6 +826,7 @@ RULES:
       console.error('[Deck] JSON parse failed:', e.message, raw.slice(0, 200));
       return res.status(500).json({ error: 'AI returned invalid slide structure. Please try again.' });
     }
+    _recordCreativeAsset(req.user && req.user.id, { kind: 'deck', title: prompt.slice(0, 80), content: { slides: parsed.slides || [] }, source_route: '/api/generate-deck' });
     res.json({ slides: parsed.slides || [] });
   } catch (err) {
     console.error('[Deck] AIML error:', err.message);
@@ -823,7 +841,8 @@ app.post('/api/generate-poster', requireSubIfAuthed, async (req, res) => {
   const { prompt } = req.body;
   if (!prompt) return res.status(400).json({ error: 'prompt is required' });
 
-  const system = `You are a world-class graphic designer. Generate a bold, complete HTML/CSS poster rendered in a browser.
+  const _bizCtx = await _creativeContext(req.user && req.user.id);
+  const system = `You are a world-class graphic designer. Generate a bold, complete HTML/CSS poster rendered in a browser.${_bizCtx ? `\n\nBUSINESS KNOWLEDGE (real, stored data about this business — reflect it in the poster's copy):\n${_bizCtx.text}` : ''}
 
 CRITICAL: Output ONLY raw HTML starting with <!DOCTYPE html>. No markdown. No code fences. No explanation. No """ or \`\`\` wrappers. The very first character must be <.
 
@@ -871,6 +890,7 @@ POSTER MUST INCLUDE ALL OF THESE SECTIONS:
 
   try {
     const html = extractHtml(await _aimlText('poster', system, prompt, { max_tokens: 4096 }));
+    _recordCreativeAsset(req.user && req.user.id, { kind: 'poster', title: prompt.slice(0, 80), content: { html }, source_route: '/api/generate-poster' });
     res.json({ html });
   } catch (err) {
     console.error('[Poster] AIML error:', err.message);
@@ -882,7 +902,8 @@ app.post('/api/generate-infographic', requireSubIfAuthed, async (req, res) => {
   const { prompt } = req.body;
   if (!prompt) return res.status(400).json({ error: 'prompt is required' });
 
-  const system = `You are a world-class infographic designer. Generate a bold, complete HTML/CSS infographic rendered in a browser.
+  const _bizCtx = await _creativeContext(req.user && req.user.id);
+  const system = `You are a world-class infographic designer. Generate a bold, complete HTML/CSS infographic rendered in a browser.${_bizCtx ? `\n\nBUSINESS KNOWLEDGE (real, stored data about this business — reflect it in the infographic's content):\n${_bizCtx.text}` : ''}
 
 CRITICAL: Output ONLY raw HTML starting with <!DOCTYPE html>. No markdown. No code fences. No explanation. No """ or \`\`\` wrappers. The very first character must be <.
 
@@ -925,6 +946,7 @@ INFOGRAPHIC MUST INCLUDE ALL OF THESE:
 
   try {
     const html = extractHtml(await _aimlText('infographic', system, prompt, { max_tokens: 4096 }));
+    _recordCreativeAsset(req.user && req.user.id, { kind: 'infographic', title: prompt.slice(0, 80), content: { html }, source_route: '/api/generate-infographic' });
     res.json({ html });
   } catch (err) {
     console.error('[Infographic] AIML error:', err.message);
@@ -982,6 +1004,9 @@ app.post('/api/generate-image', requireSubIfAuthed, async (req, res) => {
     }
   }
 
+  const _bizCtx = await _creativeContext(req.user && req.user.id);
+  if (_bizCtx) finalPrompt = finalPrompt + '\n\nBRAND CONTEXT (reflect this business\'s real identity, not generic stock imagery): ' + _bizCtx.text;
+
   // Hard safety clamp before DALL-E â€” API limit is 4000 chars
   const DALLE_MAX = 3900;
   console.log(`[Image] Prompt length before DALL-E: ${finalPrompt.length}`);
@@ -994,10 +1019,11 @@ app.post('/api/generate-image', requireSubIfAuthed, async (req, res) => {
   try {
     const imageUrl = await _aimlImage('visuals', finalPrompt, { aspect_ratio: _sizeToRatio(resolvedSize) });
     console.log('[Image] AIML â†’ image ready');
+    _recordCreativeAsset(req.user && req.user.id, { kind: imageType || 'image', title: prompt.slice(0, 80), content: { url: imageUrl }, source_route: '/api/generate-image' });
     res.json({ imageUrl });
   } catch (err) {
     console.error('[Image] AIML error:', err.message);
-    res.status(500).json({ error: 'Failed to generate image. ' + err.message });
+    res.status(500).json({ error: 'Could not generate that image right now. Please try again.' });
   }
 });
 
@@ -1006,7 +1032,7 @@ app.post('/api/generate-image', requireSubIfAuthed, async (req, res) => {
 // Receives: { prompt, size, adFormat }
 // Steps 1 and 2 (copy + visual prompt) run in parallel via Promise.all
 // to minimise total latency before DALL-E is called.
-app.post('/api/generate-ad', async (req, res) => {
+app.post('/api/generate-ad', requireSubIfAuthed, async (req, res) => {
   const { prompt, size, adFormat } = req.body;
   if (!prompt) return res.status(400).json({ error: 'prompt is required' });
 
@@ -1014,6 +1040,7 @@ app.post('/api/generate-ad', async (req, res) => {
   console.log(`[Ads] format=${adFormat || '?'} â†’ DALL-E size: ${resolvedSize}`);
   console.log('[Ads] Step 1+2 â€” Anthropic (copy + visual prompt) in parallel...');
 
+  const _bizCtx = await _creativeContext(req.user && req.user.id);
   const copySystem = `You are a senior creative advertising director.
 Generate ONE complete, platform-specific ad concept based on the brief provided.
 Every element must reflect the brand identity in the brief â€” not be generic.
@@ -1023,7 +1050,7 @@ Reply ONLY with valid JSON (no markdown fences, no extra text):
 - title: ad concept name (max 6 words, brand-specific, not generic)
 - headline: punchy, platform-optimised (max 10 words), brand tone and voice specific
 - body: benefit-led copy in brand voice (2-3 sentences, no filler, no generic phrases)
-- cta: action-driven, brand-appropriate (max 4 words)`;
+- cta: action-driven, brand-appropriate (max 4 words)${_bizCtx ? `\n\nBUSINESS KNOWLEDGE (real, stored data about this business — use it instead of generic copy):\n${_bizCtx.text}` : ''}`;
 
   let adCopy, dallePrompt;
   try {
@@ -1056,6 +1083,7 @@ Reply ONLY with valid JSON (no markdown fences, no extra text):
     console.warn('[Ads] Step 3 â€” AIML image failed (non-fatal):', err.message);
   }
 
+  _recordCreativeAsset(req.user && req.user.id, { kind: 'ad', title: adCopy.title || prompt.slice(0, 80), content: { headline: adCopy.headline, body: adCopy.body, cta: adCopy.cta, imageUrl }, source_route: '/api/generate-ad' });
   res.json({
     title:    adCopy.title    || '',
     headline: adCopy.headline || '',
@@ -1079,6 +1107,7 @@ app.post('/api/generate-campaign', requireSubIfAuthed, async (req, res) => {
 
   // â”€â”€ Step 1: Generate all variation copy + image prompts via Anthropic â”€â”€
   console.log('[Campaign] Step 1 â€” Anthropic â†’ generating campaign variations...');
+  const _bizCtx = await _creativeContext(req.user && req.user.id);
   let variations;
   try {
     const system = `You are a strategic brand marketing expert and senior creative director.
@@ -1094,7 +1123,7 @@ Rules:
 - cta: direct action CTA, max 4 words
 - imagePrompt: 100-180 character DALL-E 3 visual description for this variation.
   CRITICAL: must be 100% text-free. Must reference brand colours from the brief if provided.
-  Describes subject, composition, mood, and colour palette. No text/letters/logos/UI in image.`;
+  Describes subject, composition, mood, and colour palette. No text/letters/logos/UI in image.${_bizCtx ? `\n\nBUSINESS KNOWLEDGE (real, stored data about this business — use it instead of generic copy):\n${_bizCtx.text}` : ''}`;
 
     const raw     = await _aimlText('campaigns-copy', system, prompt);
     const cleaned = raw.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '').trim();
@@ -1137,6 +1166,7 @@ Rules:
   }));
 
   console.log(`[Campaign] Done â€” ${variationsWithImages.length} variations with images`);
+  variationsWithImages.forEach(v => _recordCreativeAsset(req.user && req.user.id, { kind: 'ad', title: v.title || prompt.slice(0, 80), content: v, source_route: '/api/generate-campaign' }));
   res.json({ variations: variationsWithImages });
 });
 
@@ -1860,7 +1890,7 @@ app.post('/api/resend-verification', async (req, res) => {
     res.json({ ok: true });
   } catch (err) {
     console.error('[ResendVerify] Failed:', err.message);
-    res.status(500).json({ error: 'Failed to send email: ' + err.message });
+    res.status(500).json({ error: 'Could not send that email right now. Please try again shortly.' });
   }
 });
 
@@ -1947,7 +1977,7 @@ app.post('/api/send-invite', requireSubscription, async (req, res) => {
     res.json({ ok: true });
   } catch (err) {
     console.error('[Invite] âŒ Failed to send invite email:', err.message);
-    res.status(500).json({ error: 'Failed to send invite email: ' + err.message });
+    res.status(500).json({ error: 'Could not send that invite right now. Please try again.' });
   }
 });
 
@@ -1955,7 +1985,16 @@ app.post('/api/send-invite', requireSubscription, async (req, res) => {
 // Receives: { brandName, description, logoStyle, styleDirection, colorPalette }
 // Returns: { imageUrl, prompt }
 app.post('/api/generate-logo', requireSubIfAuthed, async (req, res) => {
-  const { brandName, description, logoStyle, styleDirection, colorPalette } = req.body;
+  let { brandName, description, logoStyle, styleDirection, colorPalette } = req.body;
+
+  // Epic 2 â€” never ask twice: fall back to the Business Brain before failing.
+  if ((!brandName || !description || !colorPalette) && req.user) {
+    const brandCore = await _getBrandCore(req.user.id).catch(() => null);
+    const { data: profile } = await supabaseAdmin.from('business_profile').select('company_name,description').eq('user_id', req.user.id).maybeSingle();
+    brandName    = brandName    || (brandCore && brandCore.name) || (profile && profile.company_name);
+    description  = description  || (brandCore && brandCore.description) || (profile && profile.description);
+    colorPalette = colorPalette || (brandCore && brandCore.colors);
+  }
   if (!brandName) return res.status(400).json({ error: 'brandName is required' });
 
   console.log(`[LogoGen] Generating AI logo for: ${brandName}`);
@@ -1989,10 +2028,11 @@ Brand description: ${description || 'a professional brand'}`;
     console.log(`[LogoGen] Image prompt: ${imagePrompt}`);
     const imageUrl = await _aimlImage('logo', imagePrompt, { aspect_ratio: '1:1' });
     console.log(`[LogoGen] âœ… Logo generated for: ${brandName}`);
+    _recordCreativeAsset(req.user && req.user.id, { kind: 'logo', title: brandName, content: { url: imageUrl, prompt: imagePrompt }, source_route: '/api/generate-logo' });
     res.json({ imageUrl, prompt: imagePrompt });
   } catch (err) {
     console.error('[LogoGen] Error:', err.message);
-    res.status(500).json({ error: 'Failed to generate logo: ' + err.message });
+    res.status(500).json({ error: 'Could not generate that logo right now. Please try again.' });
   }
 });
 
@@ -2152,8 +2192,10 @@ app.post('/api/generate-ugc', requireSubIfAuthed, async (req, res) => {
         brandWords       ? `Key Vocabulary: ${brandWords}` : '',
       ].filter(Boolean);
 
+      const _bizCtx = await _creativeContext(user.id);
       const system = `You are an expert UGC ad scriptwriter and creative director for TikTok, Instagram Reels, and YouTube Shorts.
 ${brandLines.length ? '\nBRAND CONTEXT â€” write as if you live inside this brand:\n' + brandLines.map(l => '- ' + l).join('\n') : ''}
+${_bizCtx ? '\nBUSINESS KNOWLEDGE (real, stored data about this business):\n' + _bizCtx.text + '\n' : ''}
 AD FEELING â€” apply this to every sentence (HIGHEST PRIORITY): ${feelingInstruction}
 ${goalInstruction ? '\nAD GOAL â€” shape your hook angle and CTA around this: ' + goalInstruction : ''}
 Script rules:
@@ -2180,7 +2222,7 @@ Script rules:
       console.log('[UGC] Script generated (', script.length, 'chars ) | feeling:', adFeeling, '| goal:', adGoal || 'none');
     } catch (err) {
       console.error('[UGC] Script generation error:', err.message);
-      return res.status(500).json({ error: 'Failed to write script: ' + err.message });
+      return res.status(500).json({ error: 'Could not write that script right now. Please try again.' });
     }
   }
 
@@ -2197,10 +2239,11 @@ Script rules:
       duration:     5,
     });
     console.log('[UGC] Video submitted to AIML:', generationId, '| user:', user.id);
+    _recordCreativeAsset(user.id, { kind: 'ugc', title: (adContext || script).slice(0, 80), content: { script, generationId }, source_route: '/api/generate-ugc' });
     return res.json({ ok: true, videoId: generationId, status: 'processing' });
   } catch (err) {
     console.error('[UGC] AIML video submission error:', err.message);
-    return res.status(500).json({ error: 'Failed to submit video: ' + err.message });
+    return res.status(500).json({ error: 'Could not submit that video right now. Please try again.' });
   }
 });
 
@@ -2236,6 +2279,7 @@ app.post('/api/generate-ugc-script', requireSubIfAuthed, async (req, res) => {
   }[adFeeling] || 'Write in a genuine, natural first-person voice.';
 
   const brief = CREATOR_BRIEFS[creatorStyle] || {};
+  const _bizCtx = await _creativeContext(user.id);
 
   const system = `You are an expert UGC ad scriptwriter and creative director for TikTok, Instagram Reels, and YouTube Shorts.
 
@@ -2243,7 +2287,7 @@ CREATOR PROFILE: ${brief.context || 'An authentic creator speaking directly to c
 HOOK STYLE: ${brief.hookStyle || 'Open with a strong attention-grabbing hook.'}
 LANGUAGE GUIDE: ${brief.language || 'Conversational, first-person, authentic.'}
 CTA STYLE: ${brief.ctaStyle || 'End with a clear, natural call-to-action.'}
-
+${_bizCtx ? '\nBUSINESS KNOWLEDGE (real, stored data about this business):\n' + _bizCtx.text + '\n' : ''}
 AD FEELING (HIGHEST PRIORITY): ${feelingInstruction}
 
 Rules: first-person only, no stage directions, no brackets, output ONLY the spoken script, 8â€“12 sentences.`;
@@ -2263,10 +2307,11 @@ Rules: first-person only, no stage directions, no brackets, output ONLY the spok
     if (!script) return res.status(500).json({ error: 'Empty script generated' });
 
     console.log('[UGC] Script generated | user:', user.id);
+    _recordCreativeAsset(user.id, { kind: 'script', title: (brandName || creatorStyle || 'UGC script').slice(0, 80), content: { text: script }, source_route: '/api/generate-ugc-script' });
     return res.json({ ok: true, script });
   } catch (err) {
     console.error('[UGC] Script generation error:', err.message);
-    return res.status(500).json({ error: 'Failed to generate script: ' + err.message });
+    return res.status(500).json({ error: 'Could not generate that script right now. Please try again.' });
   }
 });
 
@@ -2295,7 +2340,7 @@ app.post('/api/generate-ugc-video', requireSubIfAuthed, async (req, res) => {
     return res.json({ ok: true, videoId: generationId, status: 'processing' });
   } catch (err) {
     console.error('[UGC/video] Error:', err.message);
-    return res.status(500).json({ error: 'Failed to start video generation: ' + err.message });
+    return res.status(500).json({ error: 'Could not start that video generation right now. Please try again.' });
   }
 });
 
@@ -2353,6 +2398,7 @@ app.post('/api/video-ads/generate', requireSubIfAuthed, async (req, res) => {
         aspect_ratio:  '16:9',
       });
       console.log('[VideoAds/image] Generation started:', result.generationId, 'â€” user:', user.id);
+      _recordCreativeAsset(user.id, { kind: 'video', title: 'Image-to-video', content: { generationId: result.generationId }, source_route: '/api/video-ads/generate' });
       return res.json({ generationId: result.generationId, status: 'queued' });
     } catch (err) {
       console.error('[VideoAds/image] error:', err.message);
@@ -2367,6 +2413,7 @@ app.post('/api/video-ads/generate', requireSubIfAuthed, async (req, res) => {
     try {
       const result = await aiml.generateVideo(script.trim(), { duration: normDuration, aspect_ratio: '16:9' });
       console.log('[VideoAds/script] Generation started:', result.generationId, 'â€” user:', user.id);
+      _recordCreativeAsset(user.id, { kind: 'video', title: script.trim().slice(0, 80), content: { generationId: result.generationId, script: script.trim() }, source_route: '/api/video-ads/generate' });
       return res.json({ generationId: result.generationId, status: 'queued' });
     } catch (err) {
       console.error('[VideoAds/script] error:', err.message);
@@ -2375,7 +2422,13 @@ app.post('/api/video-ads/generate', requireSubIfAuthed, async (req, res) => {
   }
 
   // â”€â”€ AI mode (default) â€” Anthropic builds a scene-based Kling prompt â”€â”€
-  if (!product || !product.trim()) return res.status(400).json({ error: 'Product or promotion description is required.' });
+  let _product = product;
+  if ((!_product || !_product.trim())) {
+    const { data: prods } = await supabaseAdmin.from('business_products').select('name').eq('user_id', user.id).limit(1);
+    if (prods && prods[0]) _product = prods[0].name;
+  }
+  if (!_product || !_product.trim()) return res.status(400).json({ error: 'Product or promotion description is required.' });
+  const _bizCtx = await _creativeContext(user.id);
 
   let vidPrompt;
   if (customPrompt && customPrompt.trim()) {
@@ -2398,10 +2451,10 @@ Rules:
 - Name the real product, surface, material, and any people
 - End on the product or brand name clearly readable on screen
 - No "represents", "powerful", "evokes", "dynamic" â€” only what the camera sees
-- Output ONLY the prompt. No preamble, no quotes.`;
+- Output ONLY the prompt. No preamble, no quotes.${_bizCtx ? `\n\nBUSINESS KNOWLEDGE (real, stored data about this business):\n${_bizCtx.text}` : ''}`;
 
       const userContext = [
-        `Promoting: ${product.trim()}`,
+        `Promoting: ${_product.trim()}`,
         brand    ? `Brand: ${brand}`       : '',
         style    ? `Visual style: ${style}` : '',
         goal     ? `Goal: ${goal}`          : '',
@@ -2409,12 +2462,12 @@ Rules:
         `Duration: ${normDuration} seconds`,
       ].filter(Boolean).join('\n');
 
-      console.log('[VideoAds/ai] 1. User brief:', JSON.stringify({ product: product.trim(), brand, style, goal, duration: normDuration }));
+      console.log('[VideoAds/ai] 1. User brief:', JSON.stringify({ product: _product.trim(), brand, style, goal, duration: normDuration }));
       vidPrompt = (await _aimlText('video-ads-copy', systemPrompt, userContext)).trim();
       console.log('[VideoAds/ai] 2. Generated prompt:', vidPrompt);
     } catch (err) {
       console.warn('[VideoAds/ai] Anthropic build failed, using fallback:', err.message);
-      vidPrompt = `Scene 1 [0sâ€“${t1}s]: Static close-up shot of ${product.trim()} on a clean surface, soft studio lighting. Scene 2 [${t1}sâ€“${t2}s]: Slow push-in revealing product detail, warm rim light. Scene 3 [${t2}sâ€“${normDuration}s]: Product centred, ${brand || 'brand'} name fades in below.`;
+      vidPrompt = `Scene 1 [0sâ€“${t1}s]: Static close-up shot of ${_product.trim()} on a clean surface, soft studio lighting. Scene 2 [${t1}sâ€“${t2}s]: Slow push-in revealing product detail, warm rim light. Scene 3 [${t2}sâ€“${normDuration}s]: Product centred, ${brand || 'brand'} name fades in below.`;
     }
   }
 
@@ -2422,6 +2475,7 @@ Rules:
   try {
     const result = await aiml.generateVideo(vidPrompt, { duration: normDuration, aspect_ratio: '16:9' });
     console.log('[VideoAds/ai] Generation started:', result.generationId, 'â€” user:', user.id);
+    _recordCreativeAsset(user.id, { kind: 'video', title: _product.trim().slice(0, 80), content: { generationId: result.generationId, prompt: vidPrompt }, source_route: '/api/video-ads/generate' });
     return res.json({ generationId: result.generationId, status: 'queued' });
   } catch (err) {
     console.error('[VideoAds/ai] error:', err.message);
@@ -2481,7 +2535,8 @@ app.post('/api/motion-graphics/generate', requireSubIfAuthed, async (req, res) =
   const normDuration = parseInt(duration || '5', 10) <= 7 ? 5 : 10;
 
   // Extract only the visual elements from Brand Core (colours + name â€” no brand strategy in video prompts)
-  const bc    = brandCore || {};
+  const bc    = brandCore || await _getBrandCore(user.id).catch(() => null) || {};
+  const _bizCtx = await _creativeContext(user.id);
   const bcName = bc.name || '';
   const bcClrs = (() => {
     const clrs = bc.colors || [];
@@ -2514,7 +2569,7 @@ Strict rules:
 - Specify direction: "slides in from left", "fades up", "scales from 0 to full", "rotates in"
 - Name colours when relevant
 - No "powerful", "dynamic", "evokes", "cinematic" â€” only visual facts
-- Output ONLY the prompt. No preamble, no quotes.`;
+- Output ONLY the prompt. No preamble, no quotes.${_bizCtx ? `\n\nBUSINESS KNOWLEDGE (real, stored data about this business):\n${_bizCtx.text}` : ''}`;
 
       const userContext = [
         `Animation type: ${styleInfo.label}`,
@@ -2541,6 +2596,7 @@ Strict rules:
       ? await aiml.generateVideoFromImage(logoUrl, videoPrompt, genOpts)
       : await aiml.generateVideo(videoPrompt, genOpts);
     console.log('[MotionGraphics] Generation queued:', result.generationId);
+    _recordCreativeAsset(user.id, { kind: 'video', title: styleInfo.label, content: { generationId: result.generationId, prompt: videoPrompt }, source_route: '/api/motion-graphics/generate' });
     return res.json({ generationId: result.generationId, status: 'queued' });
   } catch (err) {
     console.error('[MotionGraphics] Generation error:', err.message);
@@ -2579,8 +2635,13 @@ app.post('/api/product-shoots/generate', requireSubIfAuthed, async (req, res) =>
   const user = await getUserFromToken(req);
   if (!user) return res.status(401).json({ error: 'Unauthorized' });
 
-  const { product, style, goal, notes, customPrompt } = req.body || {};
+  let { product, style, goal, notes, customPrompt } = req.body || {};
+  if (!product || !product.trim()) {
+    const { data: prods } = await supabaseAdmin.from('business_products').select('name,description').eq('user_id', user.id).limit(1);
+    if (prods && prods[0]) product = prods[0].description ? `${prods[0].name} — ${prods[0].description}` : prods[0].name;
+  }
   if (!product || !product.trim()) return res.status(400).json({ error: 'Product description is required.' });
+  const _bizCtx = await _creativeContext(user.id);
 
   // Derive aspect ratio from goal (ecommerce/social â†’ square; advertising/website â†’ wide)
   const ratioFromGoal = { ecommerce: '1:1', social: '1:1', advertising: '16:9', website: '16:9' };
@@ -2613,7 +2674,7 @@ Write a single image generation prompt for gpt-image-1 to create commercial prod
 The image must look like a real photograph â€” not a render, illustration, or CGI.
 Include: lighting setup, camera angle, depth of field, surface, and background.
 Keep the product as the clear hero of the frame.
-Output ONLY the prompt. 2â€“3 sentences. No quotes, no preamble.`;
+Output ONLY the prompt. 2â€“3 sentences. No quotes, no preamble.${_bizCtx ? `\n\nBUSINESS KNOWLEDGE (real, stored data about this business):\n${_bizCtx.text}` : ''}`;
 
       const brief = [
         `Product: ${product.trim()}`,
@@ -2639,10 +2700,977 @@ Output ONLY the prompt. 2â€“3 sentences. No quotes, no preamble.`;
   try {
     const url = await _aimlImage('product-shoots', dallEPrompt, { aspect_ratio: aimlRatio });
     console.log('[ProductShoots] Image generated successfully');
+    _recordCreativeAsset(user.id, { kind: 'image', platform: null, product_name: product.trim().slice(0, 80), title: product.trim().slice(0, 80), content: { url }, source_route: '/api/product-shoots/generate' });
     return res.json({ images: [url], ratio: aimlRatio, prompt: dallEPrompt });
   } catch (err) {
     console.error('[ProductShoots] Error:', err.message);
     return res.status(500).json({ error: err.message || 'Image generation failed.' });
+  }
+});
+
+// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+// V8 â€” Creative Variations (Epic 6) + One-Click Improve (Epic 9). Two
+// generic routes instead of ten/fourteen hardcoded ones â€” a `kind`/`action`
+// parameter selects the style, same "one reusable pipeline" principle as
+// the rest of the Creative Engine.
+// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+app.post('/api/creative/variations', requireSubIfAuthed, async (req, res) => {
+  try {
+    const { kind, seed, count } = req.body || {};
+    if (!CREATIVE_KINDS[kind]) return res.status(400).json({ error: `kind must be one of: ${Object.keys(CREATIVE_KINDS).join(', ')}` });
+    if (!seed || !String(seed).trim()) return res.status(400).json({ error: 'seed is required' });
+    const n = Math.min(20, Math.max(1, parseInt(count, 10) || 10));
+
+    const _bizCtx = await _creativeContext(req.user && req.user.id);
+    const system = `You are a senior creative copywriter. Generate ${n} distinct ${CREATIVE_KINDS[kind].label} variations based on the seed provided. Each must be genuinely different â€” a different angle, not a rephrasing. Reply ONLY with a valid JSON array of ${n} strings, no markdown, no extra text.${_bizCtx ? `\n\nBUSINESS KNOWLEDGE (real, stored data about this business â€” use it instead of generic copy):\n${_bizCtx.text}` : ''}`;
+    const raw = await _aimlText('creative-variations', system, `${CREATIVE_KINDS[kind].label} seed: ${seed}`, { max_tokens: 1200 });
+    const cleaned = raw.replace(/^```(?:json)?\s*/i, '').replace(/```\s*$/, '').trim();
+    let variations = [];
+    try {
+      variations = JSON.parse(cleaned);
+      if (!Array.isArray(variations)) throw new Error('not array');
+    } catch (_) {
+      variations = cleaned.split('\n').map(l => l.replace(/^[\d.\-\*\s]+/, '').trim()).filter(Boolean).slice(0, n);
+    }
+
+    _recordCreativeAsset(req.user && req.user.id, { kind, title: String(seed).slice(0, 80), content: { variations }, source_route: '/api/creative/variations' });
+    res.json({ kind, variations });
+  } catch (err) {
+    console.error('[creative/variations]', err.message);
+    res.status(500).json({ error: 'Could not generate variations right now.' });
+  }
+});
+
+const CREATIVE_IMPROVE_ACTIONS = {
+  rewrite:         'Rewrite this completely with a fresh angle, keeping the same core message.',
+  improve:         'Improve the clarity, impact, and persuasiveness of this text without changing its core meaning.',
+  shorten:         'Shorten this significantly while keeping the core message and impact.',
+  expand:          'Expand this with more detail and persuasive depth, staying on message.',
+  premium:         'Rewrite this in a premium, elevated tone.',
+  luxury:          'Rewrite this in a luxury, aspirational tone.',
+  funny:           'Rewrite this with genuine humor and wit.',
+  professional:    'Rewrite this in a professional, polished tone.',
+  minimal:         'Rewrite this as minimally and cleanly as possible â€” strip anything not essential.',
+  high_ctr:        'Rewrite this to maximise click-through rate â€” a sharper hook, stronger curiosity or urgency.',
+  high_roas:       'Rewrite this to maximise conversion intent â€” clearer value, stronger call to action.',
+  high_engagement: 'Rewrite this to maximise engagement â€” more conversational, more shareable.',
+  translate:       'Translate this into the target language, preserving tone and intent.',
+  localize:        'Localize this for the target language and culture â€” adapt idioms and references, not just words.'
+};
+
+// V8 Phase 2 (Epic 6) â€” friendly labels for the version an /improve call
+// creates when it's linked to an existing asset via assetId.
+const CREATIVE_VERSION_LABELS = {
+  rewrite: 'Rewritten', improve: 'Improved', shorten: 'Shortened', expand: 'Expanded',
+  premium: 'Premium', luxury: 'Luxury', funny: 'Funny', professional: 'Professional',
+  minimal: 'Minimal', high_ctr: 'High CTR', high_roas: 'High ROAS', high_engagement: 'High Engagement',
+  translate: 'Translated', localize: 'Localized'
+};
+
+app.post('/api/creative/improve', requireSubIfAuthed, async (req, res) => {
+  try {
+    const { text, action, targetLanguage, assetId } = req.body || {};
+    if (!text || !String(text).trim()) return res.status(400).json({ error: 'text is required' });
+    const instruction = CREATIVE_IMPROVE_ACTIONS[action];
+    if (!instruction) return res.status(400).json({ error: `action must be one of: ${Object.keys(CREATIVE_IMPROVE_ACTIONS).join(', ')}` });
+    if ((action === 'translate' || action === 'localize') && !targetLanguage) return res.status(400).json({ error: 'targetLanguage is required for translate/localize' });
+
+    const _bizCtx = await _creativeContext(req.user && req.user.id);
+    const system = `You are a senior copy editor. ${instruction}${(action === 'translate' || action === 'localize') ? ` Target language: ${targetLanguage}.` : ''} Reply ONLY with the resulting text â€” no preamble, no quotes, no explanation.${_bizCtx ? `\n\nBUSINESS KNOWLEDGE (keep this brand's real identity consistent):\n${_bizCtx.text}` : ''}`;
+    const result = (await _aimlText('creative-improve', system, String(text), { max_tokens: 1000 })).trim();
+
+    // Epic 6 â€” Version History. If this improve call is linked to a real
+    // asset, create a new version row in that asset's family instead of a
+    // standalone "improved_text" record.
+    let versionId = null;
+    if (assetId && req.user) {
+      try {
+        const { data: parent } = await supabaseAdmin.from('creative_assets').select('*').eq('id', assetId).eq('user_id', req.user.id).maybeSingle();
+        if (parent) {
+          const versionLabel = CREATIVE_VERSION_LABELS[action] || action;
+          const newContent = Object.assign({}, parent.content, { text: result });
+          const { data: versionRow, error: vErr } = await supabaseAdmin.from('creative_assets').insert({
+            user_id: req.user.id, kind: parent.kind, platform: parent.platform,
+            campaign_name: parent.campaign_name, product_name: parent.product_name,
+            title: parent.title, content: newContent, source_route: '/api/creative/improve',
+            parent_asset_id: assetId, version_label: versionLabel, is_current: true, status: 'draft'
+          }).select().maybeSingle();
+          if (vErr) throw vErr;
+          if (versionRow) {
+            await supabaseAdmin.from('creative_assets').update({ is_current: false }).eq('id', assetId);
+            versionId = versionRow.id;
+          }
+        }
+      } catch (linkErr) {
+        console.warn('[creative/improve] versioning failed (non-fatal):', linkErr.message);
+      }
+    }
+    if (!versionId) {
+      _recordCreativeAsset(req.user && req.user.id, { kind: 'improved_text', title: String(text).slice(0, 80), content: { original: text, action, result }, source_route: '/api/creative/improve' });
+    }
+
+    res.json({ result, action, versionId });
+  } catch (err) {
+    console.error('[creative/improve]', err.message);
+    res.status(500).json({ error: 'Could not improve that right now.' });
+  }
+});
+
+// â”€â”€ Ad Creative Builder (Epic 5) â”€â”€ one product brief in, three
+// platform-adapted ad packages out. Calls _generateAdPackage (defined
+// further down, next to /api/ai/create-ad which it also powers) once per
+// platform in parallel â€” same Promise.allSettled pattern already used by
+// /api/generate-campaign for parallel image generation. Google/Meta/TikTok
+// only â€” Performance Max, Pinterest, and LinkedIn have no platform
+// integration in this codebase to build on yet.
+app.post('/api/creative/campaign-suite', requireSubIfAuthed, async (req, res) => {
+  try {
+    const { product, goal, brandCore, productImages } = req.body || {};
+    if (!product) return res.status(400).json({ error: 'product is required' });
+
+    const platforms = ['google', 'meta', 'tiktok'];
+    const results = await Promise.allSettled(
+      platforms.map(platform => _generateAdPackage({ user: req.user, product, goal, platform, brandCore, productImages }))
+    );
+
+    const packages = {};
+    const errors = {};
+    platforms.forEach((platform, i) => {
+      if (results[i].status === 'fulfilled') packages[platform] = results[i].value;
+      else errors[platform] = results[i].reason && results[i].reason.message;
+    });
+
+    if (!Object.keys(packages).length) return res.status(500).json({ ok: false, error: 'Generation failed on every platform.', errors });
+    res.json({ ok: true, packages, errors: Object.keys(errors).length ? errors : undefined });
+  } catch (err) {
+    console.error('[creative/campaign-suite]', err.message);
+    res.status(500).json({ ok: false, error: 'Could not generate the campaign suite right now.' });
+  }
+});
+
+// â”€â”€ Asset Library (Epic 10, extended V8 Phase 2 Epics 8/9) â”€â”€ the first
+// real persistent storage for generated creative in this codebase. Every
+// generator route writes here via _recordCreativeAsset (fire-and-forget).
+app.get('/api/creative/assets', async (req, res) => {
+  try {
+    const user = await getUserFromToken(req);
+    if (!user) return res.status(401).json({ error: 'Authentication required' });
+    const { kind, platform, product_name, campaign_name, since, favorite, status, archived, sort } = req.query || {};
+    let q = supabaseAdmin.from('creative_assets').select('*').eq('user_id', user.id);
+    if (kind)         q = q.eq('kind', kind);
+    if (platform)     q = q.eq('platform', platform);
+    if (product_name)  q = q.eq('product_name', product_name);
+    if (campaign_name) q = q.eq('campaign_name', campaign_name);
+    if (since)        q = q.gte('created_at', since);
+    if (favorite === 'true') q = q.eq('favorite', true);
+    if (status)       q = q.eq('status', status);
+    // Archived assets are hidden by default (Epic 9) unless explicitly requested.
+    if (archived === 'true') q = q.eq('archived', true);
+    else if (archived !== 'all') q = q.eq('archived', false);
+    q = q.order('created_at', { ascending: false }).limit(200);
+    const { data, error } = await q;
+    if (error) throw error;
+    let assets = data || [];
+    // Epic 8 "Performance" filter â€” honestly scoped to the creative SCORE
+    // (predicted quality), since no per-asset measured ad performance is
+    // linked anywhere in this codebase; real performance lives on the ad
+    // platforms, keyed by campaign, not by individual generated creative.
+    if (sort === 'score') {
+      assets = assets.slice().sort((a, b) => ((b.scores && b.scores.confidence) || 0) - ((a.scores && a.scores.confidence) || 0));
+    }
+    res.json({ assets });
+  } catch (err) {
+    console.error('[creative/assets GET]', err.message);
+    res.status(500).json({ error: 'Could not load your creative assets.' });
+  }
+});
+
+app.delete('/api/creative/assets/:id', async (req, res) => {
+  try {
+    const user = await getUserFromToken(req);
+    if (!user) return res.status(401).json({ error: 'Authentication required' });
+    const { error } = await supabaseAdmin.from('creative_assets').delete().eq('id', req.params.id).eq('user_id', user.id);
+    if (error) throw error;
+    res.json({ ok: true });
+  } catch (err) {
+    console.error('[creative/assets DELETE]', err.message);
+    res.status(500).json({ error: 'Could not delete that asset.' });
+  }
+});
+
+// Epic 9 â€” one generic partial-update route for favorite/archived/status/notes
+// instead of four separate endpoints.
+const CREATIVE_ASSET_STATUSES = ['draft', 'needs_improvement', 'ready', 'approved', 'published', 'rejected'];
+app.patch('/api/creative/assets/:id', async (req, res) => {
+  try {
+    const user = await getUserFromToken(req);
+    if (!user) return res.status(401).json({ error: 'Authentication required' });
+    const { favorite, archived, status, notes } = req.body || {};
+    if (status !== undefined && !CREATIVE_ASSET_STATUSES.includes(status)) {
+      return res.status(400).json({ error: `status must be one of: ${CREATIVE_ASSET_STATUSES.join(', ')}` });
+    }
+    const row = {};
+    if (favorite !== undefined) row.favorite = !!favorite;
+    if (archived !== undefined) row.archived = !!archived;
+    if (status !== undefined)   row.status = status;
+    if (notes !== undefined)    row.notes = notes;
+    if (!Object.keys(row).length) return res.status(400).json({ error: 'Nothing to update.' });
+    const { data, error } = await supabaseAdmin.from('creative_assets').update(row).eq('id', req.params.id).eq('user_id', user.id).select().maybeSingle();
+    if (error) throw error;
+    if (!data) return res.status(404).json({ error: 'Asset not found.' });
+    res.json({ asset: data });
+  } catch (err) {
+    console.error('[creative/assets PATCH]', err.message);
+    res.status(500).json({ error: 'Could not update that asset.' });
+  }
+});
+
+// Epic 9 â€” Duplicate. Copies content into a fresh, unlinked row (new
+// version family, status reset) rather than mutating the original.
+app.post('/api/creative/assets/:id/duplicate', async (req, res) => {
+  try {
+    const user = await getUserFromToken(req);
+    if (!user) return res.status(401).json({ error: 'Authentication required' });
+    const { data: src, error: srcErr } = await supabaseAdmin.from('creative_assets').select('*').eq('id', req.params.id).eq('user_id', user.id).maybeSingle();
+    if (srcErr) throw srcErr;
+    if (!src) return res.status(404).json({ error: 'Asset not found.' });
+    const { data, error } = await supabaseAdmin.from('creative_assets').insert({
+      user_id: user.id, kind: src.kind, platform: src.platform,
+      campaign_name: src.campaign_name, product_name: src.product_name,
+      title: (src.title || 'Untitled') + ' (copy)', content: src.content,
+      source_route: '/api/creative/assets/:id/duplicate', status: 'draft'
+    }).select().maybeSingle();
+    if (error) throw error;
+    res.json({ asset: data });
+  } catch (err) {
+    console.error('[creative/assets duplicate]', err.message);
+    res.status(500).json({ error: 'Could not duplicate that asset.' });
+  }
+});
+
+// Epic 6 â€” Version History. Walks the family in both directions (parent
+// chain + children) rather than needing a recursive SQL CTE, since chains
+// are short in practice (a handful of improve steps).
+async function _getVersionChain(userId, assetId) {
+  const { data: seed } = await supabaseAdmin.from('creative_assets').select('*').eq('id', assetId).eq('user_id', userId).maybeSingle();
+  if (!seed) return [];
+  const byId = { [seed.id]: seed };
+
+  // Walk up to the root via parent_asset_id.
+  let cur = seed;
+  let hops = 0;
+  while (cur.parent_asset_id && hops < 20) {
+    const { data: parent } = await supabaseAdmin.from('creative_assets').select('*').eq('id', cur.parent_asset_id).eq('user_id', userId).maybeSingle();
+    if (!parent || byId[parent.id]) break;
+    byId[parent.id] = parent;
+    cur = parent;
+    hops++;
+  }
+
+  // Pull every descendant of the root (one query, since parent_asset_id is
+  // indexed and version families are small).
+  const rootId = cur.id;
+  const { data: descendants } = await supabaseAdmin.from('creative_assets').select('*').eq('user_id', userId).eq('parent_asset_id', rootId);
+  (descendants || []).forEach(d => { byId[d.id] = d; });
+  // One more hop for grandchildren (typical max depth for this feature).
+  const secondLevelIds = (descendants || []).map(d => d.id);
+  if (secondLevelIds.length) {
+    const { data: grandchildren } = await supabaseAdmin.from('creative_assets').select('*').eq('user_id', userId).in('parent_asset_id', secondLevelIds);
+    (grandchildren || []).forEach(d => { byId[d.id] = d; });
+  }
+
+  return Object.values(byId).sort((a, b) => new Date(a.created_at) - new Date(b.created_at));
+}
+
+app.get('/api/creative/assets/:id/versions', async (req, res) => {
+  try {
+    const user = await getUserFromToken(req);
+    if (!user) return res.status(401).json({ error: 'Authentication required' });
+    const versions = await _getVersionChain(user.id, req.params.id);
+    res.json({ versions });
+  } catch (err) {
+    console.error('[creative/assets versions]', err.message);
+    res.status(500).json({ error: 'Could not load version history.' });
+  }
+});
+
+// Epic 6 â€” Restore. Flips is_current within the family without duplicating
+// content, so "restoring" an old version makes it the active one again.
+app.post('/api/creative/assets/:id/restore', async (req, res) => {
+  try {
+    const user = await getUserFromToken(req);
+    if (!user) return res.status(401).json({ error: 'Authentication required' });
+    const chain = await _getVersionChain(user.id, req.params.id);
+    if (!chain.length) return res.status(404).json({ error: 'Asset not found.' });
+    const target = chain.find(v => v.id === req.params.id);
+    if (!target) return res.status(404).json({ error: 'Asset not found.' });
+    await Promise.all(chain.map(v =>
+      supabaseAdmin.from('creative_assets').update({ is_current: v.id === req.params.id }).eq('id', v.id).eq('user_id', user.id)
+    ));
+    res.json({ asset: Object.assign({}, target, { is_current: true }) });
+  } catch (err) {
+    console.error('[creative/assets restore]', err.message);
+    res.status(500).json({ error: 'Could not restore that version.' });
+  }
+});
+
+// Epic 9 â€” Comments. User-attributed even for a single-user account today,
+// so the same table works unmodified once real team support exists.
+app.get('/api/creative/assets/:id/comments', async (req, res) => {
+  try {
+    const user = await getUserFromToken(req);
+    if (!user) return res.status(401).json({ error: 'Authentication required' });
+    const { data, error } = await supabaseAdmin.from('creative_asset_comments').select('*').eq('asset_id', req.params.id).order('created_at', { ascending: true });
+    if (error) throw error;
+    res.json({ comments: data || [] });
+  } catch (err) {
+    console.error('[creative/assets comments GET]', err.message);
+    res.status(500).json({ error: 'Could not load comments.' });
+  }
+});
+
+app.post('/api/creative/assets/:id/comments', async (req, res) => {
+  try {
+    const user = await getUserFromToken(req);
+    if (!user) return res.status(401).json({ error: 'Authentication required' });
+    const { content } = req.body || {};
+    if (!content || !String(content).trim()) return res.status(400).json({ error: 'content is required' });
+    const { data: asset } = await supabaseAdmin.from('creative_assets').select('id').eq('id', req.params.id).eq('user_id', user.id).maybeSingle();
+    if (!asset) return res.status(404).json({ error: 'Asset not found.' });
+    const { data, error } = await supabaseAdmin.from('creative_asset_comments').insert({ asset_id: req.params.id, user_id: user.id, content: String(content).trim() }).select().maybeSingle();
+    if (error) throw error;
+    res.json({ comment: data });
+  } catch (err) {
+    console.error('[creative/assets comments POST]', err.message);
+    res.status(500).json({ error: 'Could not save that comment.' });
+  }
+});
+
+// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+// V8 Phase 2 â€” Creative Scoring (Epic 3) + Creative Director (Epic 4).
+// "Never fake confidence" applies here the same way it does everywhere
+// else in this app: sub-scores that CAN be calculated from real text are
+// calculated (readability, platform fit, brand consistency, evidence
+// confidence); sub-scores that genuinely require judgment (CTR, attention,
+// brand fit, emotion, conversion potential) are AI-estimated and labelled
+// as predictions, never presented as measured fact â€” exactly the same
+// honesty split _generateAdPackage's performancePrediction block already
+// uses for ads, generalised here to any creative kind.
+// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+function _extractTextFromContent(content) {
+  const parts = [];
+  (function walk(v) {
+    if (v == null) return;
+    if (typeof v === 'string') { if (v.length < 2000) parts.push(v); return; }
+    if (Array.isArray(v)) { v.forEach(walk); return; }
+    if (typeof v === 'object') { Object.keys(v).forEach(k => { if (k !== 'url' && k !== 'html') walk(v[k]); }); }
+  })(content);
+  return parts.join(' ').replace(/\s+/g, ' ').trim();
+}
+
+function _countSyllables(word) {
+  word = word.toLowerCase().replace(/[^a-z]/g, '');
+  if (!word) return 0;
+  const matches = word.match(/[aeiouy]+/g);
+  let count = matches ? matches.length : 1;
+  if (word.endsWith('e') && count > 1) count--;
+  return Math.max(1, count);
+}
+
+function _computeReadability(text) {
+  if (!text || text.trim().length < 10) return { value: null, why: 'Not enough text to analyse.' };
+  const sentences = text.split(/[.!?]+/).filter(s => s.trim().length > 0);
+  const words = text.split(/\s+/).filter(Boolean);
+  const syllables = words.reduce((s, w) => s + _countSyllables(w), 0);
+  const sCount = Math.max(1, sentences.length), wCount = Math.max(1, words.length);
+  const flesch = 206.835 - 1.015 * (wCount / sCount) - 84.6 * (syllables / wCount);
+  const value = Math.round(Math.max(0, Math.min(100, flesch)));
+  return { value, why: `${wCount} words, ${sCount} sentence(s), averaging ${(wCount / sCount).toFixed(1)} words per sentence.` };
+}
+
+const CREATIVE_PLATFORM_TEXT_LIMITS = { google: 90, meta: 125, tiktok: 150, email: 600, pinterest: 100, linkedin: 150 };
+function _computePlatformFit(text, platform, kind) {
+  if (!platform || !CREATIVE_PLATFORM_TEXT_LIMITS[platform] || !text) return null;
+  const limit = CREATIVE_PLATFORM_TEXT_LIMITS[platform];
+  const len = text.length;
+  const ratio = len / limit;
+  const value = Math.round(Math.max(0, Math.min(100, 100 - Math.max(0, ratio - 1) * 100)));
+  return { value, why: `${len} characters vs a typical ${limit}-character norm for ${platform}.` };
+}
+
+function _computeConsistency(text, bizCtx, brandCore) {
+  const brandText = [brandCore && brandCore.toneOfVoice, brandCore && brandCore.usp, bizCtx && bizCtx.text].filter(Boolean).join(' ');
+  if (!text || text.trim().length < 5 || !brandText.trim()) return { value: null, why: 'Not enough stored brand context to compare against yet.' };
+  const norm = s => new Set(String(s).toLowerCase().match(/[a-z]{4,}/g) || []);
+  const a = norm(text), b = norm(brandText);
+  if (!a.size || !b.size) return { value: null, why: 'Not enough text to compare.' };
+  let overlap = 0;
+  a.forEach(w => { if (b.has(w)) overlap++; });
+  const value = Math.round(Math.min(100, (overlap / Math.min(a.size, 10)) * 100));
+  return { value, why: `${overlap} shared meaningful word(s) with your stored brand voice/USP.` };
+}
+
+// Epic 4 â€” Creative Director. Not a separate agent: notes are derived from
+// the same scores just computed, plus real accumulated business_learnings
+// (V7's Learning Engine) â€” "this resembles/differs from a real winner",
+// not an invented opinion.
+async function _buildDirectorNotes({ user, scores, platform }) {
+  const notes = [];
+  if (scores.consistency && scores.consistency.value != null && scores.consistency.value < 50) {
+    notes.push({ severity: 'medium', title: 'Brand voice may be off', detail: 'This creative doesn\'t closely match your stored brand tone and USP.', message: 'Help me rewrite this to better match my brand voice.' });
+  }
+  if (scores.platformFit && scores.platformFit.value != null && scores.platformFit.value < 60) {
+    notes.push({ severity: 'low', title: `May not fit ${platform || 'this platform'} well`, detail: scores.platformFit.why, message: `Help me adapt this to fit ${platform || 'the platform'} better.` });
+  }
+  if (scores.readability && scores.readability.value != null && scores.readability.value < 40) {
+    notes.push({ severity: 'low', title: 'May be hard to read quickly', detail: 'Sentence and word complexity are high for a scroll-stopping creative.', message: 'Help me simplify this so it reads faster.' });
+  }
+  if (user) {
+    try {
+      const learnings = await _fetchActiveLearnings(user.id, { limit: 20 });
+      learnings.filter(l => ['winning_headline', 'winning_cta', 'winning_messaging', 'creative_pattern'].includes(l.category)).slice(0, 2).forEach(l => {
+        notes.push({ severity: 'low', title: 'Based on what has worked before', detail: `${l.pattern} (${l.confidence}% confidence).`, message: `Based on "${l.pattern}", help me apply that here.` });
+      });
+    } catch (_) { /* non-fatal */ }
+  }
+  return notes.slice(0, 5);
+}
+
+app.post('/api/creative/score', requireSubIfAuthed, async (req, res) => {
+  try {
+    const { assetId, kind, content, platform } = req.body || {};
+    let asset = null, resolvedKind = kind, resolvedContent = content, resolvedPlatform = platform;
+
+    if (assetId) {
+      if (!req.user) return res.status(401).json({ error: 'Sign in required to score a saved asset.' });
+      const { data } = await supabaseAdmin.from('creative_assets').select('*').eq('id', assetId).eq('user_id', req.user.id).maybeSingle();
+      if (!data) return res.status(404).json({ error: 'Asset not found.' });
+      asset = data;
+      resolvedKind = data.kind; resolvedContent = data.content; resolvedPlatform = data.platform;
+    }
+    if (!resolvedContent) return res.status(400).json({ error: 'assetId or content is required' });
+
+    const text = _extractTextFromContent(resolvedContent);
+    const _bizCtx = await _creativeContext(req.user && req.user.id);
+    const brandCore = req.user ? await _getBrandCore(req.user.id).catch(() => null) : null;
+
+    const readability = _computeReadability(text);
+    const platformFit = _computePlatformFit(text, resolvedPlatform, resolvedKind);
+    const consistency = _computeConsistency(text, _bizCtx, brandCore);
+    const confidence = { value: _bizCtx ? Math.min(100, _bizCtx.sources.length * 12) : 15, why: _bizCtx ? `Based on ${_bizCtx.sources.length} real Business Brain source(s).` : 'Generated with no stored business context to ground it in.' };
+
+    let ai = {};
+    if (text.trim().length >= 5) {
+      const system = `You are a senior creative director scoring an ad/creative for QUALITY POTENTIAL â€” these are predictions, not measurements, since no campaign has run yet. Score 0-100 for each: ctrPrediction (likely click-through appeal), attention (scroll-stopping power), brandFit (how well it matches the described brand), emotion (emotional resonance), conversionPotential (likelihood to drive action). Reply ONLY with valid JSON: {"ctrPrediction":N,"ctrWhy":"...","attention":N,"attentionWhy":"...","brandFit":N,"brandFitWhy":"...","emotion":N,"emotionWhy":"...","conversionPotential":N,"conversionWhy":"..."}. Be honest and varied â€” do not default every score to 70-80.${_bizCtx ? `\n\nBUSINESS KNOWLEDGE:\n${_bizCtx.text}` : ''}`;
+      try {
+        const raw = await _aimlText('creative-score', system, text.slice(0, 3000), { max_tokens: 500 });
+        const cleaned = raw.replace(/^```(?:json)?\s*/i, '').replace(/```\s*$/, '').trim();
+        ai = JSON.parse(cleaned);
+      } catch (aiErr) {
+        console.warn('[creative/score] AI scoring failed (non-fatal):', aiErr.message);
+      }
+    }
+
+    const scores = {
+      readability,
+      platformFit,
+      consistency,
+      confidence,
+      ctrPrediction:       { value: ai.ctrPrediction ?? null, why: ai.ctrWhy || '' },
+      attention:           { value: ai.attention ?? null, why: ai.attentionWhy || '' },
+      brandFit:            { value: ai.brandFit ?? null, why: ai.brandFitWhy || '' },
+      emotion:             { value: ai.emotion ?? null, why: ai.emotionWhy || '' },
+      conversionPotential: { value: ai.conversionPotential ?? null, why: ai.conversionWhy || '' }
+    };
+
+    const directorNotes = await _buildDirectorNotes({ user: req.user, scores, platform: resolvedPlatform });
+
+    if (asset) await supabaseAdmin.from('creative_assets').update({ scores }).eq('id', asset.id);
+
+    res.json({ scores, directorNotes });
+  } catch (err) {
+    console.error('[creative/score]', err.message);
+    res.status(500).json({ error: 'Could not score that creative right now.' });
+  }
+});
+
+// â”€â”€ Global Creative Search (Epic 7) â€” fans out across every existing
+// knowledge/creative table with one Promise.all; no new search index, no
+// duplicated per-table logic beyond the small per-table mapper below.
+app.get('/api/creative/search', async (req, res) => {
+  try {
+    const user = await getUserFromToken(req);
+    if (!user) return res.status(401).json({ error: 'Authentication required' });
+    const q = String((req.query && req.query.q) || '').trim();
+    if (!q || q.length < 2) return res.json({ results: [] });
+    const like = `%${q}%`;
+
+    const [assets, products, audiences, competitors, memory, learnings] = await Promise.all([
+      supabaseAdmin.from('creative_assets').select('id,kind,title').eq('user_id', user.id).ilike('title', like).limit(10),
+      supabaseAdmin.from('business_products').select('id,name').eq('user_id', user.id).ilike('name', like).limit(10),
+      supabaseAdmin.from('business_audiences').select('id,name').eq('user_id', user.id).ilike('name', like).limit(10),
+      supabaseAdmin.from('business_competitors').select('id,company').eq('user_id', user.id).ilike('company', like).limit(10),
+      supabaseAdmin.from('business_memory').select('id,content').eq('user_id', user.id).ilike('content', like).limit(10),
+      supabaseAdmin.from('business_learnings').select('id,pattern').eq('user_id', user.id).eq('status', 'active').ilike('pattern', like).limit(10)
+    ]);
+
+    const results = []
+      .concat((assets.data || []).map(a => ({ type: 'creative', id: a.id, title: a.title || a.kind, snippet: a.kind })))
+      .concat((products.data || []).map(p => ({ type: 'product', id: p.id, title: p.name, snippet: 'Product' })))
+      .concat((audiences.data || []).map(a => ({ type: 'audience', id: a.id, title: a.name, snippet: 'Audience' })))
+      .concat((competitors.data || []).map(c => ({ type: 'competitor', id: c.id, title: c.company, snippet: 'Competitor' })))
+      .concat((memory.data || []).map(m => ({ type: 'memory', id: m.id, title: m.content.slice(0, 60), snippet: 'Business Brain memory' })))
+      .concat((learnings.data || []).map(l => ({ type: 'learning', id: l.id, title: l.pattern.slice(0, 60), snippet: 'Business learning' })));
+
+    res.json({ results });
+  } catch (err) {
+    console.error('[creative/search]', err.message);
+    res.status(500).json({ error: 'Search failed right now.' });
+  }
+});
+
+// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+// V9 â€” Autopilot (Epics 7, 6, 8, 12, 14). All routes below reuse existing
+// engines (Tool Router, Creative Engine, forecasting, Learning Engine) â€”
+// see _generateRecommendation/_evaluateAutomationRules above for the write
+// side, wired into the existing 4-hour monitoring cron.
+// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+
+// Epic 13 â€” Learning Loop. Approving a recommendation strengthens any
+// related business_learnings row; rejecting weakens it. Soft-linked by
+// campaign name, same convention every prior phase has used.
+async function _nudgeRelatedLearning(userId, rec, delta) {
+  try {
+    if (!rec.campaign_name) return;
+    const { data: learnings } = await supabaseAdmin.from('business_learnings').select('id,confidence').eq('user_id', userId).eq('status', 'active').ilike('entity_name', `%${rec.campaign_name}%`);
+    for (const l of (learnings || [])) {
+      const newConf = Math.max(8, Math.min(96, l.confidence + delta));
+      await supabaseAdmin.from('business_learnings').update({ confidence: newConf, updated_at: new Date().toISOString() }).eq('id', l.id);
+    }
+  } catch (err) {
+    console.warn('[Autopilot] learning nudge failed:', err.message);
+  }
+}
+
+const AUTOPILOT_GENERATIVE_TOOLS = ['generate_headlines', 'generate_ctas', 'generate_email', 'generate_landing_page', 'refresh_campaign_creative'];
+
+app.get('/api/autopilot/recommendations', async (req, res) => {
+  try {
+    const user = await getUserFromToken(req);
+    if (!user) return res.status(401).json({ error: 'Authentication required' });
+    const { status, type, platform } = req.query || {};
+    let q = supabaseAdmin.from('autopilot_recommendations').select('*').eq('user_id', user.id);
+    q = q.eq('status', status || 'suggested');
+    if (type) q = q.eq('type', type);
+    if (platform) q = q.eq('platform', platform);
+    q = q.order('created_at', { ascending: false }).limit(100);
+    const { data, error } = await q;
+    if (error) throw error;
+    res.json({ recommendations: data || [] });
+  } catch (err) {
+    console.error('[autopilot/recommendations GET]', err.message);
+    res.status(500).json({ error: 'Could not load recommendations.' });
+  }
+});
+
+app.patch('/api/autopilot/recommendations/:id', async (req, res) => {
+  try {
+    const user = await getUserFromToken(req);
+    if (!user) return res.status(401).json({ error: 'Authentication required' });
+    const { tool_params } = req.body || {};
+    if (tool_params === undefined) return res.status(400).json({ error: 'tool_params is required' });
+    const { data, error } = await supabaseAdmin.from('autopilot_recommendations').update({ tool_params }).eq('id', req.params.id).eq('user_id', user.id).eq('status', 'suggested').select().maybeSingle();
+    if (error) throw error;
+    if (!data) return res.status(404).json({ error: 'Recommendation not found or already resolved.' });
+    res.json({ recommendation: data });
+  } catch (err) {
+    console.error('[autopilot/recommendations PATCH]', err.message);
+    res.status(500).json({ error: 'Could not update that recommendation.' });
+  }
+});
+
+app.post('/api/autopilot/recommendations/:id/approve', async (req, res) => {
+  try {
+    const user = await getUserFromToken(req);
+    if (!user) return res.status(401).json({ error: 'Authentication required' });
+    const { data: rec } = await supabaseAdmin.from('autopilot_recommendations').select('*').eq('id', req.params.id).eq('user_id', user.id).maybeSingle();
+    if (!rec) return res.status(404).json({ error: 'Recommendation not found.' });
+    if (rec.status !== 'suggested') return res.status(400).json({ error: `Already ${rec.status}.` });
+
+    let execResult = { ok: true, message: 'Marked as approved (no automatic action attached).' };
+    if (rec.tool_name) {
+      const ctx = { user, authHeader: req.headers.authorization || '' };
+      execResult = await toolRouter.executeDirect(rec.tool_name, rec.tool_params || {}, ctx);
+    }
+    const newStatus = execResult.ok ? 'executed' : 'failed';
+    await supabaseAdmin.from('autopilot_recommendations').update({ status: newStatus, resolved_at: new Date().toISOString() }).eq('id', rec.id);
+    await _nudgeRelatedLearning(user.id, rec, 5);
+
+    // "Approve & Remember" â€” only for the same purely generative action
+    // types Epic 6 allows a rule to suggest without touching a live
+    // campaign; this makes the next identical situation one click instead
+    // of a fresh explanation, without ever auto-executing unattended.
+    if (req.body && req.body.remember && rec.tool_name && AUTOPILOT_GENERATIVE_TOOLS.includes(rec.tool_name) && rec.evidence && rec.evidence.metric) {
+      await supabaseAdmin.from('automation_rules').insert({
+        user_id: user.id, name: `Auto: ${rec.problem}`.slice(0, 120),
+        trigger_metric: rec.evidence.metric, trigger_operator: rec.evidence.operator || '<', trigger_value: rec.evidence.value,
+        platform: rec.platform, action_type: rec.tool_name, action_params: rec.tool_params, enabled: true
+      });
+    }
+
+    // Epic 9 â€” resume a workflow that paused at "request_approval" waiting
+    // exactly for this recommendation.
+    if (rec.evidence && rec.evidence.workflowId) {
+      const { data: wf } = await supabaseAdmin.from('autopilot_workflows').select('*').eq('id', rec.evidence.workflowId).eq('user_id', user.id).maybeSingle();
+      if (wf && wf.status === 'awaiting_approval') {
+        wf.steps[wf.current_step].status = 'done';
+        wf.current_step++;
+        wf.status = 'running';
+        await _advanceWorkflow(wf, req.headers.authorization || '').catch(err => console.warn('[Autopilot] workflow resume failed:', err.message));
+      }
+    }
+
+    res.json({ ok: execResult.ok, status: newStatus, message: execResult.message || execResult.error });
+  } catch (err) {
+    console.error('[autopilot/recommendations approve]', err.message);
+    res.status(500).json({ error: 'Could not approve that recommendation.' });
+  }
+});
+
+app.post('/api/autopilot/recommendations/:id/reject', async (req, res) => {
+  try {
+    const user = await getUserFromToken(req);
+    if (!user) return res.status(401).json({ error: 'Authentication required' });
+    const { data: rec } = await supabaseAdmin.from('autopilot_recommendations').select('*').eq('id', req.params.id).eq('user_id', user.id).maybeSingle();
+    if (!rec) return res.status(404).json({ error: 'Recommendation not found.' });
+    if (rec.status !== 'suggested') return res.status(400).json({ error: `Already ${rec.status}.` });
+    await supabaseAdmin.from('autopilot_recommendations').update({ status: 'rejected', resolved_at: new Date().toISOString() }).eq('id', rec.id);
+    await _nudgeRelatedLearning(user.id, rec, -10);
+    res.json({ ok: true, status: 'rejected' });
+  } catch (err) {
+    console.error('[autopilot/recommendations reject]', err.message);
+    res.status(500).json({ error: 'Could not reject that recommendation.' });
+  }
+});
+
+// Epic 6 â€” Automation Rules CRUD.
+app.get('/api/autopilot/rules', async (req, res) => {
+  try {
+    const user = await getUserFromToken(req);
+    if (!user) return res.status(401).json({ error: 'Authentication required' });
+    const { data, error } = await supabaseAdmin.from('automation_rules').select('*').eq('user_id', user.id).order('created_at', { ascending: false });
+    if (error) throw error;
+    res.json({ rules: data || [] });
+  } catch (err) {
+    console.error('[autopilot/rules GET]', err.message);
+    res.status(500).json({ error: 'Could not load your automation rules.' });
+  }
+});
+
+// V10 (Epic 4) â€” constrained to the exact sets _evaluateAutomationRules
+// and its toolMap actually understand, so a malformed rule can never be
+// silently created and then silently never fire.
+const AUTOPILOT_RULE_METRICS = ['ctr', 'cpa', 'roas'];
+const AUTOPILOT_RULE_OPERATOR_VALUES = ['<', '>', '=='];
+const AUTOPILOT_RULE_ACTION_TYPES = ['generate_headlines', 'generate_images', 'recommend_budget_decrease', 'suggest_scaling', 'refresh_business_brain'];
+const AUTOPILOT_RULE_PLATFORMS = ['google', 'meta'];
+
+app.post('/api/autopilot/rules', async (req, res) => {
+  try {
+    const user = await getUserFromToken(req);
+    if (!user) return res.status(401).json({ error: 'Authentication required' });
+    const { name, trigger_metric, trigger_operator, trigger_value, platform, action_type, action_params } = req.body || {};
+    if (!name || !trigger_metric || !trigger_operator || trigger_value == null || !action_type) {
+      return res.status(400).json({ error: 'name, trigger_metric, trigger_operator, trigger_value, and action_type are required' });
+    }
+    if (!AUTOPILOT_RULE_METRICS.includes(trigger_metric)) return res.status(400).json({ error: `trigger_metric must be one of: ${AUTOPILOT_RULE_METRICS.join(', ')}` });
+    if (!AUTOPILOT_RULE_OPERATOR_VALUES.includes(trigger_operator)) return res.status(400).json({ error: `trigger_operator must be one of: ${AUTOPILOT_RULE_OPERATOR_VALUES.join(', ')}` });
+    if (!AUTOPILOT_RULE_ACTION_TYPES.includes(action_type)) return res.status(400).json({ error: `action_type must be one of: ${AUTOPILOT_RULE_ACTION_TYPES.join(', ')}` });
+    if (platform && !AUTOPILOT_RULE_PLATFORMS.includes(platform)) return res.status(400).json({ error: `platform must be one of: ${AUTOPILOT_RULE_PLATFORMS.join(', ')}` });
+    if (typeof trigger_value !== 'number' || !isFinite(trigger_value)) return res.status(400).json({ error: 'trigger_value must be a number' });
+
+    const { data, error } = await supabaseAdmin.from('automation_rules').insert({
+      user_id: user.id, name: String(name).slice(0, 120), trigger_metric, trigger_operator, trigger_value, platform: platform || null,
+      action_type, action_params: action_params || null, enabled: true
+    }).select().maybeSingle();
+    if (error) throw error;
+    res.json({ rule: data });
+  } catch (err) {
+    console.error('[autopilot/rules POST]', err.message);
+    res.status(500).json({ error: 'Could not save that rule.' });
+  }
+});
+
+app.patch('/api/autopilot/rules/:id', async (req, res) => {
+  try {
+    const user = await getUserFromToken(req);
+    if (!user) return res.status(401).json({ error: 'Authentication required' });
+    const b = req.body || {};
+    if (b.trigger_metric !== undefined && !AUTOPILOT_RULE_METRICS.includes(b.trigger_metric)) return res.status(400).json({ error: `trigger_metric must be one of: ${AUTOPILOT_RULE_METRICS.join(', ')}` });
+    if (b.trigger_operator !== undefined && !AUTOPILOT_RULE_OPERATOR_VALUES.includes(b.trigger_operator)) return res.status(400).json({ error: `trigger_operator must be one of: ${AUTOPILOT_RULE_OPERATOR_VALUES.join(', ')}` });
+    if (b.action_type !== undefined && !AUTOPILOT_RULE_ACTION_TYPES.includes(b.action_type)) return res.status(400).json({ error: `action_type must be one of: ${AUTOPILOT_RULE_ACTION_TYPES.join(', ')}` });
+    if (b.platform !== undefined && b.platform !== null && !AUTOPILOT_RULE_PLATFORMS.includes(b.platform)) return res.status(400).json({ error: `platform must be one of: ${AUTOPILOT_RULE_PLATFORMS.join(', ')}` });
+    if (b.trigger_value !== undefined && (typeof b.trigger_value !== 'number' || !isFinite(b.trigger_value))) return res.status(400).json({ error: 'trigger_value must be a number' });
+
+    const allowed = ['name', 'trigger_metric', 'trigger_operator', 'trigger_value', 'platform', 'action_type', 'action_params', 'enabled'];
+    const row = {};
+    allowed.forEach(f => { if (b[f] !== undefined) row[f] = b[f]; });
+    const { data, error } = await supabaseAdmin.from('automation_rules').update(row).eq('id', req.params.id).eq('user_id', user.id).select().maybeSingle();
+    if (error) throw error;
+    if (!data) return res.status(404).json({ error: 'Rule not found.' });
+    res.json({ rule: data });
+  } catch (err) {
+    console.error('[autopilot/rules PATCH]', err.message);
+    res.status(500).json({ error: 'Could not update that rule.' });
+  }
+});
+
+app.delete('/api/autopilot/rules/:id', async (req, res) => {
+  try {
+    const user = await getUserFromToken(req);
+    if (!user) return res.status(401).json({ error: 'Authentication required' });
+    const { error } = await supabaseAdmin.from('automation_rules').delete().eq('id', req.params.id).eq('user_id', user.id);
+    if (error) throw error;
+    res.json({ ok: true });
+  } catch (err) {
+    console.error('[autopilot/rules DELETE]', err.message);
+    res.status(500).json({ error: 'Could not delete that rule.' });
+  }
+});
+
+// Epic 8 â€” Smart Task Manager. Tasks are generated during the monitoring
+// pass (see _generateAutopilotTasks, called from _runIntelligenceMonitoring
+// below) from sources that already exist â€” this is read/update only.
+app.get('/api/autopilot/tasks', async (req, res) => {
+  try {
+    const user = await getUserFromToken(req);
+    if (!user) return res.status(401).json({ error: 'Authentication required' });
+    const status = req.query && req.query.status;
+    let q = supabaseAdmin.from('autopilot_tasks').select('*').eq('user_id', user.id);
+    q = q.eq('status', status || 'pending');
+    q = q.order('priority', { ascending: false }).order('deadline', { ascending: true }).limit(100);
+    const { data, error } = await q;
+    if (error) throw error;
+    res.json({ tasks: data || [] });
+  } catch (err) {
+    console.error('[autopilot/tasks GET]', err.message);
+    res.status(500).json({ error: 'Could not load your tasks.' });
+  }
+});
+
+app.patch('/api/autopilot/tasks/:id', async (req, res) => {
+  try {
+    const user = await getUserFromToken(req);
+    if (!user) return res.status(401).json({ error: 'Authentication required' });
+    const { status } = req.body || {};
+    if (!['pending', 'in_progress', 'done', 'dismissed'].includes(status)) return res.status(400).json({ error: 'Invalid status.' });
+    const { data, error } = await supabaseAdmin.from('autopilot_tasks').update({ status }).eq('id', req.params.id).eq('user_id', user.id).select().maybeSingle();
+    if (error) throw error;
+    if (!data) return res.status(404).json({ error: 'Task not found.' });
+    res.json({ task: data });
+  } catch (err) {
+    console.error('[autopilot/tasks PATCH]', err.message);
+    res.status(500).json({ error: 'Could not update that task.' });
+  }
+});
+
+// Epic 12 â€” Autopilot History. Same fan-out pattern as /api/creative/search.
+app.get('/api/autopilot/history', async (req, res) => {
+  try {
+    const user = await getUserFromToken(req);
+    if (!user) return res.status(401).json({ error: 'Authentication required' });
+    const { q, status, type, since } = req.query || {};
+    const sinceDate = since || new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString();
+
+    let evQ = supabaseAdmin.from('intelligence_events').select('*').eq('user_id', user.id).gte('created_at', sinceDate);
+    let recQ = supabaseAdmin.from('autopilot_recommendations').select('*').eq('user_id', user.id).gte('created_at', sinceDate);
+    let taskQ = supabaseAdmin.from('autopilot_tasks').select('*').eq('user_id', user.id).gte('created_at', sinceDate);
+    let wfQ = supabaseAdmin.from('autopilot_workflows').select('*').eq('user_id', user.id).gte('created_at', sinceDate);
+    if (type) { evQ = evQ.eq('type', type); recQ = recQ.eq('type', type); }
+    if (status) { recQ = recQ.eq('status', status); taskQ = taskQ.eq('status', status); wfQ = wfQ.eq('status', status); }
+    if (q) { evQ = evQ.ilike('title', `%${q}%`); recQ = recQ.ilike('problem', `%${q}%`); taskQ = taskQ.ilike('title', `%${q}%`); wfQ = wfQ.ilike('name', `%${q}%`); }
+
+    const [events, recs, tasks, workflows] = await Promise.all([evQ, recQ, taskQ, wfQ]);
+
+    const items = []
+      .concat((events.data || []).map(e => ({ kind: 'event', id: e.id, title: e.title, status: e.dismissed ? 'dismissed' : 'detected', created_at: e.created_at })))
+      .concat((recs.data || []).map(r => ({ kind: 'recommendation', id: r.id, title: r.problem, status: r.status, created_at: r.created_at })))
+      .concat((tasks.data || []).map(t => ({ kind: 'task', id: t.id, title: t.title, status: t.status, created_at: t.created_at })))
+      .concat((workflows.data || []).map(w => ({ kind: 'workflow', id: w.id, title: w.name, status: w.status, created_at: w.created_at })))
+      .sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
+
+    res.json({ items: items.slice(0, 200) });
+  } catch (err) {
+    console.error('[autopilot/history]', err.message);
+    res.status(500).json({ error: 'Could not load Autopilot history.' });
+  }
+});
+
+// Epic 14 â€” Predictive Autopilot. Reuses _computeForecast/_linearTrend
+// (V6 Final) â€” same deterministic mechanism /api/intelligence/forecast
+// already uses, just composed per-platform for the Autopilot Center.
+app.get('/api/autopilot/predictions', requireSubIfAuthed, async (req, res) => {
+  try {
+    if (!req.user) return res.status(401).json({ error: 'Authentication required' });
+    const days = Math.min(90, Math.max(7, parseInt(req.query.days, 10) || 30));
+    const horizon = Math.min(30, Math.max(7, parseInt(req.query.horizon, 10) || 7));
+    const predictions = {};
+
+    for (const platform of ['google', 'meta']) {
+      try {
+        let series;
+        if (platform === 'google') {
+          const { accessToken, customerId, loginCustomerId } = await _getGadsAccess(req.user);
+          series = await _gadsFetchDailySeries(accessToken, customerId, loginCustomerId, days);
+        } else {
+          const { accessToken, accountId } = await _getMetaAccess(req.user);
+          series = await _metaFetchDailySeries(accessToken, accountId, days);
+        }
+        if (series && series.length >= 3) {
+          predictions[platform] = _computeForecast(series, horizon);
+        }
+      } catch (err) {
+        console.warn(`[Autopilot] predictions | ${platform} unavailable:`, err.message);
+      }
+    }
+
+    res.json({ predictions, horizon, note: 'Seasonal demand prediction is deferred until enough real months of Business Learnings history accumulate â€” not fabricated from a single snapshot.' });
+  } catch (err) {
+    console.error('[autopilot/predictions]', err.message);
+    res.status(500).json({ error: 'Could not generate predictions right now.' });
+  }
+});
+
+// Epic 9 â€” Automated Workflows. A generic step-sequence engine over
+// existing generators/tools â€” one template built this pass
+// (winning_campaign_refresh), but the engine itself is just an ordered
+// list of loopback calls, so more templates are additive later, not a
+// rebuild. Each step calls an EXISTING route over loopback HTTP with the
+// real user's auth header â€” the same "User -> Tool Router -> Existing
+// Backend API" principle every tool in campaignTools.js already follows â€”
+// which is also why a workflow only ever advances from a real
+// authenticated request, never a background cron tick with no token to
+// hold. Reaching "request_approval" always pauses for a real Approve
+// click, consistent with the Golden Rule.
+const AUTOPILOT_WORKFLOW_TEMPLATES = {
+  winning_campaign_refresh: [
+    { step: 'generate_variations', label: 'Generate headline variations' },
+    { step: 'generate_images', label: 'Generate new images' },
+    { step: 'generate_landing_page', label: 'Generate landing page' },
+    { step: 'generate_email', label: 'Generate email' },
+    { step: 'prepare_publish_package', label: 'Prepare publish package' },
+    { step: 'request_approval', label: 'Request approval' },
+    { step: 'publish', label: 'Publish' }
+  ]
+};
+
+async function _advanceWorkflow(workflow, authHeader) {
+  const _wfPort = parseInt(process.env.PORT || '5500', 10);
+  const _wfBase = `http://localhost:${_wfPort}`;
+  async function callRoute(path, body) {
+    const r = await fetch(_wfBase + path, { method: 'POST', headers: { Authorization: authHeader, 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+    const text = await r.text();
+    let data; try { data = JSON.parse(text); } catch (_) { data = null; }
+    if (!r.ok) throw new Error((data && data.error) || `Request to ${path} failed`);
+    return data;
+  }
+
+  while (workflow.current_step < workflow.steps.length) {
+    const step = workflow.steps[workflow.current_step];
+    try {
+      if (step.step === 'request_approval') {
+        const rec = await _generateRecommendation({
+          userId: workflow.user_id, type: 'workflow_publish', campaignName: workflow.name,
+          problem: `Workflow "${workflow.name}" is ready to publish â€” review before it goes live.`,
+          confidence: 70, evidence: { workflowId: workflow.id },
+          riskLevel: 'medium', toolName: null, toolParams: null
+        });
+        step.status = 'awaiting_approval';
+        step.result = { recommendationId: rec && rec.id };
+        workflow.status = 'awaiting_approval';
+        break;
+      } else if (step.step === 'generate_variations') {
+        step.result = await callRoute('/api/creative/variations', { kind: 'headline', seed: workflow.name, count: 5 });
+      } else if (step.step === 'generate_images') {
+        step.result = await callRoute('/api/generate-image', { prompt: workflow.name, imageType: 'hero' });
+      } else if (step.step === 'generate_landing_page') {
+        step.result = await callRoute('/api/generate-web', { prompt: workflow.name });
+      } else if (step.step === 'generate_email') {
+        step.result = await callRoute('/api/generate-email', { prompt: workflow.name });
+      } else if (step.step === 'prepare_publish_package') {
+        step.result = { note: 'Publish package assembled from the steps above.', steps: workflow.steps.slice(0, workflow.current_step).map(s => s.step) };
+      } else if (step.step === 'publish') {
+        step.result = { note: 'Use the generated campaign package\'s own publish flow to go live â€” Autopilot prepares, it never auto-publishes.' };
+      }
+      step.status = 'done';
+      workflow.current_step++;
+    } catch (err) {
+      step.status = 'failed'; step.error = err.message;
+      workflow.status = 'failed';
+      break;
+    }
+  }
+
+  if (workflow.current_step >= workflow.steps.length && workflow.status === 'running') {
+    workflow.status = 'completed';
+    await _upsertLearning(workflow.user_id, {
+      entity_type: 'campaign', entity_name: workflow.name, category: 'automation_success',
+      pattern: `Workflow "${workflow.name}" completed successfully via Autopilot.`,
+      confidence: 60, evidence: { steps: workflow.steps.length }
+    });
+  }
+
+  await supabaseAdmin.from('autopilot_workflows').update({
+    steps: workflow.steps, current_step: workflow.current_step, status: workflow.status, updated_at: new Date().toISOString()
+  }).eq('id', workflow.id);
+  return workflow;
+}
+
+app.post('/api/autopilot/workflows', async (req, res) => {
+  try {
+    const user = await getUserFromToken(req);
+    if (!user) return res.status(401).json({ error: 'Authentication required' });
+    const { name, template } = req.body || {};
+    if (!name) return res.status(400).json({ error: 'name is required' });
+    const templateSteps = AUTOPILOT_WORKFLOW_TEMPLATES[template || 'winning_campaign_refresh'];
+    if (!templateSteps) return res.status(400).json({ error: `Unknown template. Available: ${Object.keys(AUTOPILOT_WORKFLOW_TEMPLATES).join(', ')}` });
+    const steps = templateSteps.map(s => Object.assign({ status: 'pending', result: null }, s));
+    const { data, error } = await supabaseAdmin.from('autopilot_workflows').insert({
+      user_id: user.id, name, template: template || 'winning_campaign_refresh', steps, current_step: 0, status: 'running'
+    }).select().maybeSingle();
+    if (error) throw error;
+    res.json({ workflow: data });
+  } catch (err) {
+    console.error('[autopilot/workflows POST]', err.message);
+    res.status(500).json({ error: 'Could not start that workflow.' });
+  }
+});
+
+app.get('/api/autopilot/workflows', async (req, res) => {
+  try {
+    const user = await getUserFromToken(req);
+    if (!user) return res.status(401).json({ error: 'Authentication required' });
+    const { data, error } = await supabaseAdmin.from('autopilot_workflows').select('*').eq('user_id', user.id).order('created_at', { ascending: false }).limit(50);
+    if (error) throw error;
+    res.json({ workflows: data || [] });
+  } catch (err) {
+    console.error('[autopilot/workflows GET]', err.message);
+    res.status(500).json({ error: 'Could not load your workflows.' });
+  }
+});
+
+app.post('/api/autopilot/workflows/:id/advance', async (req, res) => {
+  try {
+    const user = await getUserFromToken(req);
+    if (!user) return res.status(401).json({ error: 'Authentication required' });
+    const { data: wf } = await supabaseAdmin.from('autopilot_workflows').select('*').eq('id', req.params.id).eq('user_id', user.id).maybeSingle();
+    if (!wf) return res.status(404).json({ error: 'Workflow not found.' });
+    if (wf.status !== 'running') return res.status(400).json({ error: `Workflow is ${wf.status}, not running.` });
+    const updated = await _advanceWorkflow(wf, req.headers.authorization || '');
+    res.json({ workflow: updated });
+  } catch (err) {
+    console.error('[autopilot/workflows advance]', err.message);
+    res.status(500).json({ error: 'Could not advance that workflow.' });
   }
 });
 
@@ -2938,86 +3966,44 @@ Rules:
 // Receives: { product, goal, platforms, mode }
 // mode='concepts' â†’ 3 concept cards (used by create wizard)
 // mode='full'     â†’ complete agency-grade campaign package
-app.post('/api/ai/create-ad', requireSubIfAuthed, async (req, res) => {
-  console.log('[create-ad] ← route handler entered');
-  console.log('[create-ad] req.body keys:', Object.keys(req.body || {}));
-  const { product, goal, platforms, mode, brandCore, productImages } = req.body;
-  console.log('[create-ad] product:', (product || '').slice(0, 60), '| mode:', mode, '| platform:', req.body.platform, '| platforms:', platforms);
-  if (!product) {
-    console.log('[create-ad] 400 — product missing');
-    return res.status(400).json({ error: 'product is required' });
-  }
+/* Build brand context block — injected into system prompt when Brand Brain is active.
+   Hoisted to module scope (was nested inside /api/ai/create-ad) so
+   _generateAdPackage below can reuse it too. */
+function _buildCampaignBrandSection(bc) {
+  if (!bc || !bc.name) return '';
+  const lines = [
+    `\n\nBRAND BRAIN CONTEXT (CRITICAL — this is the user's real brand, use it throughout the campaign):`,
+    `Brand Name: ${bc.name}`,
+  ];
+  if (bc.website)     lines.push(`Website: ${bc.website}`);
+  if (bc.description) lines.push(`Company Description: ${bc.description}`);
+  if (bc.story)       lines.push(`Brand Story: ${bc.story}`);
+  if (bc.audience)    lines.push(`Target Audience: ${bc.audience}`);
+  if (bc.usp)         lines.push(`Unique Selling Proposition: ${bc.usp}`);
+  if (bc.toneOfVoice) lines.push(`Tone of Voice: ${bc.toneOfVoice}`);
+  if (bc.competitors) lines.push(`Competitors: ${bc.competitors}`);
+  if (bc.colors)      lines.push(`Brand Colours: ${bc.colors}`);
+  lines.push(`\nIMPORTANT RULES:`);
+  lines.push(`- Use "${bc.name}" as the brand name throughout all copy`);
+  if (bc.toneOfVoice) lines.push(`- Match tone exactly: ${bc.toneOfVoice}`);
+  if (bc.usp) lines.push(`- Lead with the USP in every hook and headline`);
+  if (bc.audience) lines.push(`- Audience targeting must reflect: ${bc.audience}`);
+  lines.push(`- The campaignName must include the brand name`);
+  return lines.join('\n');
+}
 
-  /* Build brand context block â€” injected into system prompt when Brand Brain is active */
-  function _buildCampaignBrandSection(bc) {
-    if (!bc || !bc.name) return '';
-    const lines = [
-      `\n\nBRAND BRAIN CONTEXT (CRITICAL â€” this is the user's real brand, use it throughout the campaign):`,
-      `Brand Name: ${bc.name}`,
-    ];
-    if (bc.website)     lines.push(`Website: ${bc.website}`);
-    if (bc.description) lines.push(`Company Description: ${bc.description}`);
-    if (bc.story)       lines.push(`Brand Story: ${bc.story}`);
-    if (bc.audience)    lines.push(`Target Audience: ${bc.audience}`);
-    if (bc.usp)         lines.push(`Unique Selling Proposition: ${bc.usp}`);
-    if (bc.toneOfVoice) lines.push(`Tone of Voice: ${bc.toneOfVoice}`);
-    if (bc.competitors) lines.push(`Competitors: ${bc.competitors}`);
-    if (bc.colors)      lines.push(`Brand Colours: ${bc.colors}`);
-    lines.push(`\nIMPORTANT RULES:`);
-    lines.push(`- Use "${bc.name}" as the brand name throughout all copy`);
-    if (bc.toneOfVoice) lines.push(`- Match tone exactly: ${bc.toneOfVoice}`);
-    if (bc.usp) lines.push(`- Lead with the USP in every hook and headline`);
-    if (bc.audience) lines.push(`- Audience targeting must reflect: ${bc.audience}`);
-    lines.push(`- The campaignName must include the brand name`);
-    return lines.join('\n');
-  }
-
+// V8 Epic 5 — extracted from /api/ai/create-ad's 'full' mode so the new
+// /api/creative/campaign-suite route (below) can call it once per platform
+// in parallel, without duplicating this prompt-building logic. Same
+// schemas, same rules, same behavior as the original inline version.
+async function _generateAdPackage({ user, product, goal, platform, brandCore, productImages }) {
   const brandSection = _buildCampaignBrandSection(brandCore);
+  const _bizCtx = user ? await _gatherBusinessContext(user.id).catch(() => null) : null;
+  const businessSection = _bizCtx ? `\n\nBUSINESS KNOWLEDGE (real, stored data about this business — use it instead of generic copy; if competitor info is present, use it only for positioning, never copy competitor content):\n${_bizCtx.text}` : '';
   const productImageNote = (Array.isArray(productImages) && productImages.length)
-    ? `\n\nPRODUCT ASSETS: The user has uploaded ${productImages.length} product image(s). Describe visual concepts that showcase the actual product photography â€” not stock imagery. Reference realistic product shots in imagePrompts.`
+    ? `\n\nPRODUCT ASSETS: The user has uploaded ${productImages.length} product image(s). Describe visual concepts that showcase the actual product photography — not stock imagery. Reference realistic product shots in imagePrompts.`
     : '';
 
-  /* Prefer single-platform selection (V2 flow) */
-  const platform = req.body.platform || (Array.isArray(platforms) && platforms[0]) || 'google';
-  const platList = Array.isArray(platforms) && platforms.length
-    ? platforms.join(', ')
-    : 'Google Ads, Meta Ads, TikTok Ads';
-  console.log('[create-ad] resolved platform:', platform, '| mode:', mode, '| brandCore:', brandCore ? brandCore.name : 'none', '| productImages:', productImages ? productImages.length : 0);
-
-  if (mode === 'concepts') {
-    console.log('[create-ad] → mode=concepts branch');
-    const system = `You are Oriven AI â€” a senior marketing strategist and creative director.
-Generate exactly 5 campaign concepts for the product/service described.
-Reply ONLY with valid JSON array (no markdown, no extra text):
-[{"angle":"Performance","color":"#3ecf8e","audience":"...","hook":"...","headline":"...","text":"...","cta":"...","creative":"...","visual":"...","platforms":"${platList}"},
- {"angle":"Transformation","color":"#63b3ff",...},
- {"angle":"Problem / Solution","color":"#FBBC04",...},
- {"angle":"Social Proof","color":"#a855f7",...},
- {"angle":"Urgency","color":"#ff6b7a",...}]
-- angle: exact string as shown
-- hook: scroll-stopping 6-10 word hook
-- headline: punchy ad headline (max 10 words)
-- text: compelling primary ad copy (2-3 sentences)
-- cta: action CTA (max 4 words)
-- creative: brief creative direction (1 sentence)
-- visual: visual description (1 sentence)${brandSection ? '\n\n' + brandSection.trim() : ''}`;
-
-    const conceptsUserMsg = brandCore && brandCore.name
-      ? `Brand: ${brandCore.name}\nProduct/Service: ${product}\nGoal: ${goal || 'Sales'}\nPlatforms: ${platList}`
-      : `Product/Service: ${product}\nGoal: ${goal || 'Sales'}\nPlatforms: ${platList}`;
-    try {
-      const raw = await _aimlText('ads-copy', system, conceptsUserMsg, { max_tokens: 1800 });
-      const cleaned = raw.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/i, '').trim();
-      const concepts = JSON.parse(cleaned);
-      return res.json({ ok: true, data: { concepts } });
-    } catch (err) {
-      console.error('[create-ad concepts] error:', err.message);
-      return res.status(500).json({ ok: false, error: err.message || 'Generation failed' });
-    }
-  }
-
-  // mode === 'full' â€” focused per-platform campaign package
-  console.log('[create-ad] → mode=full branch — building system prompt for platform:', platform);
   const CONCEPTS_SCHEMA = `”concepts”: [
     {"angle":"Performance","name":"...","color":"#3ecf8e","targetAudience":"...","hook":"...","marketingAngle":"...","offer":"...","cta":"...","adCopy":{"headline":"...","primaryText":"...","description":"...","benefits":["...","..."],"emotionalTriggers":["...","..."]}},
     {"angle":"Problem / Solution","name":"...","color":"#FBBC04","targetAudience":"...","hook":"...","marketingAngle":"...","offer":"...","cta":"...","adCopy":{"headline":"...","primaryText":"...","description":"...","benefits":["...","..."],"emotionalTriggers":["...","..."]}},
@@ -3078,9 +4064,9 @@ Reply ONLY with valid JSON array (no markdown, no extra text):
 - sitelinks: 4 page names that make sense for this product`;
   }
 
-  const system = `You are Oriven AI â€” a senior marketing strategist, creative director, and platform specialist.
+  const system = `You are Oriven AI — a senior marketing strategist, creative director, and platform specialist.
 Generate a focused ${platform === 'meta' ? 'Meta Ads' : platform === 'tiktok' ? 'TikTok Ads' : 'Google Ads'} campaign package.
-Reply ONLY with valid JSON â€” no markdown fences, no extra text.
+Reply ONLY with valid JSON — no markdown fences, no extra text.
 
 Required JSON structure:
 {
@@ -3098,37 +4084,240 @@ Required JSON structure:
 
 Platform rules:
 ${platformRules}
-- All copy must be specific to the actual product â€” no generic placeholders
+- All copy must be specific to the actual product — no generic placeholders
 - Performance scores are integers 0-100
-- conversionPotential: "High", "Medium", or "Low"${brandSection}${productImageNote}`;
+- conversionPotential: "High", "Medium", or "Low"${brandSection}${businessSection}${productImageNote}`;
 
   const userMsg = brandCore && brandCore.name
     ? `Brand: ${brandCore.name}\nProduct/Service: ${product}\nGoal: ${goal || 'Sales'}\nPlatform: ${platform}`
     : `Product/Service: ${product}\nGoal: ${goal || 'Sales'}\nPlatform: ${platform}`;
 
-  console.log(`[create-ad] System prompt length: ${system.length} | userMsg length: ${userMsg.length}`);
-  console.log('[create-ad] Calling _aimlText — this is the AML call');
-
+  const raw = await _aimlText('ads-copy', system, userMsg, { max_tokens: 8000 });
+  const cleaned = raw.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/i, '').trim();
+  let pkg;
   try {
-    console.log(`[create-ad] Text generation started — platform: ${platform}, product: ${product.slice(0,60)}`);
-    const raw = await _aimlText('ads-copy', system, userMsg, { max_tokens: 8000 });
-    console.log(`[create-ad] Text generation complete — raw length: ${raw.length}`);
-    let cleaned = raw.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/i, '').trim();
-    let pkg;
+    pkg = JSON.parse(cleaned);
+  } catch (parseErr) {
+    throw new Error(`JSON parse failed: ${parseErr.message} | raw length: ${raw.length} | tail: ${raw.slice(-120)}`);
+  }
+  pkg.platform = platform; // ensure frontend renderer knows which platform
+  _recordCreativeAsset(user && user.id, { kind: 'ad', platform, product_name: String(product).slice(0, 80), title: pkg.campaignName || product, content: pkg, source_route: '/api/ai/create-ad' });
+  return pkg;
+}
+
+app.post('/api/ai/create-ad', requireSubIfAuthed, async (req, res) => {
+  console.log('[create-ad] ← route handler entered');
+  console.log('[create-ad] req.body keys:', Object.keys(req.body || {}));
+  const { product, goal, platforms, mode, brandCore, productImages } = req.body;
+  console.log('[create-ad] product:', (product || '').slice(0, 60), '| mode:', mode, '| platform:', req.body.platform, '| platforms:', platforms);
+  if (!product) {
+    console.log('[create-ad] 400 — product missing');
+    return res.status(400).json({ error: 'product is required' });
+  }
+
+  const brandSection = _buildCampaignBrandSection(brandCore);
+  const _bizCtx = req.user ? await _gatherBusinessContext(req.user.id).catch(() => null) : null;
+  const businessSection = _bizCtx ? `\n\nBUSINESS KNOWLEDGE (real, stored data about this business — use it instead of generic copy; if competitor info is present, use it only for positioning, never copy competitor content):\n${_bizCtx.text}` : '';
+  const productImageNote = (Array.isArray(productImages) && productImages.length)
+    ? `\n\nPRODUCT ASSETS: The user has uploaded ${productImages.length} product image(s). Describe visual concepts that showcase the actual product photography â€” not stock imagery. Reference realistic product shots in imagePrompts.`
+    : '';
+
+  /* Prefer single-platform selection (V2 flow) */
+  const platform = req.body.platform || (Array.isArray(platforms) && platforms[0]) || 'google';
+  const platList = Array.isArray(platforms) && platforms.length
+    ? platforms.join(', ')
+    : 'Google Ads, Meta Ads, TikTok Ads';
+  console.log('[create-ad] resolved platform:', platform, '| mode:', mode, '| brandCore:', brandCore ? brandCore.name : 'none', '| productImages:', productImages ? productImages.length : 0);
+
+  if (mode === 'concepts') {
+    console.log('[create-ad] → mode=concepts branch');
+    const system = `You are Oriven AI â€” a senior marketing strategist and creative director.
+Generate exactly 5 campaign concepts for the product/service described.
+Reply ONLY with valid JSON array (no markdown, no extra text):
+[{"angle":"Performance","color":"#3ecf8e","audience":"...","hook":"...","headline":"...","text":"...","cta":"...","creative":"...","visual":"...","platforms":"${platList}"},
+ {"angle":"Transformation","color":"#63b3ff",...},
+ {"angle":"Problem / Solution","color":"#FBBC04",...},
+ {"angle":"Social Proof","color":"#a855f7",...},
+ {"angle":"Urgency","color":"#ff6b7a",...}]
+- angle: exact string as shown
+- hook: scroll-stopping 6-10 word hook
+- headline: punchy ad headline (max 10 words)
+- text: compelling primary ad copy (2-3 sentences)
+- cta: action CTA (max 4 words)
+- creative: brief creative direction (1 sentence)
+- visual: visual description (1 sentence)${brandSection ? '\n\n' + brandSection.trim() : ''}${businessSection}`;
+
+    const conceptsUserMsg = brandCore && brandCore.name
+      ? `Brand: ${brandCore.name}\nProduct/Service: ${product}\nGoal: ${goal || 'Sales'}\nPlatforms: ${platList}`
+      : `Product/Service: ${product}\nGoal: ${goal || 'Sales'}\nPlatforms: ${platList}`;
     try {
-      pkg = JSON.parse(cleaned);
-    } catch (parseErr) {
-      const detail = `JSON parse failed: ${parseErr.message} | raw length: ${raw.length} | tail: ${raw.slice(-120)}`;
-      console.error('[create-ad full] JSON parse error:', detail);
-      return res.status(500).json({ ok: false, error: detail });
+      const raw = await _aimlText('ads-copy', system, conceptsUserMsg, { max_tokens: 1800 });
+      const cleaned = raw.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/i, '').trim();
+      const concepts = JSON.parse(cleaned);
+      return res.json({ ok: true, data: { concepts } });
+    } catch (err) {
+      console.error('[create-ad concepts] error:', err.message);
+      return res.status(500).json({ ok: false, error: err.message || 'Generation failed' });
     }
+  }
+
+  // mode === 'full' — focused per-platform campaign package. Delegates to
+  // _generateAdPackage (extracted above for V8 Epic 5) — identical prompt
+  // logic, now shared with /api/creative/campaign-suite.
+  console.log('[create-ad] → mode=full branch — delegating to _generateAdPackage for platform:', platform);
+  try {
+    const pkg = await _generateAdPackage({ user: req.user, product, goal, platform, brandCore, productImages });
     console.log(`[create-ad] Package ready — keys: ${Object.keys(pkg).join(', ')} | visualConcepts: ${(pkg.visualConcepts||[]).length}`);
-    pkg.platform = platform; // ensure frontend renderer knows which platform
     return res.json({ ok: true, data: pkg });
   } catch (err) {
     console.error('[create-ad full] error:', err.message);
     return res.status(500).json({ ok: false, error: err.message || 'Generation failed' });
   }
+});
+
+// ── Oriven AI Chat ─────────────────────────────────────────────
+// Used by: the "Oriven AI" panel in Ads Manager (orvAiSend, app.html)
+// Receives: { message, context: { page, googleAccount, metaAccount }, brandCore, history }
+// Returns: { reply }
+app.post('/api/ai/chat', requireSubIfAuthed, async (req, res) => {
+  const { message, context, brandCore, history } = req.body || {};
+  if (!message) return res.status(400).json({ error: 'message is required' });
+
+  const ctx = context || {};
+  let googleAccount = ctx.googleAccount || null;
+  let metaAccount   = ctx.metaAccount   || null;
+  let tiktokAccount = ctx.tiktokAccount || null;
+
+  // Prefer authoritative connected-account names from the DB when the caller is authenticated.
+  if (req.user) {
+    try {
+      const { data: rows } = await supabaseAdmin
+        .from('integrations')
+        .select('provider, active_ad_account')
+        .eq('user_id', req.user.id)
+        .in('provider', ['google_ads', 'meta_ads', 'tiktok_ads']);
+      (rows || []).forEach(row => {
+        const acct = row.active_ad_account;
+        const name = acct && (acct.account_name || acct.account_id);
+        if (!name) return;
+        if (row.provider === 'google_ads') googleAccount = name;
+        if (row.provider === 'meta_ads')   metaAccount   = name;
+        if (row.provider === 'tiktok_ads') tiktokAccount = name;
+      });
+    } catch (err) {
+      console.warn('[ai/chat] integrations lookup failed, falling back to client context:', err.message);
+    }
+  }
+
+  const brandSection = _buildBrandSection(brandCore);
+  const hasBrand = brandSection.length > 0;
+
+  // V7 Phase 1 — Context Engine V2. Backend-persisted business knowledge
+  // (profile, products, audiences, brand_cores, remembered facts) pulled in
+  // automatically so the user never has to re-state it â€” independent of
+  // whatever the frontend happened to pass in `brandCore` this request.
+  const businessContext = req.user ? await _gatherBusinessContext(req.user.id) : null;
+  const businessSection = businessContext ? `\n\nBUSINESS KNOWLEDGE (what Oriven already knows about this company — never ask for this again, use it naturally by name rather than just having it available):\n${businessContext.text}` : '';
+
+  const accountLines = [];
+  if (googleAccount) accountLines.push(`Google Ads: ${googleAccount}`);
+  if (metaAccount)   accountLines.push(`Meta Ads: ${metaAccount}`);
+  if (tiktokAccount) accountLines.push(`TikTok Ads: ${tiktokAccount}`);
+  const accountsSection = accountLines.length
+    ? `\n\nCONNECTED AD ACCOUNTS:\n${accountLines.map(l => '  - ' + l).join('\n')}`
+    : '\n\nCONNECTED AD ACCOUNTS: none connected yet.';
+
+  const pageSection = ctx.page ? `\n\nThe user is currently on the "${ctx.page}" screen of Ads Manager.` : '';
+
+  const currentCampaign = ctx.currentCampaign && ctx.currentCampaign.campaignId ? ctx.currentCampaign : null;
+  const campaignSection = currentCampaign
+    ? `\n\nThe user currently has the campaign "${currentCampaign.campaignName}" (${currentCampaign.platform}) open. If they say "this campaign" or "it" without naming one, assume they mean this campaign.`
+    : '';
+
+  const toolsSection = `\n\nTOOLS AVAILABLE — call one when the user is clearly asking for an action to be taken (not when they're just asking a question or making conversation):\n${toolRouter.getCatalogPrompt()}\n\nTo use a tool, reply with ONLY a JSON object on its own, nothing else: {"tool": "<tool_name>", "params": {...}}. No markdown fences, no extra text before or after. If a required param is missing or ambiguous, don't guess — ask the user a short clarifying question in plain text instead of calling the tool. For anything that isn't an action request, just reply normally in plain conversational text. Tool names like "create_campaign_package" are internal — never write them out in a conversational reply; describe the action in plain English instead (e.g. "generate a campaign package", not "use create_campaign_package").`;
+
+  const systemPrompt = `You are Oriven, an AI marketing co-pilot built into Ads Manager. You help the user plan, create, and optimise their Google, Meta, and TikTok ad campaigns.${hasBrand ? `\n\nBRAND CONTEXT (draw on this when relevant):\n${brandSection}` : ''}${businessSection}${accountsSection}${pageSection}${campaignSection}${toolsSection}
+
+Be conversational and natural. Match the energy of the message — brief for casual small talk, thorough for strategic or campaign questions. Think like a knowledgeable colleague, not a branded bot. Never start with hollow affirmations like "Great!" or "Absolutely!". Be direct. Never mention that you are powered by any specific AI provider or model — you are simply Oriven.${businessContext ? ' When it is relevant, reference specific business knowledge by name (a real product, audience, or competitor) instead of speaking in generalities — it shows the user Oriven actually remembers their business. If competitor information is present, use it only for strategic positioning advice, never to copy or replicate a competitor\'s messaging or content.' : ''}`;
+
+  const messages = [{ role: 'system', content: systemPrompt }];
+  if (Array.isArray(history)) {
+    history.slice(-20).forEach(turn => {
+      if (turn && (turn.role === 'user' || turn.role === 'assistant') && turn.content) {
+        messages.push({ role: turn.role, content: String(turn.content).slice(0, 4000) });
+      }
+    });
+  }
+  messages.push({ role: 'user', content: message });
+
+  const toolCtx = { user: req.user, authHeader: req.headers.authorization || '', currentCampaign, brandCore };
+
+  try {
+    const MAX_TOOL_STEPS = 5;
+    let reply = null;
+    let pendingAction = null;
+
+    for (let step = 0; step < MAX_TOOL_STEPS; step++) {
+      const raw = await _aimlChat(messages, { max_tokens: 1200 });
+      const intent = _parseToolIntent(raw);
+
+      if (!intent) { reply = raw; break; }
+
+      const tool = toolRouter.getTool(intent.tool);
+      if (!tool) { reply = raw; break; } // AI named an unknown tool — fall back to the raw text rather than erroring
+
+      if (tool.requiresConfirmation && !req.user) {
+        reply = "You'll need to be signed in with a connected ad account for me to do that.";
+        break;
+      }
+
+      const result = await toolRouter.resolveTool(intent.tool, intent.params || {}, toolCtx);
+
+      if (!result.ok) { reply = result.error; break; }
+      if (result.clarification) { reply = result.clarification; break; }
+      if (result.unsupported) { reply = result.unsupported; break; }
+      if (result.pendingAction) { pendingAction = result.pendingAction; break; }
+
+      if (result.executed) {
+        messages.push({ role: 'assistant', content: raw });
+        messages.push({ role: 'user', content: `[Tool result for ${intent.tool}]: ${result.message}\n\nUse this to answer, or call another tool if you still need more information. Reply in plain conversational text once you have the final answer — do not show the user raw tool output.` });
+        continue;
+      }
+
+      reply = "I wasn't able to complete that — could you rephrase?";
+      break;
+    }
+
+    if (pendingAction) return res.json({ pendingAction });
+    res.json({ reply: reply || "I wasn't able to complete that — could you rephrase?", usedContext: businessContext ? businessContext.sources : undefined });
+  } catch (err) {
+    console.error('[ai/chat] error:', err.message);
+    res.status(500).json({ error: 'Failed to generate a response. Please try again.' });
+  }
+});
+
+function _parseToolIntent(raw) {
+  const cleaned = String(raw || '').replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/i, '').trim();
+  if (!cleaned.startsWith('{')) return null;
+  try {
+    const obj = JSON.parse(cleaned);
+    if (obj && typeof obj.tool === 'string') return obj;
+  } catch (_) { /* not a tool intent — plain reply */ }
+  return null;
+}
+
+// ── Oriven AI — execute a confirmed action ─────────────────────
+// Used by: action-card "Apply" button (orvAiApplyAction, app.html)
+// Receives: { actionId }   Returns: { message } | { error }
+app.post('/api/ai/execute', requireSubIfAuthed, async (req, res) => {
+  const { actionId } = req.body || {};
+  if (!actionId) return res.status(400).json({ error: 'actionId is required' });
+  if (!req.user) return res.status(401).json({ error: 'Sign in required' });
+
+  const toolCtx = { user: req.user, authHeader: req.headers.authorization || '' };
+  const result = await toolRouter.executeAction(actionId, req.user, toolCtx);
+  if (!result.ok) return res.status(result.status || 500).json({ error: result.error });
+  res.json({ message: result.message });
 });
 
 // -- Campaign Publishing -- Google Ads -------------------------------------
@@ -4763,20 +5952,6 @@ app.delete('/api/tiktok/campaign/:id', async (req, res) => {
   }
 });
 
-// GET /api/ads/tiktok/overview â€” placeholder for TikTok campaign KPIs
-app.get('/api/ads/tiktok/overview', async (req, res) => {
-  // TODO: implement using TikTok Reporting API
-  // POST https://business-api.tiktok.com/open_api/v1.3/report/integrated/get/
-  res.status(503).json({ error: 'TikTok Ads reporting not yet implemented' });
-});
-
-// GET /api/ads/tiktok/campaigns â€” placeholder for TikTok campaign list
-app.get('/api/ads/tiktok/campaigns', async (req, res) => {
-  // TODO: implement using TikTok Campaign API
-  // GET https://business-api.tiktok.com/open_api/v1.3/campaign/get/
-  res.status(503).json({ error: 'TikTok Ads campaigns not yet implemented' });
-});
-
 // â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 // META ADS INTEGRATION
 // Uses Facebook Marketing API v21.0
@@ -5328,11 +6503,201 @@ app.get('/api/meta/campaigns', async (req, res) => {
       };
     });
 
+    // V6 Phase 2 â€” Campaign Priority (calculated, not AI-assigned) â€” same
+    // classifier used by _analyzeMetaAccount, so the table and AI agree.
+    const _avgCtr = _avg(campaigns.map(c => ({ ctr: c.ctr })), 'ctr');
+    campaigns.forEach(c => { c.priority = _campaignPriority(c, _avgCtr, 0); });
+
     console.log('[meta/campaigns] Returned', campaigns.length, 'campaigns |', range);
     res.json({ campaigns, account_id: accountId, date_range: range });
   } catch (err) {
     console.error('[meta/campaigns]', err.message);
     res.status(err.status || 500).json({ error: err.message, meta_code: err.metaCode || null });
+  }
+});
+
+// ── Meta Ads account analysis — live data + AI narrative ────────
+// Mirrors _analyzeGoogleAccount's shape/contract exactly so callers
+// (POST /api/meta/analyze, GET /api/intelligence/home) can treat Google
+// and Meta analysis interchangeably.
+const META_ANALYZE_VALID_RANGES = ['LAST_7_DAYS', 'LAST_14_DAYS', 'LAST_30_DAYS', 'LAST_90_DAYS'];
+
+async function _analyzeMetaAccount(user, range) {
+  range = META_ANALYZE_VALID_RANGES.includes(range) ? range : 'LAST_30_DAYS';
+  const { accessToken, accountId, accountName } = await _getMetaAccess(user);
+  const datePreset = _metaDatePreset(range);
+
+  const [campData, adData] = await Promise.all([
+    _metaFetch('/' + accountId + '/campaigns', accessToken, {
+      fields:           'id,name,status,objective,daily_budget,lifetime_budget,created_time,insights.date_preset(' + datePreset + '){spend,impressions,clicks,ctr,actions}',
+      limit:            '100',
+      effective_status: '["ACTIVE","PAUSED","ARCHIVED"]'
+    }),
+    _metaFetch('/' + accountId + '/ads', accessToken, {
+      fields:  'id,name,status,adset_id,campaign_id,creative{id,title,body,call_to_action_type},insights.date_preset(' + datePreset + '){spend,impressions,clicks,ctr,actions}',
+      limit:   '50',
+      effective_status: '["ACTIVE","PAUSED"]'
+    }).catch(() => ({ data: [] }))
+  ]);
+
+  const f = (n, d = 2) => (typeof n === 'number' ? n.toFixed(d) : '0');
+
+  let totalSpend = 0, totalImpr = 0, totalClicks = 0, totalConv = 0;
+  const campaigns = (campData.data || []).map(c => {
+    const ins = (c.insights && c.insights.data && c.insights.data[0]) || {};
+    const sp = parseFloat(ins.spend || 0);
+    const im = parseInt(ins.impressions || 0, 10);
+    const cl = parseInt(ins.clicks || 0, 10);
+    const cv = _metaConversions(ins.actions);
+    totalSpend += sp; totalImpr += im; totalClicks += cl; totalConv += cv;
+    return {
+      name: c.name || '', status: c.status || '', objective: c.objective || '',
+      spend: sp, impressions: im, clicks: cl, ctr: im > 0 ? (cl / im) * 100 : 0,
+      conversions: cv, cpa: cv > 0 ? sp / cv : 0,
+      daily_budget: c.daily_budget ? Number(c.daily_budget) / 100 : null
+    };
+  });
+
+  // V6 Phase 2 â€” Creative Intelligence, built from ad-level data already fetched above.
+  const creatives = (adData.data || []).map(a => {
+    const ins = (a.insights && a.insights.data && a.insights.data[0]) || {};
+    const cre = a.creative || {};
+    const sp = parseFloat(ins.spend || 0);
+    const im = parseInt(ins.impressions || 0, 10);
+    const cl = parseInt(ins.clicks || 0, 10);
+    const cv = _metaConversions(ins.actions);
+    return { name: cre.title || a.name || 'Untitled ad', campaign: a.campaign_id || '', status: a.status || '', spend: sp, impressions: im, clicks: cl, ctr: im > 0 ? (cl / im) * 100 : 0, conversions: cv };
+  });
+  const avgCreativeCtr = _avg(creatives, 'ctr');
+  creatives.forEach(cr => {
+    cr.performance = cr.impressions < 100 ? 'insufficient_data'
+      : cr.ctr > avgCreativeCtr * 1.3 ? 'top'
+      : cr.ctr < avgCreativeCtr * 0.6 ? 'underperforming'
+      : 'average';
+  });
+  const adLines = creatives.slice().sort((a, b) => b.spend - a.spend).slice(0, 20).map(cr =>
+    `"${cr.name}" | ${cr.status} | â‚¬${f(cr.spend)} spend | ${cr.impressions} impr | CTR: ${f(cr.ctr)}% | Conv: ${f(cr.conversions)}`
+  );
+
+  const campSummary = campaigns.map(c =>
+    `${c.name} | ${c.status} | ${c.objective} | â‚¬${f(c.spend)} | ${c.impressions} impr | ${c.clicks} clicks | CTR: ${f(c.ctr)}% | Conv: ${f(c.conversions)} | CPA: â‚¬${c.cpa > 0 ? f(c.cpa) : 'N/A'}${c.daily_budget ? ' | Daily budget: â‚¬' + f(c.daily_budget) : ''}`
+  ).join('\n');
+
+  const system = `You are a senior Meta Ads (Facebook/Instagram) performance analyst. Analyze this account data and return ONLY valid JSON â€” no markdown, no code fences, no explanation. Start your response with {.
+
+Return exactly this structure:
+{
+  "score": <integer 0-100>,
+  "findings": [
+    {
+      "type": "wasted_spend|low_ctr|conversion_issue|scaling_opportunity|creative_fatigue|budget|audience",
+      "severity": "high|medium|low",
+      "title": "Short specific title (max 8 words)",
+      "detail": "Specific insight with real numbers and campaign/ad names from the data",
+      "action": "Concrete action the advertiser should take right now",
+      "campaign": "exact campaign name this finding is about, or 'Account-wide'",
+      "whyNow": "one sentence on why this matters right now, not later",
+      "platformReason": "one sentence on why this is specific to Meta Ads",
+      "ifIgnored": "one sentence on the likely cost of not acting"
+    }
+  ],
+  "recommendations": [
+    {
+      "type": "budget|creative|audience|bid|copy|structure",
+      "campaign": "exact campaign name or 'Account-wide'",
+      "title": "Short recommendation title",
+      "detail": "Specific action with numbers",
+      "priority": "high|medium|low",
+      "whyNow": "one sentence on why this matters right now, not later",
+      "platformReason": "one sentence on why this is specific to Meta Ads",
+      "ifIgnored": "one sentence on the likely cost of not acting"
+    }
+  ],
+  "strengths": ["specific one-liner with real metric or campaign name"],
+  "weaknesses": ["specific one-liner with real metric or campaign name"],
+  "opportunities": ["specific one-liner with real metric or campaign name"],
+  "creativeNotes": [
+    { "name": "exact ad name from the ADS / CREATIVE PERFORMANCE data below", "note": "one-sentence recommendation for this specific creative" }
+  ]
+}
+
+Score guide: 70+ good, 45-69 average, below 45 poor. Weight: CTR quality 25%, conversion rate 35%, spend efficiency 25%, creative variety/freshness 15%.
+Rules: max 6 findings, max 6 recommendations, 3 strengths, 3 weaknesses, 3 opportunities, max 5 creativeNotes (only for creatives genuinely worth flagging). Reference real names and numbers. Do NOT include a confidence field anywhere — confidence is calculated separately from real data, never state or imply a certainty level yourself. If minimal data, say so explicitly in whyNow/ifIgnored rather than overstating certainty.`;
+
+  // V7 Phase 1 â€” light Context Engine V2 touch, same as Google's analyze fn.
+  const _bizCtx = await _gatherBusinessContext(user.id).catch(() => null);
+
+  const userMsg = `Account: ${accountName} (ID: ${accountId}) | Period: ${range}${_bizCtx ? `\n\nBUSINESS CONTEXT (if competitor info is present, use it only for strategic positioning — never to copy or replicate competitor messaging):\n${_bizCtx.text}` : ''}
+
+TOTALS â€” Spend: â‚¬${f(totalSpend)} | Impressions: ${totalImpr} | Clicks: ${totalClicks} | CTR: ${totalImpr > 0 ? f((totalClicks/totalImpr)*100) : '0.00'}% | Conversions: ${f(totalConv)} | CPA: â‚¬${totalConv > 0 ? f(totalSpend/totalConv) : 'N/A'}
+
+CAMPAIGNS (by spend):
+${campSummary || 'No campaign spend in this period'}
+
+ADS / CREATIVE PERFORMANCE:
+${adLines.length > 0 ? adLines.join('\n') : 'No ad-level data'}`;
+
+  const raw = await _aimlText('text-copy', system, userMsg, { max_tokens: 2200 });
+
+  let parsed;
+  try {
+    parsed = JSON.parse(raw.replace(/^```json\s*/i, '').replace(/```\s*$/, '').trim());
+  } catch (_) {
+    const m = raw.match(/\{[\s\S]*\}/);
+    if (!m) {
+      console.error('[Meta/analyze] unparseable AI response:', raw.slice(0, 300));
+      const parseErr = new Error('AI response could not be parsed â€” try again');
+      parseErr.status = 500;
+      throw parseErr;
+    }
+    parsed = JSON.parse(m[0]);
+  }
+
+  // V6 Phase 2 â€” Campaign Priority (calculated, not AI-assigned)
+  const avgCtr  = _avg(campaigns, 'ctr');
+  const avgRoas = 0; // Meta totals don't include conversion value here, so ROAS-based tiers don't apply
+  const campaignsWithPriority = campaigns.map(c => Object.assign({}, c, { priority: _campaignPriority(Object.assign({ roas: 0 }, c), avgCtr, avgRoas) }));
+
+  // V6 Phase 2 â€” Confidence Engine (calculated, not AI-guessed)
+  const days = _rangeDays(range);
+  const accountTotals = { clicks: totalClicks, conversions: totalConv };
+  const findings        = _attachConfidence(parsed.findings, campaignsWithPriority, accountTotals, days);
+  const recommendations = _attachConfidence(parsed.recommendations, campaignsWithPriority, accountTotals, days);
+
+  (parsed.creativeNotes || []).forEach(note => {
+    const match = creatives.find(cr => cr.name && note.name && cr.name.toLowerCase() === String(note.name).toLowerCase());
+    if (match) match.recommendation = note.note;
+  });
+
+  console.log('[Meta/analyze] score:', parsed.score, '| findings:', findings.length, '| recs:', recommendations.length, '| creatives:', creatives.length);
+  return {
+    score: parsed.score || 0,
+    findings, recommendations,
+    strengths:       parsed.strengths       || [],
+    weaknesses:      parsed.weaknesses      || [],
+    opportunities:   parsed.opportunities   || [],
+    campaigns: campaignsWithPriority,
+    creatives,
+    account:   { id: accountId, name: accountName },
+    date_range: range,
+    totals: {
+      spend: totalSpend, impressions: totalImpr, clicks: totalClicks,
+      ctr: totalImpr > 0 ? (totalClicks / totalImpr) * 100 : 0,
+      conversions: totalConv,
+      cpa: totalConv > 0 ? totalSpend / totalConv : 0
+    }
+  };
+}
+
+app.post('/api/meta/analyze', async (req, res) => {
+  try {
+    const user = await getUserFromToken(req);
+    if (!user) return res.status(401).json({ error: 'Authentication required' });
+    const result = await _analyzeMetaAccount(user, req.body && req.body.date_range);
+    res.json(result);
+  } catch (err) {
+    console.error('[Meta/analyze]', err.message);
+    res.status(err.status || 500).json({ error: err.message || 'Internal server error', meta_code: err.metaCode || null });
   }
 });
 
@@ -5821,6 +7186,13 @@ app.get('/api/ads/overview', async (req, res) => {
       };
     });
 
+    // V6 Phase 2 â€” Campaign Priority (calculated, not AI-assigned) â€” same
+    // classifier used by _analyzeGoogleAccount, so the Analytics table and
+    // the AI analysis always agree on what's critical/scaling/etc.
+    const _avgCtr  = _avg(campaigns, 'ctr');
+    const _avgRoas = _avg(campaigns, 'roas');
+    campaigns.forEach(c => { c.priority = _campaignPriority(c, _avgCtr, _avgRoas); });
+
     const totalSpend = totalCostMicros / 1e6;
     res.json({
       account:    { id: customerId, name: accountName },
@@ -6249,15 +7621,14 @@ app.get('/api/ads/campaign/:id/assets', async (req, res) => {
 // â”€â”€ POST /api/ads/analyze â€” self-contained AI analysis â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 // Fetches fresh data directly from Google Ads API. Accepts only
 // { date_range } from the request body â€” no client data passthrough.
-app.post('/api/ads/analyze', async (req, res) => {
-  try {
-    const user = await getUserFromToken(req);
-    if (!user) return res.status(401).json({ error: 'Authentication required' });
+// ── Google Ads account analysis — live data + AI narrative ──────
+// Used by: POST /api/ads/analyze (below) and GET /api/intelligence/home
+// (V6 Home Dashboard). Extracted so both callers share one implementation.
+const GADS_ANALYZE_VALID_RANGES = ['LAST_7_DAYS', 'LAST_14_DAYS', 'LAST_30_DAYS', 'LAST_90_DAYS'];
 
+async function _analyzeGoogleAccount(user, range) {
+    range = GADS_ANALYZE_VALID_RANGES.includes(range) ? range : 'LAST_30_DAYS';
     const { accessToken, customerId, accountName, loginCustomerId } = await _getGadsAccess(user);
-
-    const VALID_RANGES = ['LAST_7_DAYS', 'LAST_14_DAYS', 'LAST_30_DAYS', 'LAST_90_DAYS'];
-    const range = VALID_RANGES.includes(req.body && req.body.date_range) ? req.body.date_range : 'LAST_30_DAYS';
 
     // Fetch all data in parallel from Google Ads API
     const [campResults, kwResults, stResults, adResults] = await Promise.all([
@@ -6368,6 +7739,29 @@ app.post('/api/ads/analyze', async (req, res) => {
       `${c.name} | ${c.status} | â‚¬${f(c.spend)} | ${c.impressions} impr | ${c.clicks} clicks | CTR: ${f(c.ctr)}% | Conv: ${f(c.conversions)} | CPA: â‚¬${c.cpa > 0 ? f(c.cpa) : 'N/A'} | ROAS: ${f(c.roas)}x`
     ).join('\n');
 
+    // V6 Phase 2 â€” Creative Intelligence. adResults was already being fetched
+    // and thrown away every call; this is the first thing that uses it.
+    const creatives = adResults.map(r => {
+      const aga = r.adGroupAd || {};
+      const ad  = aga.ad || {};
+      const rsa = ad.responsiveSearchAd || {};
+      const eta = ad.expandedTextAd || {};
+      const headline = (rsa.headlines && rsa.headlines[0] && rsa.headlines[0].text) || eta.headlinePart1 || (r.adGroup && r.adGroup.name) || 'Untitled ad';
+      const m  = r.metrics || {};
+      const im = Number(m.impressions || 0), cl = Number(m.clicks || 0), cv = Number(m.conversions || 0), sp = Number(m.costMicros || 0) / 1e6;
+      return { name: headline, campaign: (r.campaign && r.campaign.name) || '', status: aga.status || '', spend: sp, impressions: im, clicks: cl, ctr: im > 0 ? (cl / im) * 100 : 0, conversions: cv };
+    });
+    const avgCreativeCtr = _avg(creatives, 'ctr');
+    creatives.forEach(cr => {
+      cr.performance = cr.impressions < 100 ? 'insufficient_data'
+        : cr.ctr > avgCreativeCtr * 1.3 ? 'top'
+        : cr.ctr < avgCreativeCtr * 0.6 ? 'underperforming'
+        : 'average';
+    });
+    const adLines = creatives.slice().sort((a, b) => b.spend - a.spend).slice(0, 20).map(cr =>
+      `"${cr.name}" | ${cr.campaign} | â‚¬${f(cr.spend)} spend | ${cr.impressions} impr | CTR: ${f(cr.ctr)}% | Conv: ${f(cr.conversions)}`
+    );
+
     const system = `You are a senior Google Ads performance analyst. Analyze this account data and return ONLY valid JSON â€” no markdown, no code fences, no explanation. Start your response with {.
 
 Return exactly this structure:
@@ -6379,7 +7773,11 @@ Return exactly this structure:
       "severity": "high|medium|low",
       "title": "Short specific title (max 8 words)",
       "detail": "Specific insight with real numbers and campaign/keyword names from the data",
-      "action": "Concrete action the advertiser should take right now"
+      "action": "Concrete action the advertiser should take right now",
+      "campaign": "exact campaign name this finding is about, or 'Account-wide'",
+      "whyNow": "one sentence on why this matters right now, not later",
+      "platformReason": "one sentence on why this is specific to Google Ads",
+      "ifIgnored": "one sentence on the likely cost of not acting"
     }
   ],
   "recommendations": [
@@ -6388,18 +7786,29 @@ Return exactly this structure:
       "campaign": "exact campaign name or 'Account-wide'",
       "title": "Short recommendation title",
       "detail": "Specific action with numbers",
-      "priority": "high|medium|low"
+      "priority": "high|medium|low",
+      "whyNow": "one sentence on why this matters right now, not later",
+      "platformReason": "one sentence on why this is specific to Google Ads",
+      "ifIgnored": "one sentence on the likely cost of not acting"
     }
   ],
   "strengths": ["specific one-liner with real metric or campaign name"],
   "weaknesses": ["specific one-liner with real metric or campaign name"],
-  "opportunities": ["specific one-liner with real metric or campaign name"]
+  "opportunities": ["specific one-liner with real metric or campaign name"],
+  "creativeNotes": [
+    { "name": "exact headline or ad name from the AD PERFORMANCE data below", "note": "one-sentence recommendation for this specific creative" }
+  ]
 }
 
 Score guide: 70+ good, 45-69 average, below 45 poor. Weight: CTR quality 25%, conversion rate 35%, ROAS 25%, spend efficiency 15%.
-Rules: max 6 findings, max 6 recommendations, 3 strengths, 3 weaknesses, 3 opportunities. High severity = major spend impact. Reference real names and numbers. If minimal data, score conservatively and note it.`;
+Rules: max 6 findings, max 6 recommendations, 3 strengths, 3 weaknesses, 3 opportunities, max 5 creativeNotes (only for creatives genuinely worth flagging — a top performer or a clear underperformer). Reference real names and numbers. Do NOT include a confidence field anywhere — confidence is calculated separately from real data, never state or imply a certainty level yourself. If minimal data, say so explicitly in whyNow/ifIgnored rather than overstating certainty.`;
 
-    const userMsg = `Account: ${accountName} (ID: ${customerId}) | Period: ${range}
+    // V7 Phase 1 â€” light Context Engine V2 touch: real product/audience
+    // names so recommendations can reference the actual business, not a
+    // full context dump into an already-large prompt.
+    const _bizCtx = await _gatherBusinessContext(user.id).catch(() => null);
+
+    const userMsg = `Account: ${accountName} (ID: ${customerId}) | Period: ${range}${_bizCtx ? `\n\nBUSINESS CONTEXT (if competitor info is present, use it only for strategic positioning — never to copy or replicate competitor messaging):\n${_bizCtx.text}` : ''}
 
 TOTALS â€” Spend: â‚¬${f(totalSpend)} | Impressions: ${totalImpr} | Clicks: ${totalClicks} | CTR: ${totalImpr > 0 ? f((totalClicks/totalImpr)*100) : '0.00'}% | Conversions: ${f(totalConv)} | CPA: â‚¬${totalConv > 0 ? f(totalSpend/totalConv) : 'N/A'} | ROAS: ${totalSpend > 0 ? f(totalConvVal/totalSpend) : '0.00'}x | Revenue: â‚¬${f(totalConvVal)}
 
@@ -6413,30 +7822,72 @@ SEARCH TERMS WITH SPEND BUT ZERO CONVERSIONS (potential wasted spend):
 ${wastedLines.length > 0 ? wastedLines.join('\n') : 'None identified'}
 
 HIGH-SPEND CAMPAIGNS WITH ZERO CONVERSIONS:
-${zeroCampLines.length > 0 ? zeroCampLines.join('\n') : 'None â€” all campaigns with spend have conversions'}`;
+${zeroCampLines.length > 0 ? zeroCampLines.join('\n') : 'None â€” all campaigns with spend have conversions'}
 
-    const raw = await _aimlText('text-copy', system, userMsg, { max_tokens: 2200 });
+AD PERFORMANCE (top by spend â€” use these exact names in creativeNotes):
+${adLines.length > 0 ? adLines.join('\n') : 'No ad-level data'}`;
+
+    const raw = await _aimlText('text-copy', system, userMsg, { max_tokens: 2400 });
 
     let parsed;
     try {
       parsed = JSON.parse(raw.replace(/^```json\s*/i, '').replace(/```\s*$/, '').trim());
     } catch (_) {
       const m = raw.match(/\{[\s\S]*\}/);
-      if (!m) { console.error('[Ads/analyze] unparseable AI response:', raw.slice(0, 300)); return res.status(500).json({ error: 'AI response could not be parsed â€” try again' }); }
+      if (!m) {
+        console.error('[Ads/analyze] unparseable AI response:', raw.slice(0, 300));
+        const parseErr = new Error('AI response could not be parsed â€” try again');
+        parseErr.status = 500;
+        throw parseErr;
+      }
       parsed = JSON.parse(m[0]);
     }
 
-    console.log('[Ads/analyze] score:', parsed.score, '| findings:', parsed.findings?.length, '| recs:', parsed.recommendations?.length);
-    res.json({
-      score:           parsed.score           || 0,
-      findings:        parsed.findings        || [],
-      recommendations: parsed.recommendations || [],
+    // V6 Phase 2 â€” Campaign Priority (calculated, not AI-assigned)
+    const avgCtr  = _avg(campaigns, 'ctr');
+    const avgRoas = _avg(campaigns, 'roas');
+    const campaignsWithPriority = campaigns.map(c => Object.assign({}, c, { priority: _campaignPriority(c, avgCtr, avgRoas) }));
+
+    // V6 Phase 2 â€” Confidence Engine (calculated, not AI-guessed)
+    const days = _rangeDays(range);
+    const accountTotals = { clicks: totalClicks, conversions: totalConv };
+    const findings        = _attachConfidence(parsed.findings, campaignsWithPriority, accountTotals, days);
+    const recommendations = _attachConfidence(parsed.recommendations, campaignsWithPriority, accountTotals, days);
+
+    // Merge the AI's qualitative creative notes onto the deterministic creatives array
+    (parsed.creativeNotes || []).forEach(note => {
+      const match = creatives.find(cr => cr.name && note.name && cr.name.toLowerCase() === String(note.name).toLowerCase());
+      if (match) match.recommendation = note.note;
+    });
+
+    console.log('[Ads/analyze] score:', parsed.score, '| findings:', findings.length, '| recs:', recommendations.length, '| creatives:', creatives.length);
+    return {
+      score:           parsed.score || 0,
+      findings, recommendations,
       strengths:       parsed.strengths       || [],
       weaknesses:      parsed.weaknesses      || [],
       opportunities:   parsed.opportunities   || [],
+      campaigns: campaignsWithPriority,
+      creatives,
       account:   { id: customerId, name: accountName },
-      date_range: range
-    });
+      date_range: range,
+      totals: {
+        spend: totalSpend, impressions: totalImpr, clicks: totalClicks,
+        ctr: totalImpr > 0 ? (totalClicks / totalImpr) * 100 : 0,
+        conversions: totalConv,
+        cpa: totalConv > 0 ? totalSpend / totalConv : 0,
+        roas: totalSpend > 0 ? totalConvVal / totalSpend : 0,
+        conversions_value: totalConvVal
+      }
+    };
+}
+
+app.post('/api/ads/analyze', async (req, res) => {
+  try {
+    const user = await getUserFromToken(req);
+    if (!user) return res.status(401).json({ error: 'Authentication required' });
+    const result = await _analyzeGoogleAccount(user, req.body && req.body.date_range);
+    res.json(result);
   } catch (err) {
     console.error('[Ads/analyze]', err.message);
     res.status(err.status || 500).json({ error: err.message || 'Internal server error', gads_status: err.gadsStatus || null, gads_codes: err.gadsErrorCodes || null });
@@ -6580,6 +8031,1472 @@ ${negCandidates || 'None with significant spend'}`;
   }
 });
 
+// ── V6 Home Intelligence Dashboard ───────────────────────────────
+// Period-over-period comparison: Google Ads and Meta both retain their own
+// historical performance data, so "CTR increased 13%" is answerable by
+// querying two explicit date windows live and diffing them — no local
+// metrics-history storage needed.
+
+function _periodWindows(days) {
+  const fmt = d => d.toISOString().slice(0, 10);
+  const now = new Date();
+  const currentEnd = new Date(now);
+  const currentStart = new Date(now); currentStart.setDate(currentStart.getDate() - (days - 1));
+  const prevEnd = new Date(currentStart); prevEnd.setDate(prevEnd.getDate() - 1);
+  const prevStart = new Date(prevEnd); prevStart.setDate(prevStart.getDate() - (days - 1));
+  return {
+    current:  { since: fmt(currentStart), until: fmt(currentEnd) },
+    previous: { since: fmt(prevStart),    until: fmt(prevEnd) }
+  };
+}
+
+async function _gadsFetchTotals(accessToken, customerId, loginCustomerId, sinceISO, untilISO) {
+  const results = await _gadsQuery(accessToken, customerId, `
+    SELECT metrics.cost_micros, metrics.impressions, metrics.clicks, metrics.conversions, metrics.conversions_value
+    FROM campaign
+    WHERE segments.date BETWEEN '${sinceISO}' AND '${untilISO}'
+      AND campaign.status != 'REMOVED'
+  `, loginCustomerId);
+  let spend = 0, impr = 0, clicks = 0, conv = 0, convVal = 0;
+  results.forEach(r => {
+    const m = r.metrics || {};
+    spend   += Number(m.costMicros || 0) / 1e6;
+    impr    += Number(m.impressions || 0);
+    clicks  += Number(m.clicks || 0);
+    conv    += Number(m.conversions || 0);
+    convVal += Number(m.conversionsValue || 0);
+  });
+  return {
+    spend, impressions: impr, clicks,
+    ctr: impr > 0 ? (clicks / impr) * 100 : 0,
+    conversions: conv,
+    cpa: conv > 0 ? spend / conv : 0,
+    roas: spend > 0 ? convVal / spend : 0
+  };
+}
+
+async function _metaFetchTotals(accessToken, accountId, sinceISO, untilISO) {
+  const data = await _metaFetch('/' + accountId + '/insights', accessToken, {
+    time_range: JSON.stringify({ since: sinceISO, until: untilISO }),
+    fields: 'spend,impressions,clicks,ctr,actions'
+  });
+  const row = (data.data && data.data[0]) || {};
+  const spend = parseFloat(row.spend || 0);
+  const impr  = parseInt(row.impressions || 0, 10);
+  const clicks = parseInt(row.clicks || 0, 10);
+  const conv = _metaConversions(row.actions);
+  return {
+    spend, impressions: impr, clicks,
+    ctr: impr > 0 ? (clicks / impr) * 100 : 0,
+    conversions: conv,
+    cpa: conv > 0 ? spend / conv : 0
+  };
+}
+
+// V6 Final Phase â€” Predictive Intelligence. Daily-granularity history for a
+// deterministic trend forecast (same real-data-only ethos as the Confidence
+// Engine): the AI is only ever asked to narrate numbers already computed
+// here, never to produce the numbers itself.
+async function _gadsFetchDailySeries(accessToken, customerId, loginCustomerId, days) {
+  const fmt = d => d.toISOString().slice(0, 10);
+  const until = new Date();
+  const since = new Date(); since.setDate(since.getDate() - (days - 1));
+  const results = await _gadsQuery(accessToken, customerId, `
+    SELECT segments.date, metrics.cost_micros, metrics.impressions, metrics.clicks, metrics.conversions, metrics.conversions_value
+    FROM campaign
+    WHERE segments.date BETWEEN '${fmt(since)}' AND '${fmt(until)}'
+      AND campaign.status != 'REMOVED'
+  `, loginCustomerId);
+  const byDate = {};
+  results.forEach(r => {
+    const d = r.segments && r.segments.date;
+    if (!d) return;
+    const m = r.metrics || {};
+    if (!byDate[d]) byDate[d] = { date: d, spend: 0, impressions: 0, clicks: 0, conversions: 0, conversions_value: 0 };
+    byDate[d].spend             += Number(m.costMicros || 0) / 1e6;
+    byDate[d].impressions       += Number(m.impressions || 0);
+    byDate[d].clicks            += Number(m.clicks || 0);
+    byDate[d].conversions       += Number(m.conversions || 0);
+    byDate[d].conversions_value += Number(m.conversionsValue || 0);
+  });
+  return Object.values(byDate).sort((a, b) => (a.date < b.date ? -1 : 1));
+}
+
+async function _metaFetchDailySeries(accessToken, accountId, days) {
+  const fmt = d => d.toISOString().slice(0, 10);
+  const until = new Date();
+  const since = new Date(); since.setDate(since.getDate() - (days - 1));
+  const data = await _metaFetch('/' + accountId + '/insights', accessToken, {
+    time_range: JSON.stringify({ since: fmt(since), until: fmt(until) }),
+    time_increment: '1',
+    fields: 'spend,impressions,clicks,actions'
+  });
+  return (data.data || []).map(row => ({
+    date: row.date_start,
+    spend: parseFloat(row.spend || 0),
+    impressions: parseInt(row.impressions || 0, 10),
+    clicks: parseInt(row.clicks || 0, 10),
+    conversions: _metaConversions(row.actions)
+  })).sort((a, b) => (a.date < b.date ? -1 : 1));
+}
+
+function _linearTrend(values) {
+  const n = values.length;
+  if (n < 2) return { slope: 0, intercept: values[0] || 0 };
+  let sumX = 0, sumY = 0, sumXY = 0, sumXX = 0;
+  values.forEach((y, x) => { sumX += x; sumY += y; sumXY += x * y; sumXX += x * x; });
+  const denom = n * sumXX - sumX * sumX;
+  const slope = denom !== 0 ? (n * sumXY - sumX * sumY) / denom : 0;
+  const intercept = (sumY - slope * sumX) / n;
+  return { slope, intercept };
+}
+
+// Deterministic linear-trend forecast, extrapolated forward from real
+// observed daily history. Rates (CTR/ROAS) are projected as trend-adjusted
+// ratios, not summed. Confidence is reduced further for longer horizons â€”
+// a 30-day forecast is inherently less certain than a 7-day one.
+function _computeForecast(series, horizonDays) {
+  const n = series.length;
+  const projectSum = values => {
+    const { slope, intercept } = _linearTrend(values);
+    let total = 0;
+    for (let i = 0; i < horizonDays; i++) total += Math.max(0, intercept + slope * (n + i));
+    return total;
+  };
+
+  const spendSeries       = series.map(d => d.spend || 0);
+  const clicksSeries      = series.map(d => d.clicks || 0);
+  const imprSeries        = series.map(d => d.impressions || 0);
+  const convSeries        = series.map(d => d.conversions || 0);
+  const hasRevenue        = series.some(d => d.conversions_value != null);
+  const revenueSeries     = hasRevenue ? series.map(d => d.conversions_value || 0) : null;
+
+  const forecastSpend        = projectSum(spendSeries);
+  const forecastClicks       = projectSum(clicksSeries);
+  const forecastImpressions  = projectSum(imprSeries);
+  const forecastConversions  = projectSum(convSeries);
+  const forecastRevenue      = hasRevenue ? projectSum(revenueSeries) : null;
+
+  const totalClicks = clicksSeries.reduce((a, b) => a + b, 0);
+  const totalConv   = convSeries.reduce((a, b) => a + b, 0);
+  const baseConfidence = _calcConfidence({ clicks: totalClicks, conversions: totalConv, days: n });
+  const confidence = Math.round(baseConfidence * (horizonDays <= 7 ? 1 : 0.75));
+
+  return {
+    horizonDays,
+    spend: forecastSpend,
+    impressions: Math.round(forecastImpressions),
+    clicks: Math.round(forecastClicks),
+    conversions: Math.round(forecastConversions * 10) / 10,
+    ctr: forecastImpressions > 0 ? (forecastClicks / forecastImpressions) * 100 : 0,
+    revenue: forecastRevenue,
+    roas: (forecastRevenue != null && forecastSpend > 0) ? forecastRevenue / forecastSpend : null,
+    confidence,
+    confidenceBasis: `${n} days of history, ${Math.round(totalClicks)} clicks, ${Math.round(totalConv)} conversions observed`
+  };
+}
+
+app.get('/api/intelligence/forecast', requireSubIfAuthed, async (req, res) => {
+  try {
+    if (!req.user) return res.status(401).json({ error: 'Authentication required' });
+    const platform = req.query.platform === 'meta' ? 'meta' : 'google';
+    const horizon = parseInt(req.query.horizon, 10) === 30 ? 30 : 7;
+    const historyDays = 30; // observe a stable window regardless of horizon
+
+    let series;
+    if (platform === 'google') {
+      const { accessToken, customerId, loginCustomerId } = await _getGadsAccess(req.user);
+      series = await _gadsFetchDailySeries(accessToken, customerId, loginCustomerId, historyDays);
+    } else {
+      const { accessToken, accountId } = await _getMetaAccess(req.user);
+      series = await _metaFetchDailySeries(accessToken, accountId, historyDays);
+    }
+
+    if (series.length < 3) {
+      return res.json({ available: false, reason: 'Not enough historical data yet to forecast reliably.' });
+    }
+
+    const forecast = _computeForecast(series, horizon);
+
+    let reasoning = `Based on the trend over the last ${series.length} days of real performance data.`;
+    let keyAssumptions = ['Recent performance trends continue at a similar rate.'];
+    try {
+      const system = `You are Oriven, writing a one-sentence "reasoning" and up to 3 "keyAssumptions" for an ALREADY-COMPUTED forecast. Do not change or invent any numbers â€” only explain the ones given. Return ONLY valid JSON, no markdown, no code fences: {"reasoning": "one sentence", "keyAssumptions": ["short assumption", "..."]}`;
+      const userMsg = `Platform: ${platform === 'google' ? 'Google Ads' : 'Meta Ads'}\nHorizon: ${horizon} days\nForecast: spend â‚¬${forecast.spend.toFixed(2)}, clicks ${forecast.clicks}, conversions ${forecast.conversions}, CTR ${forecast.ctr.toFixed(2)}%${forecast.roas != null ? ', ROAS ' + forecast.roas.toFixed(2) + 'x' : ''}\nBased on: ${forecast.confidenceBasis}\nConfidence: ${forecast.confidence}%`;
+      const raw = await _aimlText('forecast', system, userMsg, { max_tokens: 300 });
+      const cleaned = raw.replace(/^```(?:json)?\s*/i, '').replace(/```\s*$/, '').trim();
+      const parsed = JSON.parse(cleaned);
+      if (parsed.reasoning) reasoning = parsed.reasoning;
+      if (parsed.keyAssumptions) keyAssumptions = parsed.keyAssumptions;
+    } catch (err) {
+      console.warn('[intelligence/forecast] narrative synthesis failed, using fallback text:', err.message);
+    }
+
+    res.json(Object.assign({ available: true, platform, reasoning, keyAssumptions }, forecast));
+  } catch (err) {
+    console.error('[intelligence/forecast]', err.message);
+    res.status(err.status || 500).json({ error: err.message || 'Could not compute a forecast right now.' });
+  }
+});
+
+// Pure diff â€” no API calls. Only computes deltas for metrics present in `current`,
+// so Google's (with roas) and Meta's (without) totals both work unmodified.
+function _computeDelta(current, previous) {
+  const out = {};
+  Object.keys(current).forEach(k => {
+    const cur = current[k] || 0;
+    const prev = (previous && previous[k]) || 0;
+    let deltaPct = null, trend = 'flat';
+    if (prev > 0) {
+      deltaPct = ((cur - prev) / prev) * 100;
+      trend = deltaPct > 1 ? 'up' : deltaPct < -1 ? 'down' : 'flat';
+    } else if (cur > 0) {
+      trend = 'up';
+    }
+    out[k] = { value: cur, prevValue: prev, deltaPct, trend };
+  });
+  return out;
+}
+
+function _rangeDays(range) {
+  return { LAST_7_DAYS: 7, LAST_14_DAYS: 14, LAST_30_DAYS: 30, LAST_90_DAYS: 90 }[range] || 30;
+}
+
+// V6 Phase 2 â€” Confidence Engine. Confidence is a function of REAL observed
+// sample size (clicks, conversions, days) â€” never the model's own guess.
+// Log-scaled so early data moves the needle fast and extra volume has
+// diminishing returns; capped 8-96 so nothing ever reads as 0% or 100% sure.
+function _calcConfidence({ clicks, conversions, days }) {
+  const score = Math.min(40, Math.log10((clicks || 0) + 1) * 22)
+              + Math.min(40, Math.log10((conversions || 0) + 1) * 28)
+              + Math.min(20, ((days || 1) / 14) * 20);
+  return Math.round(Math.max(8, Math.min(96, score)));
+}
+
+// Matches a finding/recommendation's `campaign` field against the real
+// campaigns array already computed for this call; falls back to account
+// totals for "Account-wide" items. Overwrites whatever confidence the AI
+// guessed, and attaches confidenceBasis so the UI can show its working.
+function _attachConfidence(items, campaigns, accountTotals, days) {
+  return (items || []).map(item => {
+    const camp = (campaigns || []).find(c => c.name && item.campaign && c.name.toLowerCase() === String(item.campaign).toLowerCase());
+    const sample = camp
+      ? { clicks: camp.clicks, conversions: camp.conversions, days }
+      : { clicks: accountTotals.clicks, conversions: accountTotals.conversions, days };
+    item.confidence = _calcConfidence(sample);
+    item.confidenceBasis = `${days} days, ${Math.round(sample.clicks)} clicks, ${Math.round(sample.conversions)} conversions`;
+    return item;
+  });
+}
+
+// V6 Phase 2 â€” Campaign Priority System. Deterministic, calculated against
+// the account's own average â€” not AI-assigned â€” so it's explainable and
+// consistent every time the same numbers come in.
+function _campaignPriority(c, avgCtr, avgRoas) {
+  if (c.spend > 5 && c.conversions === 0) return { level: 'critical', reason: 'Spending with zero conversions' };
+  if (avgCtr && c.ctr < avgCtr * 0.5 && c.impressions > 500) return { level: 'needs_attention', reason: 'CTR well below account average' };
+  if (avgRoas && c.roas > avgRoas * 1.6 && c.conversions >= 5) return { level: 'excellent', reason: 'Top-performing campaign by ROAS' };
+  if (avgRoas && c.roas > avgRoas * 1.3 && c.conversions >= 3) return { level: 'scaling', reason: 'ROAS significantly above account average' };
+  return { level: 'healthy', reason: 'Performing within normal range' };
+}
+
+function _avg(arr, key) {
+  const vals = (arr || []).map(x => x[key]).filter(v => typeof v === 'number' && v > 0);
+  return vals.length ? vals.reduce((a, b) => a + b, 0) / vals.length : 0;
+}
+
+// V6 Phase 2 â€” Cross-Platform Budget Intelligence. Composes on top of the
+// Confidence Engine and Campaign Priority System instead of computing its
+// own numbers from scratch â€” every recommendation traces back to real,
+// already-computed deltas and priorities.
+function _crossPlatformRecommendations(platforms) {
+  const recs = [];
+  const g = platforms.google, m = platforms.meta;
+  if (!g || g.error || !m || m.error) return recs;
+
+  const gCpa = g.delta.cpa && g.delta.cpa.value;
+  const mCpa = m.delta.cpa && m.delta.cpa.value;
+  if (gCpa > 0 && mCpa > 0) {
+    const gapPct = Math.abs(gCpa - mCpa) / Math.max(gCpa, mCpa) * 100;
+    if (gapPct > 20) {
+      const winner = gCpa < mCpa ? 'google' : 'meta';
+      const loser  = winner === 'google' ? 'meta' : 'google';
+      const winnerLabel = winner === 'google' ? 'Google Ads' : 'Meta Ads';
+      const loserLabel  = loser  === 'google' ? 'Google Ads' : 'Meta Ads';
+      const winnerCpa  = winner === 'google' ? gCpa : mCpa;
+      const loserCpa   = loser  === 'google' ? gCpa : mCpa;
+      const loserSpend = platforms[loser].delta.spend.value;
+      const moveAmount = Math.round(loserSpend * 0.2);
+      const extraConversions = winnerCpa > 0 ? moveAmount / winnerCpa : 0;
+      recs.push({
+        type: 'move_budget',
+        title: `Move budget from ${loserLabel} to ${winnerLabel}`,
+        reasoning: `${winnerLabel}'s cost per conversion (â‚¬${winnerCpa.toFixed(2)}) is ${gapPct.toFixed(0)}% lower than ${loserLabel}'s (â‚¬${loserCpa.toFixed(2)}) over the last 7 days.`,
+        expectedImprovement: `~${extraConversions.toFixed(1)} more conversions/week at the same total spend`,
+        confidence: _calcConfidence({ clicks: platforms[winner].delta.clicks.value, conversions: platforms[winner].delta.conversions.value, days: 7 }),
+        message: `Move about â‚¬${moveAmount}/week of budget from ${loserLabel} to ${winnerLabel} â€” ${winnerLabel} is converting more efficiently right now.`
+      });
+    }
+  }
+
+  ['google', 'meta'].forEach(key => {
+    const pd = platforms[key];
+    if (!pd || pd.error || !pd.campaigns) return;
+    const label = key === 'google' ? 'Google Ads' : 'Meta Ads';
+    pd.campaigns.filter(c => c.priority && (c.priority.level === 'scaling' || c.priority.level === 'excellent')).slice(0, 1).forEach(c => {
+      recs.push({
+        type: 'scale_winner',
+        title: `Scale "${c.name}" on ${label}`,
+        reasoning: c.priority.reason + (c.roas ? ` ROAS ${c.roas.toFixed(2)}x.` : ''),
+        expectedImprovement: 'More conversions at similar efficiency if scaled gradually',
+        confidence: _calcConfidence({ clicks: c.clicks, conversions: c.conversions, days: 7 }),
+        message: `Increase the budget for "${c.name}" on ${label} â€” it's one of the top-performing campaigns right now.`
+      });
+    });
+    pd.campaigns.filter(c => c.priority && c.priority.level === 'critical').slice(0, 1).forEach(c => {
+      recs.push({
+        type: 'reduce_loser',
+        title: `Reduce or pause "${c.name}" on ${label}`,
+        reasoning: c.priority.reason,
+        expectedImprovement: `Save ~â‚¬${c.spend.toFixed(2)}/week in wasted spend`,
+        confidence: _calcConfidence({ clicks: c.clicks, conversions: c.conversions, days: 7 }),
+        message: `Pause "${c.name}" on ${label} â€” it's spending without converting.`
+      });
+    });
+  });
+
+  return recs;
+}
+
+// GET /api/intelligence/kpi-trend â€” real period-over-period delta for one
+// platform's KPI row (Analytics page). Thin wrapper over the same fetch +
+// diff machinery /api/intelligence/home already uses, generalized to any
+// supported date_range instead of a fixed 7-day window.
+app.get('/api/intelligence/kpi-trend', requireSubIfAuthed, async (req, res) => {
+  try {
+    if (!req.user) return res.status(401).json({ error: 'Authentication required' });
+    const platform = req.query.platform === 'meta' ? 'meta' : 'google';
+    const range = req.query.date_range;
+    const days = _rangeDays(range);
+    const windows = _periodWindows(days);
+
+    let delta;
+    if (platform === 'google') {
+      const { accessToken, customerId, loginCustomerId } = await _getGadsAccess(req.user);
+      const [current, previous] = await Promise.all([
+        _gadsFetchTotals(accessToken, customerId, loginCustomerId, windows.current.since, windows.current.until),
+        _gadsFetchTotals(accessToken, customerId, loginCustomerId, windows.previous.since, windows.previous.until)
+      ]);
+      delta = _computeDelta(current, previous);
+    } else {
+      const { accessToken, accountId } = await _getMetaAccess(req.user);
+      const [current, previous] = await Promise.all([
+        _metaFetchTotals(accessToken, accountId, windows.current.since, windows.current.until),
+        _metaFetchTotals(accessToken, accountId, windows.previous.since, windows.previous.until)
+      ]);
+      delta = _computeDelta(current, previous);
+    }
+    res.json({ delta, days });
+  } catch (err) {
+    console.error('[intelligence/kpi-trend]', err.message);
+    res.status(err.status || 500).json({ error: err.message || 'Could not compute trend' });
+  }
+});
+
+// ── V6 Final Phase â€” Intelligence Event Log â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// One table (`intelligence_events`), one write helper (shared with
+// services/toolRouter.js via services/eventLog.js), one read endpoint,
+// used by three different frontend presentations (Live Feed, Notifications,
+// Intelligence Timeline) so there's exactly one source of truth for
+// "things Oriven detected or did" rather than three parallel systems.
+const _eventLog = require('./services/eventLog');
+const _logIntelligenceEvent = _eventLog.logEvent;
+
+app.get('/api/intelligence/events', requireSubIfAuthed, async (req, res) => {
+  try {
+    if (!req.user) return res.status(401).json({ error: 'Authentication required' });
+    const days = Math.min(180, Math.max(1, parseInt(req.query.days, 10) || 7));
+    const since = new Date(Date.now() - days * 24 * 60 * 60 * 1000).toISOString();
+
+    let query = supabaseAdmin.from('intelligence_events')
+      .select('*')
+      .eq('user_id', req.user.id)
+      .gte('created_at', since)
+      .order('created_at', { ascending: false })
+      .limit(200);
+
+    if (req.query.severity) query = query.eq('severity', req.query.severity);
+    if (req.query.type) query = query.eq('type', req.query.type);
+    if (req.query.dismissed === 'false') query = query.eq('dismissed', false);
+    if (req.query.dismissed === 'true') query = query.eq('dismissed', true);
+
+    const { data, error } = await query;
+    if (error) throw error;
+    res.json({ events: data || [] });
+  } catch (err) {
+    console.error('[intelligence/events]', err.message);
+    res.status(500).json({ error: 'Could not load your activity feed right now.' });
+  }
+});
+
+app.patch('/api/intelligence/events/:id/dismiss', requireSubIfAuthed, async (req, res) => {
+  try {
+    if (!req.user) return res.status(401).json({ error: 'Authentication required' });
+    const { data, error } = await supabaseAdmin.from('intelligence_events')
+      .update({ dismissed: true })
+      .eq('id', req.params.id)
+      .eq('user_id', req.user.id)
+      .select('id')
+      .maybeSingle();
+    if (error) throw error;
+    if (!data) return res.status(404).json({ error: 'Not found' });
+    res.json({ ok: true });
+  } catch (err) {
+    console.error('[intelligence/events/dismiss]', err.message);
+    res.status(500).json({ error: 'Could not dismiss that.' });
+  }
+});
+
+// GET /api/intelligence/home â€” single data source for the V6 Home Dashboard.
+// Combines: connected-platform detection, period-over-period deltas (real
+// trend data, not fabricated), and the existing _analyzeGoogleAccount /
+// _analyzeMetaAccount score+findings â€” then asks the AI to synthesize (not
+// invent) a short narrative briefing on top of those real numbers.
+// V6 Final Phase â€” shared platform-intelligence loader. Extracted out of
+// /api/intelligence/home so /api/intelligence/briefing, /opportunities, and
+// /executive reuse the exact same Google+Meta loading logic instead of each
+// re-deriving it (Epic 9: "no duplicate logic").
+function _rangeForDays(days) {
+  return days <= 7 ? 'LAST_7_DAYS' : days <= 14 ? 'LAST_14_DAYS' : days <= 30 ? 'LAST_30_DAYS' : 'LAST_90_DAYS';
+}
+
+async function _gatherPlatformIntelligence(user, days) {
+  const { data: rows } = await supabaseAdmin
+    .from('integrations').select('provider').eq('user_id', user.id).in('provider', ['google_ads', 'meta_ads']);
+  const providers = new Set((rows || []).map(r => r.provider));
+  const hasGoogle = providers.has('google_ads');
+  const hasMeta   = providers.has('meta_ads');
+  const platforms = {};
+  if (!hasGoogle && !hasMeta) return { hasGoogle, hasMeta, platforms };
+
+  const windows = _periodWindows(days);
+  const range = _rangeForDays(days);
+  const tasks = [];
+  if (hasGoogle) {
+    tasks.push((async () => {
+      try {
+        const { accessToken, customerId, loginCustomerId } = await _getGadsAccess(user);
+        const [current, previous, analysis] = await Promise.all([
+          _gadsFetchTotals(accessToken, customerId, loginCustomerId, windows.current.since, windows.current.until),
+          _gadsFetchTotals(accessToken, customerId, loginCustomerId, windows.previous.since, windows.previous.until),
+          _analyzeGoogleAccount(user, range)
+        ]);
+        platforms.google = { delta: _computeDelta(current, previous), score: analysis.score, findings: analysis.findings, recommendations: analysis.recommendations, campaigns: analysis.campaigns, creatives: analysis.creatives };
+      } catch (err) {
+        console.warn('[intelligence] Google load failed:', err.message);
+        platforms.google = { error: true };
+      }
+    })());
+  }
+  if (hasMeta) {
+    tasks.push((async () => {
+      try {
+        const { accessToken, accountId } = await _getMetaAccess(user);
+        const [current, previous, analysis] = await Promise.all([
+          _metaFetchTotals(accessToken, accountId, windows.current.since, windows.current.until),
+          _metaFetchTotals(accessToken, accountId, windows.previous.since, windows.previous.until),
+          _analyzeMetaAccount(user, range)
+        ]);
+        platforms.meta = { delta: _computeDelta(current, previous), score: analysis.score, findings: analysis.findings, recommendations: analysis.recommendations, campaigns: analysis.campaigns, creatives: analysis.creatives };
+      } catch (err) {
+        console.warn('[intelligence] Meta load failed:', err.message);
+        platforms.meta = { error: true };
+      }
+    })());
+  }
+  await Promise.all(tasks);
+  return { hasGoogle, hasMeta, platforms };
+}
+
+function _computeHealthScore(platforms) {
+  const scores = Object.values(platforms).filter(p => p && !p.error).map(p => p.score);
+  const healthScore = scores.length ? Math.round(scores.reduce((a, b) => a + b, 0) / scores.length) : null;
+  const healthLabel = healthScore === null ? null : healthScore >= 70 ? 'Excellent' : healthScore >= 45 ? 'Good' : 'Needs attention';
+  return { healthScore, healthLabel };
+}
+
+app.get('/api/intelligence/home', requireSubIfAuthed, async (req, res) => {
+  try {
+    if (!req.user) return res.json({ connected: false });
+
+    const { hasGoogle, hasMeta, platforms } = await _gatherPlatformIntelligence(req.user, 7);
+    if (!hasGoogle && !hasMeta) return res.json({ connected: false });
+
+    // Deterministic (non-AI) platform comparison â€” only when both are live.
+    // Full side-by-side on every metric that's honestly available for both
+    // platforms; ROAS is Google-only since Meta's fetched totals here don't
+    // include conversion value â€” shown as null for Meta, never fabricated.
+    let comparison = null;
+    if (platforms.google && !platforms.google.error && platforms.meta && !platforms.meta.error) {
+      const gd = platforms.google.delta, md = platforms.meta.delta;
+      const cpc = d => d.clicks.value > 0 ? d.spend.value / d.clicks.value : 0;
+      const cpm = d => d.impressions.value > 0 ? (d.spend.value / d.impressions.value) * 1000 : 0;
+      comparison = {
+        table: {
+          spend:       { google: gd.spend.value,       meta: md.spend.value },
+          ctr:         { google: gd.ctr.value,          meta: md.ctr.value },
+          cpc:         { google: cpc(gd),                meta: cpc(md) },
+          cpm:         { google: cpm(gd),                meta: cpm(md) },
+          cpa:         { google: gd.cpa.value,          meta: md.cpa.value },
+          conversions: { google: gd.conversions.value,  meta: md.conversions.value },
+          roas:        { google: gd.roas ? gd.roas.value : null, meta: null }
+        },
+        betterCtr: gd.ctr.value >= md.ctr.value ? 'google' : 'meta',
+        betterCpa: (gd.cpa.value || Infinity) <= (md.cpa.value || Infinity) ? 'google' : 'meta',
+        recommendations: _crossPlatformRecommendations(platforms)
+      };
+    }
+
+    const { healthScore, healthLabel } = _computeHealthScore(platforms);
+
+    const hour = new Date().getHours();
+    const timeGreeting = hour < 12 ? 'Good morning' : hour < 17 ? 'Good afternoon' : 'Good evening';
+
+    const platformSummaryLines = [];
+    [['google', 'Google Ads'], ['meta', 'Meta Ads']].forEach(([key, label]) => {
+      const pd = platforms[key];
+      if (!pd || pd.error) return;
+      const d = pd.delta;
+      platformSummaryLines.push(`${label}: spend â‚¬${d.spend.value.toFixed(2)} (${d.spend.trend}), CTR ${d.ctr.value.toFixed(2)}% (${d.ctr.trend}${d.ctr.deltaPct !== null ? ', ' + d.ctr.deltaPct.toFixed(1) + '%' : ''}), conversions ${d.conversions.value.toFixed(1)} (${d.conversions.trend}), health score ${pd.score}/100`);
+      (pd.findings || []).slice(0, 2).forEach(f => platformSummaryLines.push(`  - ${label} finding: ${f.title} â€” ${f.detail}`));
+    });
+
+    let narrative = { summaryItems: [], recommendedActions: [] };
+    if (platformSummaryLines.length) {
+      try {
+        const system = `You are Oriven, synthesizing a marketing performance briefing from REAL data already computed below. Do not invent numbers or findings â€” only reference what's given. Return ONLY valid JSON, no markdown, no code fences. Start with {.
+Structure:
+{
+  "summaryItems": [ { "type": "success|warning|opportunity", "text": "short specific sentence, e.g. 'Google CTR increased 12%'" } ],
+  "recommendedActions": [ { "title": "short imperative, e.g. 'Increase Meta budget'", "why": "one sentence reason grounded in the data", "message": "the exact plain-language instruction to send to Oriven Chat to carry this out" } ]
+}
+Rules: max 5 summaryItems, max 4 recommendedActions, prioritize the highest-impact items, be specific with real numbers and platform names, never fabricate a number that isn't in the data below.`;
+        const userMsg = `Time of day: ${timeGreeting}\n\nPLATFORM DATA:\n${platformSummaryLines.join('\n')}`;
+        const raw = await _aimlText('home-briefing', system, userMsg, { max_tokens: 900 });
+        const cleaned = raw.replace(/^```(?:json)?\s*/i, '').replace(/```\s*$/, '').trim();
+        const parsed = JSON.parse(cleaned);
+        narrative.summaryItems = parsed.summaryItems || [];
+        narrative.recommendedActions = parsed.recommendedActions || [];
+      } catch (err) {
+        console.warn('[intelligence/home] narrative synthesis failed, falling back to raw findings:', err.message);
+      }
+    }
+
+    res.json({
+      connected: true,
+      greeting: timeGreeting,
+      healthScore, healthLabel,
+      summaryItems: narrative.summaryItems,
+      recommendedActions: narrative.recommendedActions,
+      comparison,
+      platforms
+    });
+  } catch (err) {
+    console.error('[intelligence/home]', err.message);
+    res.status(500).json({ error: 'Could not load your briefing right now. Please try again.' });
+  }
+});
+
+// V6 Final Phase â€” Daily / Weekly / Monthly Briefings. Reuses the exact
+// home-briefing narrative pattern above with a longer/framed lookback and a
+// richer executive-style structure â€” not a new generator.
+app.get('/api/intelligence/briefing', requireSubIfAuthed, async (req, res) => {
+  try {
+    if (!req.user) return res.json({ connected: false });
+    const period = ['daily', 'weekly', 'monthly'].includes(req.query.period) ? req.query.period : 'daily';
+    const days = period === 'daily' ? 1 : period === 'weekly' ? 7 : 30;
+
+    const { hasGoogle, hasMeta, platforms } = await _gatherPlatformIntelligence(req.user, days);
+    if (!hasGoogle && !hasMeta) return res.json({ connected: false });
+
+    const { healthScore, healthLabel } = _computeHealthScore(platforms);
+    const crossPlatform = (platforms.google && !platforms.google.error && platforms.meta && !platforms.meta.error)
+      ? _crossPlatformRecommendations(platforms) : [];
+
+    const lines = [];
+    [['google', 'Google Ads'], ['meta', 'Meta Ads']].forEach(([key, label]) => {
+      const pd = platforms[key];
+      if (!pd || pd.error) return;
+      const d = pd.delta;
+      lines.push(`${label}: spend â‚¬${d.spend.value.toFixed(2)} (${d.spend.trend}), CTR ${d.ctr.value.toFixed(2)}% (${d.ctr.trend}), conversions ${d.conversions.value.toFixed(1)} (${d.conversions.trend}), score ${pd.score}/100`);
+      (pd.findings || []).slice(0, 3).forEach(f => lines.push(`  - finding (${f.severity}): ${f.title} â€” ${f.detail}`));
+      (pd.recommendations || []).slice(0, 2).forEach(r => lines.push(`  - recommendation: ${r.title} â€” ${r.detail}`));
+    });
+
+    let brief = { wins: [], losses: [], recommendations: [], nextActions: [] };
+    try {
+      const system = `You are Oriven, writing a ${period} executive marketing brief from REAL data already computed below â€” a marketing director's report, not a dashboard dump. Do not invent numbers. Return ONLY valid JSON, no markdown: { "headline": "one sentence", "wins": ["..."], "losses": ["..."], "recommendations": ["..."], "nextActions": ["..."] }. Max 4 items per list.`;
+      const userMsg = `Period: ${period}\n\n${lines.join('\n') || 'No platform data available.'}`;
+      const raw = await _aimlText('home-briefing', system, userMsg, { max_tokens: 900 });
+      const cleaned = raw.replace(/^```(?:json)?\s*/i, '').replace(/```\s*$/, '').trim();
+      const parsed = JSON.parse(cleaned);
+      brief = { headline: parsed.headline || '', wins: parsed.wins || [], losses: parsed.losses || [], recommendations: parsed.recommendations || [], nextActions: parsed.nextActions || [] };
+    } catch (err) {
+      console.warn('[intelligence/briefing] narrative failed:', err.message);
+    }
+
+    res.json({ connected: true, period, healthScore, healthLabel, ...brief, platformComparison: crossPlatform, platforms });
+  } catch (err) {
+    console.error('[intelligence/briefing]', err.message);
+    res.status(500).json({ error: 'Could not generate your briefing right now.' });
+  }
+});
+
+// V6 Final Phase â€” Opportunity Engine. Not a new analysis system: pools the
+// `recommendations` that _analyzeGoogleAccount / _analyzeMetaAccount already
+// compute, ranks by confidence Ã— priority, account-wide instead of per-platform.
+app.get('/api/intelligence/opportunities', requireSubIfAuthed, async (req, res) => {
+  try {
+    if (!req.user) return res.json({ connected: false });
+    const { hasGoogle, hasMeta, platforms } = await _gatherPlatformIntelligence(req.user, 7);
+    if (!hasGoogle && !hasMeta) return res.json({ connected: false });
+
+    const priorityWeight = { high: 3, medium: 2, low: 1 };
+    const pooled = [];
+    [['google', 'Google Ads'], ['meta', 'Meta Ads']].forEach(([key, label]) => {
+      const pd = platforms[key];
+      if (!pd || pd.error) return;
+      (pd.recommendations || []).forEach(r => {
+        pooled.push(Object.assign({ platform: key, platformLabel: label }, r,
+          { rank: (r.confidence || 0) * (priorityWeight[r.priority] || 1) }));
+      });
+    });
+    if (platforms.google && !platforms.google.error && platforms.meta && !platforms.meta.error) {
+      _crossPlatformRecommendations(platforms).forEach(r => {
+        pooled.push(Object.assign({ platform: 'cross', platformLabel: 'Cross-Platform' }, r,
+          { rank: (r.confidence || 0) * 2.5 }));
+      });
+    }
+    pooled.sort((a, b) => b.rank - a.rank);
+
+    res.json({ connected: true, opportunities: pooled.slice(0, 12) });
+  } catch (err) {
+    console.error('[intelligence/opportunities]', err.message);
+    res.status(500).json({ error: 'Could not load opportunities right now.' });
+  }
+});
+
+// V6 Final Phase â€” Executive Mode. One request bundling the pieces already
+// built above (health, opportunities, warnings, 7-day forecast) so the
+// frontend can render "understand everything in 30 seconds" from one call.
+app.get('/api/intelligence/executive', requireSubIfAuthed, async (req, res) => {
+  try {
+    if (!req.user) return res.json({ connected: false });
+    const { hasGoogle, hasMeta, platforms } = await _gatherPlatformIntelligence(req.user, 7);
+    if (!hasGoogle && !hasMeta) return res.json({ connected: false });
+
+    const { healthScore, healthLabel } = _computeHealthScore(platforms);
+
+    const priorityWeight = { high: 3, medium: 2, low: 1 };
+    const pooled = [];
+    const warnings = [];
+    [['google', 'Google Ads'], ['meta', 'Meta Ads']].forEach(([key, label]) => {
+      const pd = platforms[key];
+      if (!pd || pd.error) return;
+      (pd.recommendations || []).forEach(r => pooled.push(Object.assign({ platform: key, platformLabel: label }, r, { rank: (r.confidence || 0) * (priorityWeight[r.priority] || 1) })));
+      (pd.findings || []).filter(f => f.severity === 'high').forEach(f => warnings.push(Object.assign({ platform: key, platformLabel: label }, f)));
+    });
+    pooled.sort((a, b) => b.rank - a.rank);
+
+    const forecasts = {};
+    const forecastTasks = [];
+    if (hasGoogle) forecastTasks.push((async () => {
+      try {
+        const { accessToken, customerId, loginCustomerId } = await _getGadsAccess(req.user);
+        const series = await _gadsFetchDailySeries(accessToken, customerId, loginCustomerId, 30);
+        if (series.length >= 3) forecasts.google = _computeForecast(series, 7);
+      } catch (err) { console.warn('[intelligence/executive] Google forecast failed:', err.message); }
+    })());
+    if (hasMeta) forecastTasks.push((async () => {
+      try {
+        const { accessToken, accountId } = await _getMetaAccess(req.user);
+        const series = await _metaFetchDailySeries(accessToken, accountId, 30);
+        if (series.length >= 3) forecasts.meta = _computeForecast(series, 7);
+      } catch (err) { console.warn('[intelligence/executive] Meta forecast failed:', err.message); }
+    })());
+    await Promise.all(forecastTasks);
+
+    res.json({
+      connected: true,
+      healthScore, healthLabel,
+      topOpportunities: pooled.slice(0, 3),
+      warnings: warnings.slice(0, 5),
+      forecasts,
+      recommendedActions: pooled.slice(0, 3)
+    });
+  } catch (err) {
+    console.error('[intelligence/executive]', err.message);
+    res.status(500).json({ error: 'Could not load your executive summary right now.' });
+  }
+});
+
+// ════════════════════════════════════════════════════════════════
+// V7 Phase 1 â€” Business Brain
+// Structured business knowledge (profile, products, audiences,
+// competitors, memory) + a real backend read of brand_cores + a real
+// website fetch â€” all wired into Context Engine V2 so nothing needs
+// to be explained twice. No new analysis engine: reuses _aimlText,
+// the existing brand_cores table, and the Tool Router's confirmation
+// flow exactly as they already work.
+// ════════════════════════════════════════════════════════════════
+
+// â”€â”€ Backend brand read â”€â”€ mirrors auth.js's client-side loader (server.js
+// has never read brand_cores before â€” it was written only from the
+// browser). This is what lets server-side callers (chat, analyze, cron)
+// see brand identity without the frontend having to pass it every time.
+async function _getBrandCore(userId) {
+  try {
+    const { data } = await supabaseAdmin.from('brand_cores').select('brand_data').eq('user_id', userId).maybeSingle();
+    return (data && data.brand_data) || null;
+  } catch (err) {
+    console.warn('[BusinessBrain] brand_cores read failed:', err.message);
+    return null;
+  }
+}
+
+// â”€â”€ Business Profile (one row per user) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+app.get('/api/business/profile', async (req, res) => {
+  try {
+    const user = await getUserFromToken(req);
+    if (!user) return res.status(401).json({ error: 'Authentication required' });
+    const { data, error } = await supabaseAdmin.from('business_profile').select('*').eq('user_id', user.id).maybeSingle();
+    if (error) throw error;
+    res.json({ profile: data || null });
+  } catch (err) {
+    console.error('[business/profile GET]', err.message);
+    res.status(500).json({ error: 'Could not load your business profile.' });
+  }
+});
+
+app.put('/api/business/profile', async (req, res) => {
+  try {
+    const user = await getUserFromToken(req);
+    if (!user) return res.status(401).json({ error: 'Authentication required' });
+    const b = req.body || {};
+    const row = {
+      user_id: user.id,
+      company_name: b.company_name || null, website: b.website || null, industry: b.industry || null,
+      country: b.country || null, languages: Array.isArray(b.languages) ? b.languages : null,
+      description: b.description || null, mission: b.mission || null, vision: b.vision || null,
+      primary_goals: b.primary_goals || null, business_stage: b.business_stage || null,
+      updated_at: new Date().toISOString()
+    };
+    const { data, error } = await supabaseAdmin.from('business_profile').upsert(row, { onConflict: 'user_id' }).select().maybeSingle();
+    if (error) throw error;
+    res.json({ profile: data });
+  } catch (err) {
+    console.error('[business/profile PUT]', err.message);
+    res.status(500).json({ error: 'Could not save your business profile.' });
+  }
+});
+
+// â”€â”€ Generic CRUD for products / audiences / competitors â”€â”€ one
+// implementation shared by all three instead of three near-identical
+// route sets (Epic 15 / "no duplicate logic").
+function _businessCrud(table, allowedFields) {
+  return {
+    async list(userId) {
+      const { data, error } = await supabaseAdmin.from(table).select('*').eq('user_id', userId).order('created_at', { ascending: false });
+      if (error) throw error;
+      return data || [];
+    },
+    async create(userId, body) {
+      const row = { user_id: userId };
+      allowedFields.forEach(f => { if (body[f] !== undefined) row[f] = body[f]; });
+      const { data, error } = await supabaseAdmin.from(table).insert(row).select().maybeSingle();
+      if (error) throw error;
+      return data;
+    },
+    async update(userId, id, body) {
+      const row = {};
+      allowedFields.forEach(f => { if (body[f] !== undefined) row[f] = body[f]; });
+      row.updated_at = new Date().toISOString();
+      const { data, error } = await supabaseAdmin.from(table).update(row).eq('id', id).eq('user_id', userId).select().maybeSingle();
+      if (error) throw error;
+      return data;
+    },
+    async remove(userId, id) {
+      const { error } = await supabaseAdmin.from(table).delete().eq('id', id).eq('user_id', userId);
+      if (error) throw error;
+    }
+  };
+}
+
+const _productsCrud    = _businessCrud('business_products',    ['name','category','description','benefits','features','price','target_audience','problem_solved','usp','landing_page','image_url','video_url','status']);
+const _audiencesCrud   = _businessCrud('business_audiences',   ['name','age_range','location','language','pain_points','goals','objections','buying_triggers','budget','preferred_platforms','interests','behaviour']);
+const _competitorsCrud = _businessCrud('business_competitors', ['company','website','strengths','weaknesses','pricing','positioning','visual_style','messaging','products']);
+
+function _registerBusinessCrudRoutes(path, crud, label) {
+  app.get('/api/business/' + path, async (req, res) => {
+    try {
+      const user = await getUserFromToken(req);
+      if (!user) return res.status(401).json({ error: 'Authentication required' });
+      res.json({ items: await crud.list(user.id) });
+    } catch (err) { console.error(`[business/${path} GET]`, err.message); res.status(500).json({ error: `Could not load your ${label}.` }); }
+  });
+  app.post('/api/business/' + path, async (req, res) => {
+    try {
+      const user = await getUserFromToken(req);
+      if (!user) return res.status(401).json({ error: 'Authentication required' });
+      res.json({ item: await crud.create(user.id, req.body || {}) });
+    } catch (err) { console.error(`[business/${path} POST]`, err.message); res.status(500).json({ error: 'Could not save that.' }); }
+  });
+  app.put('/api/business/' + path + '/:id', async (req, res) => {
+    try {
+      const user = await getUserFromToken(req);
+      if (!user) return res.status(401).json({ error: 'Authentication required' });
+      const item = await crud.update(user.id, req.params.id, req.body || {});
+      if (!item) return res.status(404).json({ error: 'Not found' });
+      res.json({ item });
+    } catch (err) { console.error(`[business/${path} PUT]`, err.message); res.status(500).json({ error: 'Could not save that.' }); }
+  });
+  app.delete('/api/business/' + path + '/:id', async (req, res) => {
+    try {
+      const user = await getUserFromToken(req);
+      if (!user) return res.status(401).json({ error: 'Authentication required' });
+      await crud.remove(user.id, req.params.id);
+      res.json({ ok: true });
+    } catch (err) { console.error(`[business/${path} DELETE]`, err.message); res.status(500).json({ error: 'Could not delete that.' }); }
+  });
+}
+_registerBusinessCrudRoutes('products',    _productsCrud,    'products');
+_registerBusinessCrudRoutes('audiences',   _audiencesCrud,   'audiences');
+_registerBusinessCrudRoutes('competitors', _competitorsCrud, 'competitors');
+
+// â”€â”€ Business Memory (Epic 6 "winning X" + Epic 9 "remember this") â”€â”€
+// Append-mostly log, not full CRUD â€” list/create/delete cover the
+// spec's "remember automatically, allow editing, allow deleting"
+// (editing a remembered fact is delete + re-remember, kept simple
+// deliberately rather than adding an update path for a log table).
+app.get('/api/business/memory', async (req, res) => {
+  try {
+    const user = await getUserFromToken(req);
+    if (!user) return res.status(401).json({ error: 'Authentication required' });
+    const { data, error } = await supabaseAdmin.from('business_memory').select('*').eq('user_id', user.id).order('created_at', { ascending: false }).limit(200);
+    if (error) throw error;
+    res.json({ memory: data || [] });
+  } catch (err) {
+    console.error('[business/memory GET]', err.message);
+    res.status(500).json({ error: 'Could not load your memory.' });
+  }
+});
+
+app.post('/api/business/memory', async (req, res) => {
+  try {
+    const user = await getUserFromToken(req);
+    if (!user) return res.status(401).json({ error: 'Authentication required' });
+    const b = req.body || {};
+    if (!b.content) return res.status(400).json({ error: 'content is required' });
+    const row = { user_id: user.id, type: b.type || 'fact', content: b.content, source: b.source || 'manual', related_campaign: b.related_campaign || null };
+    const { data, error } = await supabaseAdmin.from('business_memory').insert(row).select().maybeSingle();
+    if (error) throw error;
+    res.json({ memory: data });
+  } catch (err) {
+    console.error('[business/memory POST]', err.message);
+    res.status(500).json({ error: 'Could not save that.' });
+  }
+});
+
+app.delete('/api/business/memory/:id', async (req, res) => {
+  try {
+    const user = await getUserFromToken(req);
+    if (!user) return res.status(401).json({ error: 'Authentication required' });
+    const { error } = await supabaseAdmin.from('business_memory').delete().eq('id', req.params.id).eq('user_id', user.id);
+    if (error) throw error;
+    res.json({ ok: true });
+  } catch (err) {
+    console.error('[business/memory DELETE]', err.message);
+    res.status(500).json({ error: 'Could not delete that.' });
+  }
+});
+
+// â”€â”€ Website Understanding (Epic 7) â€” a REAL fetch, not URL-only AI
+// speculation like /api/website-monitor does today. No new dependency:
+// plain fetch + regex-based text extraction.
+async function _fetchWebsiteText(url) {
+  const ctrl = new AbortController();
+  const tid = setTimeout(() => ctrl.abort(), 10000);
+  let html;
+  try {
+    const r = await fetch(url, { signal: ctrl.signal, headers: { 'User-Agent': 'Mozilla/5.0 (compatible; OrivenBot/1.0)' } });
+    html = await r.text();
+  } finally {
+    clearTimeout(tid);
+  }
+
+  const titleMatch = html.match(/<title[^>]*>([^<]*)<\/title>/i);
+  const descMatch  = html.match(/<meta[^>]+name=["']description["'][^>]+content=["']([^"']*)["']/i);
+  const navLinks   = Array.from(html.matchAll(/<a[^>]+href=["'][^"']+["'][^>]*>([^<]{2,40})<\/a>/gi)).slice(0, 30).map(m => m[1].trim()).filter(Boolean);
+
+  let text = html
+    .replace(/<script[\s\S]*?<\/script>/gi, ' ')
+    .replace(/<style[\s\S]*?<\/style>/gi, ' ')
+    .replace(/<!--[\s\S]*?-->/g, ' ')
+    .replace(/<[^>]+>/g, ' ')
+    .replace(/&nbsp;/g, ' ').replace(/&amp;/g, '&').replace(/&[a-z]+;/gi, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, 6000);
+
+  return { title: titleMatch ? titleMatch[1].trim() : '', description: descMatch ? descMatch[1].trim() : '', navLinks, text };
+}
+
+// Meaningfully different = the AI's fresh read of the site disagrees with what's
+// stored, not just whitespace/punctuation noise — good enough for "ask before
+// overwriting" without needing a fuzzy-diff library.
+function _websiteChanged(prev, next) {
+  if (!prev) return false; // nothing stored yet — first analysis, nothing to ask about
+  const norm = s => String(s || '').trim().toLowerCase().replace(/\s+/g, ' ');
+  return ['products', 'services', 'ctas', 'positioning', 'tone'].some(f => norm(prev[f]) !== norm(next[f]));
+}
+
+app.post('/api/business/website/refresh', async (req, res) => {
+  try {
+    const user = await getUserFromToken(req);
+    if (!user) return res.status(401).json({ error: 'Authentication required' });
+    let url = (req.body && req.body.url || '').trim();
+    if (!url) return res.status(400).json({ error: 'url is required' });
+    if (!/^https?:\/\//i.test(url)) url = 'https://' + url;
+
+    const { data: existing } = await supabaseAdmin.from('business_website_knowledge').select('*').eq('user_id', user.id).maybeSingle();
+
+    const page = await _fetchWebsiteText(url);
+
+    const system = `You are a business analyst. Analyze this REAL website content (already fetched, not guessed) and return ONLY valid JSON, no markdown, no code fences: { "products": "short summary of products/services offered", "services": "short summary", "ctas": "main calls to action seen on the page", "positioning": "how the brand positions itself", "tone": "the tone/voice of the copy" }`;
+    const userMsg = `URL: ${url}\nTitle: ${page.title}\nMeta description: ${page.description}\nNav/link labels: ${page.navLinks.join(', ')}\n\nPage text (excerpt):\n${page.text}`;
+    const raw = await _aimlText('website-intel', system, userMsg, { max_tokens: 700 });
+    const cleaned = raw.replace(/^```(?:json)?\s*/i, '').replace(/```\s*$/, '').trim();
+    let parsed = {};
+    try { parsed = JSON.parse(cleaned); } catch (_) { console.warn('[business/website/refresh] AI response unparseable, storing fetch-only result'); }
+
+    const row = {
+      user_id: user.id, url,
+      products: parsed.products || null, services: parsed.services || null,
+      ctas: parsed.ctas || null, positioning: parsed.positioning || null, tone: parsed.tone || null,
+      analyzed_at: new Date().toISOString()
+    };
+
+    if (existing && existing.url === url && _websiteChanged(existing, row)) {
+      await supabaseAdmin.from('intelligence_events').insert({
+        user_id: user.id, platform: null, type: 'website_change',
+        title: 'Your website content has changed',
+        detail: 'Oriven noticed changes on your website since it last analyzed it — review before updating your Business Brain.',
+        message: 'We noticed changes on your website — update your Business Brain with the new content?'
+      });
+      return res.json({ changed: true, previous: existing, proposed: row });
+    }
+
+    const { data, error } = await supabaseAdmin.from('business_website_knowledge').upsert(row, { onConflict: 'user_id' }).select().maybeSingle();
+    if (error) throw error;
+    res.json({ website: data, changed: false });
+  } catch (err) {
+    console.error('[business/website/refresh]', err.message);
+    res.status(500).json({ error: 'Could not analyze that website right now.' });
+  }
+});
+
+app.post('/api/business/website/confirm-update', async (req, res) => {
+  try {
+    const user = await getUserFromToken(req);
+    if (!user) return res.status(401).json({ error: 'Authentication required' });
+    const proposed = req.body && req.body.proposed;
+    if (!proposed || !proposed.url) return res.status(400).json({ error: 'proposed is required' });
+
+    const row = {
+      user_id: user.id, url: proposed.url,
+      products: proposed.products || null, services: proposed.services || null,
+      ctas: proposed.ctas || null, positioning: proposed.positioning || null, tone: proposed.tone || null,
+      analyzed_at: new Date().toISOString()
+    };
+    const { data, error } = await supabaseAdmin.from('business_website_knowledge').upsert(row, { onConflict: 'user_id' }).select().maybeSingle();
+    if (error) throw error;
+    res.json({ website: data });
+  } catch (err) {
+    console.error('[business/website/confirm-update]', err.message);
+    res.status(500).json({ error: 'Could not update your Business Brain.' });
+  }
+});
+
+app.get('/api/business/website', async (req, res) => {
+  try {
+    const user = await getUserFromToken(req);
+    if (!user) return res.status(401).json({ error: 'Authentication required' });
+    const { data, error } = await supabaseAdmin.from('business_website_knowledge').select('*').eq('user_id', user.id).maybeSingle();
+    if (error) throw error;
+    res.json({ website: data || null });
+  } catch (err) {
+    console.error('[business/website GET]', err.message);
+    res.status(500).json({ error: 'Could not load your website knowledge.' });
+  }
+});
+
+// â”€â”€ Context Engine V2 (Epic 11/12) â”€â”€ the actual "never repeat
+// yourself" mechanism. One compact text block, pulled into every AI
+// call that has a user â€” same style as _buildBrandSection (server.js:624).
+async function _gatherBusinessContext(userId) {
+  try {
+    const [profileRes, productsRes, audiencesRes, competitorsRes, brandCore, websiteRes, memoryRes, learningsRes] = await Promise.all([
+      supabaseAdmin.from('business_profile').select('*').eq('user_id', userId).maybeSingle(),
+      supabaseAdmin.from('business_products').select('name,category,usp,target_audience').eq('user_id', userId).order('created_at', { ascending: false }).limit(8),
+      supabaseAdmin.from('business_audiences').select('name,pain_points,goals').eq('user_id', userId).order('created_at', { ascending: false }).limit(5),
+      supabaseAdmin.from('business_competitors').select('company,positioning').eq('user_id', userId).order('created_at', { ascending: false }).limit(3),
+      _getBrandCore(userId),
+      supabaseAdmin.from('business_website_knowledge').select('products,services,positioning,tone').eq('user_id', userId).maybeSingle(),
+      supabaseAdmin.from('business_memory').select('content,type').eq('user_id', userId).order('created_at', { ascending: false }).limit(5),
+      supabaseAdmin.from('business_learnings').select('pattern,confidence').eq('user_id', userId).eq('status', 'active').order('confidence', { ascending: false }).limit(5)
+    ]);
+
+    const profile     = profileRes.data;
+    const products     = productsRes.data || [];
+    const audiences    = audiencesRes.data || [];
+    const competitors  = competitorsRes.data || [];
+    const website      = websiteRes.data;
+    const memory       = memoryRes.data || [];
+    const learnings    = learningsRes.data || [];
+
+    const lines = [];
+    const sources = [];
+    if (profile) {
+      if (profile.company_name) { lines.push(`Company: ${profile.company_name}${profile.industry ? ' (' + profile.industry + ')' : ''}`); sources.push('Business profile'); }
+      if (profile.description)  lines.push(`About: ${profile.description}`);
+      if (profile.business_stage) lines.push(`Stage: ${profile.business_stage}`);
+      if (profile.primary_goals) lines.push(`Goals: ${profile.primary_goals}`);
+    }
+    if (brandCore) {
+      let usedBrand = false;
+      if (brandCore.toneOfVoice) { lines.push(`Brand tone of voice: ${brandCore.toneOfVoice}`); usedBrand = true; }
+      if (brandCore.usp)         { lines.push(`Brand USP: ${brandCore.usp}`); usedBrand = true; }
+      if (brandCore.wordsAvoid)  { lines.push(`Words to avoid: ${Array.isArray(brandCore.wordsAvoid) ? brandCore.wordsAvoid.join(', ') : brandCore.wordsAvoid}`); usedBrand = true; }
+      if (usedBrand) sources.push('Brand voice');
+    }
+    if (products.length)  { lines.push(`Products: ${products.map(p => p.name + (p.usp ? ' (' + p.usp + ')' : '')).join('; ')}`); products.forEach(p => sources.push(`Product: ${p.name}`)); }
+    if (audiences.length) { lines.push(`Target audiences: ${audiences.map(a => a.name).join(', ')}`); audiences.forEach(a => sources.push(`Audience: ${a.name}`)); }
+    if (competitors.length) { lines.push(`Known competitors: ${competitors.map(c => c.company + (c.positioning ? ' (' + c.positioning + ')' : '')).join('; ')}`); competitors.forEach(c => sources.push(`Competitor: ${c.company}`)); }
+    if (website && (website.products || website.services || website.positioning || website.tone)) {
+      lines.push(`Website analysis: ${[website.products, website.services, website.positioning, website.tone].filter(Boolean).join(' | ')}`);
+      sources.push('Website knowledge');
+    }
+    if (memory.length) { lines.push(`Remembered: ${memory.map(m => m.content).join('; ')}`); sources.push(`${memory.length} remembered fact${memory.length === 1 ? '' : 's'}`); }
+    if (learnings.length) { lines.push(`What Oriven has learned from real performance: ${learnings.map(l => `${l.pattern} (${l.confidence}% confidence)`).join('; ')}`); sources.push(`${learnings.length} learned pattern${learnings.length === 1 ? '' : 's'}`); }
+
+    return lines.length ? { text: lines.join('\n'), sources } : null;
+  } catch (err) {
+    console.warn('[BusinessBrain] context gather failed:', err.message);
+    return null;
+  }
+}
+
+// â”€â”€ Business Health (Epic 13) â€” deterministic completeness scoring,
+// same spirit as V6's Marketing Health, no AI involved.
+function _fieldFillRatio(obj, fields) {
+  if (!obj) return 0;
+  const filled = fields.filter(f => obj[f] !== null && obj[f] !== undefined && String(obj[f]).trim() !== '').length;
+  return Math.round((filled / fields.length) * 100);
+}
+
+async function _computeBusinessHealth(userId) {
+  const [profileRes, productsRes, audiencesRes, competitorsRes, brandCore, websiteRes, learningsRes] = await Promise.all([
+    supabaseAdmin.from('business_profile').select('*').eq('user_id', userId).maybeSingle(),
+    supabaseAdmin.from('business_products').select('id').eq('user_id', userId),
+    supabaseAdmin.from('business_audiences').select('id').eq('user_id', userId),
+    supabaseAdmin.from('business_competitors').select('id').eq('user_id', userId),
+    _getBrandCore(userId),
+    supabaseAdmin.from('business_website_knowledge').select('user_id').eq('user_id', userId).maybeSingle(),
+    supabaseAdmin.from('business_learnings').select('entity_type,entity_name,category,pattern,confidence').eq('user_id', userId).eq('status', 'active').gte('confidence', 70)
+  ]);
+
+  const profileScore    = _fieldFillRatio(profileRes.data, ['company_name','website','industry','country','description','mission','vision','primary_goals','business_stage']);
+  const productsScore   = Math.min(100, (productsRes.data || []).length * 25);
+  const audienceScore   = Math.min(100, (audiencesRes.data || []).length * 34);
+  const competitorScore = Math.min(100, (competitorsRes.data || []).length * 34);
+  const brandScore      = _fieldFillRatio(brandCore, ['name','toneOfVoice','usp','audience','story','colors']);
+  const websiteScore    = websiteRes.data ? 100 : 0;
+  const overall = Math.round((profileScore + productsScore + audienceScore + competitorScore + brandScore + websiteScore) / 6);
+
+  // V7 Phase 2 (Epic 7/11) â€” deterministic, template-based recommendations
+  // straight off the category scores above. No AI judgment calls here: these
+  // are "you have 0 of X saved" facts, not opinions.
+  const recommendations = [];
+  if (profileScore < 60) recommendations.push({ severity: profileScore < 30 ? 'high' : 'medium', title: 'Complete your business profile', detail: 'Fill in the missing fields on the Business tab so Oriven understands your company.', tab: 'business', message: 'Help me fill out my business profile — ask me what you need to know.' });
+  if (productsScore < 50) recommendations.push({ severity: productsScore === 0 ? 'high' : 'medium', title: 'Add another product', detail: 'The more products Oriven knows, the less it has to ask when generating campaigns.', tab: 'products', message: 'Help me add a product to my Business Brain — ask me about it.' });
+  if (audienceScore < 50) recommendations.push({ severity: audienceScore === 0 ? 'high' : 'medium', title: 'Add a target audience', detail: 'Saved audiences let Oriven target the right people automatically.', tab: 'audiences', message: 'Help me define a target audience for my business — ask me about it.' });
+  if (competitorScore < 50) recommendations.push({ severity: 'low', title: 'Add a competitor', detail: 'Competitor context sharpens positioning advice — Oriven never copies it, only compares against it.', tab: 'competitors', message: 'Help me think through who my real competitors are.' });
+  if (brandScore < 60) recommendations.push({ severity: 'medium', title: 'Finish your brand voice', detail: 'Tone of voice, USP, and words to avoid keep every generated ad on-brand.', tab: 'business', message: 'Help me define my brand voice — ask me about tone, USP, and words to avoid.' });
+  if (websiteScore === 0) recommendations.push({ severity: 'high', title: 'Connect your website', detail: 'Add your website URL so Oriven can learn your real products, offers, and tone directly from it.', tab: 'website', message: 'How do I connect my website to my Business Brain?' });
+
+  // V7 Final Phase (Epic 12) â€” Self Improvement. Once a real, high-confidence
+  // learning exists, surface it as a concrete next step â€” same card shape,
+  // no new UI. Only messaging/positioning-relevant categories apply here
+  // (performance learnings like "winning campaign" are informational, not
+  // an action for the user to take).
+  const ACTIONABLE_LEARNING_CATEGORIES = { winning_messaging: 'USP', creative_pattern: 'ad copy', winning_cta: 'CTA', winning_headline: 'headlines', winning_landing_page: 'landing page' };
+  (learningsRes.data || []).filter(l => ACTIONABLE_LEARNING_CATEGORIES[l.category]).slice(0, 2).forEach(l => {
+    recommendations.push({
+      severity: 'low',
+      title: `Consider updating your ${ACTIONABLE_LEARNING_CATEGORIES[l.category]}`,
+      detail: `${l.pattern} (${l.confidence}% confidence).`,
+      message: `Based on what you've learned — "${l.pattern}" — help me update my ${ACTIONABLE_LEARNING_CATEGORIES[l.category]} to match.`
+    });
+  });
+
+  return {
+    overall,
+    categories: {
+      businessProfile: profileScore, products: productsScore, audienceKnowledge: audienceScore,
+      competitorKnowledge: competitorScore, brandCompleteness: brandScore, websiteUnderstanding: websiteScore
+    },
+    recommendations
+  };
+}
+
+app.get('/api/business/health', async (req, res) => {
+  try {
+    const user = await getUserFromToken(req);
+    if (!user) return res.status(401).json({ error: 'Authentication required' });
+    res.json(await _computeBusinessHealth(user.id));
+  } catch (err) {
+    console.error('[business/health]', err.message);
+    res.status(500).json({ error: 'Could not compute your business health right now.' });
+  }
+});
+
+// â”€â”€ Knowledge Validation (Epic 8) â€” deterministic staleness check plus a
+// capped, parallel HEAD-request pass against saved landing pages. Opt-in
+// (own route, not folded into /health) since the HEAD requests add real
+// network latency this isn't worth paying on every page load.
+async function _headOk(url) {
+  const ctrl = new AbortController();
+  const tid = setTimeout(() => ctrl.abort(), 5000);
+  try {
+    const r = await fetch(url, { method: 'HEAD', signal: ctrl.signal, headers: { 'User-Agent': 'Mozilla/5.0 (compatible; OrivenBot/1.0)' } });
+    return r.ok || (r.status >= 300 && r.status < 400);
+  } catch (_) {
+    return false;
+  } finally {
+    clearTimeout(tid);
+  }
+}
+
+async function _validateBusinessKnowledge(userId) {
+  const ninetyDaysAgo = new Date(Date.now() - 90 * 24 * 60 * 60 * 1000).toISOString();
+  const [productsRes, competitorsRes] = await Promise.all([
+    supabaseAdmin.from('business_products').select('id,name,landing_page,updated_at,created_at').eq('user_id', userId),
+    supabaseAdmin.from('business_competitors').select('id,company,updated_at,created_at').eq('user_id', userId)
+  ]);
+  const products = productsRes.data || [];
+  const competitors = competitorsRes.data || [];
+  const findings = [];
+
+  products.forEach(p => {
+    const last = p.updated_at || p.created_at;
+    if (last && last < ninetyDaysAgo) findings.push({ severity: 'low', type: 'stale', title: `"${p.name}" hasn't been reviewed in 90+ days`, detail: 'Check it still reflects your current offer.', tab: 'products', message: `Help me review whether "${p.name}" still reflects our current offer.` });
+  });
+  competitors.forEach(c => {
+    const last = c.updated_at || c.created_at;
+    if (last && last < ninetyDaysAgo) findings.push({ severity: 'low', type: 'stale', title: `"${c.company}" hasn't been reviewed in 90+ days`, detail: 'Competitor positioning may have changed since this was saved.', tab: 'competitors', message: `Help me review whether "${c.company}" is still a relevant competitor.` });
+  });
+
+  const withLinks = products.filter(p => p.landing_page).slice(0, 5);
+  const linkChecks = await Promise.all(withLinks.map(async p => ({ p, ok: await _headOk(p.landing_page) })));
+  linkChecks.forEach(({ p, ok }) => {
+    if (!ok) findings.push({ severity: 'medium', type: 'broken_link', title: `Landing page for "${p.name}" may be broken`, detail: p.landing_page, tab: 'products', message: `The landing page for "${p.name}" (${p.landing_page}) may be broken — remind me to check it.` });
+  });
+
+  return { findings, checkedLinks: withLinks.length };
+}
+
+app.get('/api/business/validate', async (req, res) => {
+  try {
+    const user = await getUserFromToken(req);
+    if (!user) return res.status(401).json({ error: 'Authentication required' });
+    res.json(await _validateBusinessKnowledge(user.id));
+  } catch (err) {
+    console.error('[business/validate]', err.message);
+    res.status(500).json({ error: 'Could not validate your business knowledge right now.' });
+  }
+});
+
+// â”€â”€ Business Insights (Epic 9/10) â€” narrative insights connecting stored
+// business knowledge to REAL platform performance. Both inputs already
+// exist (_gatherBusinessContext, _gatherPlatformIntelligence from V6) â€”
+// this route only combines and narrates them, no new data-fetching.
+// Knowledge Relationships (Epic 10) are soft/heuristic here: simple
+// name-matching between real campaign names and stored products, not a
+// schema relationship â€” marketing data lives on the ad platforms, not in
+// our DB, so a literal foreign key isn't expressible.
+app.get('/api/business/insights', async (req, res) => {
+  try {
+    const user = await getUserFromToken(req);
+    if (!user) return res.status(401).json({ error: 'Authentication required' });
+
+    const [bizCtx, platformIntel, productsRes] = await Promise.all([
+      _gatherBusinessContext(user.id),
+      _gatherPlatformIntelligence(user, 7),
+      supabaseAdmin.from('business_products').select('name').eq('user_id', user.id)
+    ]);
+
+    if (!bizCtx) return res.json({ insights: [], relationships: [], note: 'Add some business knowledge first — products, audiences, or a website — for Oriven to draw insights from.' });
+
+    const productNames = (productsRes.data || []).map(p => p.name).filter(Boolean);
+    const relationships = [];
+    ['google', 'meta'].forEach(platform => {
+      const p = platformIntel.platforms[platform];
+      if (!p || p.error || !Array.isArray(p.campaigns)) return;
+      p.campaigns.forEach(c => {
+        const match = productNames.find(name => c.name && name && c.name.toLowerCase().includes(name.toLowerCase()));
+        if (match) relationships.push({ campaign: c.name, product: match, platform });
+      });
+    });
+
+    const perfLines = [];
+    ['google', 'meta'].forEach(platform => {
+      const p = platformIntel.platforms[platform];
+      if (!p || p.error) return;
+      perfLines.push(`${platform === 'google' ? 'Google Ads' : 'Meta Ads'} (7 days): score ${p.score}, ${(p.campaigns || []).length} campaigns, delta: ${JSON.stringify(p.delta || {})}`);
+    });
+
+    if (!perfLines.length) {
+      return res.json({ insights: [], relationships, note: 'Connect Google or Meta Ads for Oriven to connect your business knowledge to real performance.' });
+    }
+
+    const system = `You are a marketing analyst. Given a business's stored knowledge and its REAL recent ad performance (already fetched, not guessed), produce up to 4 short narrative insights connecting the two — e.g. which product/audience seems to be working on which platform. Reply ONLY with valid JSON, no markdown: { "insights": [{"title":"...","detail":"..."}] }. Ground every claim in the real data given; never invent numbers.`;
+    const userMsg = `BUSINESS KNOWLEDGE:\n${bizCtx.text}\n\nRECENT PERFORMANCE:\n${perfLines.join('\n')}${relationships.length ? `\n\nLIKELY CAMPAIGN-PRODUCT LINKS (name-matched, not certain): ${relationships.map(r => `"${r.campaign}" ~ "${r.product}"`).join(', ')}` : ''}`;
+    const raw = await _aimlText('business-insights', system, userMsg, { max_tokens: 700 });
+    const cleaned = raw.replace(/^```(?:json)?\s*/i, '').replace(/```\s*$/, '').trim();
+    let parsed = { insights: [] };
+    try { parsed = JSON.parse(cleaned); } catch (_) { console.warn('[business/insights] AI response unparseable'); }
+
+    res.json({ insights: parsed.insights || [], relationships });
+  } catch (err) {
+    console.error('[business/insights]', err.message);
+    res.status(500).json({ error: 'Could not generate business insights right now.' });
+  }
+});
+
+// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+// V7 Final Phase â€” Business Learning Engine. One table (business_learnings)
+// holds every pattern Oriven discovers from real performance â€” who/what it's
+// about, the human-readable pattern, and a confidence score from the SAME
+// _calcConfidence formula used everywhere else (never AI-guessed). Writes
+// happen automatically from _runLearningEngine (below, called from the
+// existing 4-hour monitoring cron) â€” unlike business_memory, these are
+// Oriven's own derived analysis of real numbers, not user-stated facts, so
+// they don't need a confirmation card; they're just always visible and
+// removable (DELETE route below).
+// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+
+// One reusable read path â€” every route below (insights, dashboard, timeline,
+// graph) filters/sorts this instead of re-deriving its own query.
+async function _fetchActiveLearnings(userId, opts) {
+  opts = opts || {};
+  let q = supabaseAdmin.from('business_learnings').select('*').eq('user_id', userId).eq('status', 'active');
+  if (opts.entity_type) q = q.eq('entity_type', opts.entity_type);
+  if (opts.entity_name) q = q.eq('entity_name', opts.entity_name);
+  q = q.order('confidence', { ascending: false }).limit(opts.limit || 200);
+  const { data, error } = await q;
+  if (error) throw error;
+  return data || [];
+}
+
+function _groupLearningsByMonth(learnings) {
+  const byMonth = {};
+  learnings.forEach(l => {
+    const month = String(l.created_at || '').slice(0, 7); // YYYY-MM
+    if (!month) return;
+    (byMonth[month] = byMonth[month] || []).push(l);
+  });
+  return Object.keys(byMonth).sort().reverse().map(month => ({ month, learnings: byMonth[month] }));
+}
+
+async function _upsertLearning(userId, row) {
+  const payload = Object.assign({ user_id: userId, status: 'active', source: 'auto' }, row);
+  const { error } = await supabaseAdmin.from('business_learnings').upsert(payload, { onConflict: 'user_id,entity_type,entity_name,category' });
+  if (error) console.warn('[LearningEngine] upsert failed:', error.message);
+}
+
+app.get('/api/business/learnings', async (req, res) => {
+  try {
+    const user = await getUserFromToken(req);
+    if (!user) return res.status(401).json({ error: 'Authentication required' });
+    const { entity_type, entity_name, status } = req.query || {};
+    let q = supabaseAdmin.from('business_learnings').select('*').eq('user_id', user.id).eq('status', status === 'archived' ? 'archived' : 'active');
+    if (entity_type) q = q.eq('entity_type', entity_type);
+    if (entity_name) q = q.eq('entity_name', entity_name);
+    q = q.order('confidence', { ascending: false }).limit(100);
+    const { data, error } = await q;
+    if (error) throw error;
+    res.json({ learnings: data || [] });
+  } catch (err) {
+    console.error('[business/learnings GET]', err.message);
+    res.status(500).json({ error: 'Could not load your learnings.' });
+  }
+});
+
+app.delete('/api/business/learnings/:id', async (req, res) => {
+  try {
+    const user = await getUserFromToken(req);
+    if (!user) return res.status(401).json({ error: 'Authentication required' });
+    const { error } = await supabaseAdmin.from('business_learnings').delete().eq('id', req.params.id).eq('user_id', user.id);
+    if (error) throw error;
+    res.json({ ok: true });
+  } catch (err) {
+    console.error('[business/learnings DELETE]', err.message);
+    res.status(500).json({ error: 'Could not remove that learning.' });
+  }
+});
+
+// â”€â”€ Learning Timeline (Epic 8) â”€â”€ "what Oriven learned, by month" â”€ a
+// straight grouping of what the learning engine already writes.
+app.get('/api/business/timeline', async (req, res) => {
+  try {
+    const user = await getUserFromToken(req);
+    if (!user) return res.status(401).json({ error: 'Authentication required' });
+    const learnings = await _fetchActiveLearnings(user.id, { limit: 500 });
+    learnings.sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
+    res.json({ timeline: _groupLearningsByMonth(learnings) });
+  } catch (err) {
+    console.error('[business/timeline]', err.message);
+    res.status(500).json({ error: 'Could not load your learning timeline.' });
+  }
+});
+
+// â”€â”€ Knowledge Graph (Epic 7) â”€â”€ heuristic name-matching, same soft-linking
+// approach as /api/business/insights' relationships block â€” not a schema
+// relationship or graph database, since marketing data lives on the ad
+// platforms, not this DB.
+app.get('/api/business/graph', async (req, res) => {
+  try {
+    const user = await getUserFromToken(req);
+    if (!user) return res.status(401).json({ error: 'Authentication required' });
+
+    const [productsRes, audiencesRes, competitorsRes, learnings] = await Promise.all([
+      supabaseAdmin.from('business_products').select('id,name').eq('user_id', user.id),
+      supabaseAdmin.from('business_audiences').select('id,name').eq('user_id', user.id),
+      supabaseAdmin.from('business_competitors').select('id,company').eq('user_id', user.id),
+      _fetchActiveLearnings(user.id, { limit: 300 })
+    ]);
+
+    const products = productsRes.data || [];
+    const audiences = audiencesRes.data || [];
+    const competitors = competitorsRes.data || [];
+
+    const nodes = [];
+    products.forEach(p => nodes.push({ id: 'product:' + p.id, type: 'product', label: p.name }));
+    audiences.forEach(a => nodes.push({ id: 'audience:' + a.id, type: 'audience', label: a.name }));
+    competitors.forEach(c => nodes.push({ id: 'competitor:' + c.id, type: 'competitor', label: c.company }));
+
+    const edges = [];
+    learnings.filter(l => l.entity_type === 'campaign' || l.entity_type === 'creative').forEach(l => {
+      const name = (l.entity_name || '').toLowerCase();
+      const matchedProduct = products.find(p => p.name && name.includes(p.name.toLowerCase()));
+      const matchedAudience = audiences.find(a => a.name && name.includes(a.name.toLowerCase()));
+      if (matchedProduct) edges.push({ from: 'product:' + matchedProduct.id, to: 'learning:' + l.id, label: l.category, confidence: l.confidence });
+      if (matchedAudience) edges.push({ from: 'audience:' + matchedAudience.id, to: 'learning:' + l.id, label: l.category, confidence: l.confidence });
+      if (matchedProduct && matchedAudience) edges.push({ from: 'product:' + matchedProduct.id, to: 'audience:' + matchedAudience.id, label: 'co-occurs in "' + l.entity_name + '"', confidence: l.confidence });
+      if (matchedProduct || matchedAudience) nodes.push({ id: 'learning:' + l.id, type: 'learning', label: l.pattern });
+    });
+
+    res.json({ nodes, edges });
+  } catch (err) {
+    console.error('[business/graph]', err.message);
+    res.status(500).json({ error: 'Could not build your knowledge graph.' });
+  }
+});
+
+// â”€â”€ AI Reflection (Epic 9) â”€â”€ generated on demand, never stored â€” same
+// pattern as daily-brief/business-insights: real computed data in, AI only
+// narrates it.
+app.get('/api/business/reflection', async (req, res) => {
+  try {
+    const user = await getUserFromToken(req);
+    if (!user) return res.status(401).json({ error: 'Authentication required' });
+    const VALID_PERIODS = ['weekly', 'monthly', 'quarterly', 'daily_morning', 'daily_midday', 'daily_evening'];
+    const period = VALID_PERIODS.includes(req.query.period) ? req.query.period : 'weekly';
+    // V9 (Epic 10) â€” daily periods reuse the exact same mechanism as
+    // weekly/monthly/quarterly, just a 1-day window and different framing.
+    const days = { weekly: 7, monthly: 30, quarterly: 90, daily_morning: 1, daily_midday: 1, daily_evening: 1 }[period];
+    const periodFraming = {
+      daily_morning: 'a morning brief â€” set priorities for the day ahead',
+      daily_midday: 'a midday update â€” what has changed since this morning',
+      daily_evening: 'an evening summary â€” what happened today and what to carry into tomorrow'
+    }[period] || `a ${period} reflection`;
+
+    const [learnings, platformIntel] = await Promise.all([
+      _fetchActiveLearnings(user.id, { limit: 30 }),
+      _gatherPlatformIntelligence(user, days)
+    ]);
+
+    if (!learnings.length) return res.json({ reflection: null, note: 'Not enough learning history yet â€” check back once Oriven has observed some campaign performance.' });
+
+    const learningLines = learnings.map(l => `${l.entity_type} "${l.entity_name}": ${l.pattern} (${l.confidence}% confidence, based on ${JSON.stringify(l.evidence || {})})`).join('\n');
+    const perfLines = ['google', 'meta'].map(platform => {
+      const p = platformIntel.platforms[platform];
+      if (!p || p.error) return null;
+      return `${platform === 'google' ? 'Google Ads' : 'Meta Ads'} (${days} day(s)): score ${p.score}, delta: ${JSON.stringify(p.delta || {})}`;
+    }).filter(Boolean).join('\n');
+
+    const system = `You are a marketing strategist writing ${periodFraming} for a business you advise. Given real accumulated learnings and real recent performance (already computed, not guessed), write a short reflection: what was learned, what's still true, and one concrete recommendation for next period. Reply ONLY with valid JSON, no markdown: { "learned": ["...","..."], "recommendation": "..." }. Ground every statement in the data given; never invent numbers or claims not supported by it.`;
+    const userMsg = `PERIOD: ${period}\n\nACCUMULATED LEARNINGS:\n${learningLines}${perfLines ? `\n\nRECENT PERFORMANCE:\n${perfLines}` : ''}`;
+    const raw = await _aimlText('business-reflection', system, userMsg, { max_tokens: 700 });
+    const cleaned = raw.replace(/^```(?:json)?\s*/i, '').replace(/```\s*$/, '').trim();
+    let parsed = { learned: [], recommendation: '' };
+    try { parsed = JSON.parse(cleaned); } catch (_) { console.warn('[business/reflection] AI response unparseable'); }
+
+    res.json({ reflection: parsed, period });
+  } catch (err) {
+    console.error('[business/reflection]', err.message);
+    res.status(500).json({ error: 'Could not generate a reflection right now.' });
+  }
+});
+
+// â”€â”€ Business Learning Stats + Dashboard (Epic 13) â”€â”€ composes
+// _computeBusinessHealth (Phase 2) rather than re-deriving completeness.
+async function _computeLearningStats(userId) {
+  const [activeRes, recentRes] = await Promise.all([
+    supabaseAdmin.from('business_learnings').select('confidence,entity_type,entity_name').eq('user_id', userId).eq('status', 'active'),
+    supabaseAdmin.from('business_learnings').select('id').eq('user_id', userId).eq('status', 'active').gte('created_at', new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString())
+  ]);
+  const active = activeRes.data || [];
+  const productsLearned = new Set(active.filter(l => l.entity_type === 'product').map(l => l.entity_name)).size;
+  const avgConfidence = active.length ? Math.round(active.reduce((s, l) => s + (l.confidence || 0), 0) / active.length) : 0;
+  return {
+    activeLearnings: active.length,
+    productsLearned,
+    avgConfidence,
+    learnedLast30Days: (recentRes.data || []).length
+  };
+}
+
+app.get('/api/business/dashboard', async (req, res) => {
+  try {
+    const user = await getUserFromToken(req);
+    if (!user) return res.status(401).json({ error: 'Authentication required' });
+
+    const [health, learningStats, pool] = await Promise.all([
+      _computeBusinessHealth(user.id),
+      _computeLearningStats(user.id),
+      _fetchActiveLearnings(user.id, { limit: 100 })
+    ]);
+    const byRecency = pool.slice().sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
+    const timeline = _groupLearningsByMonth(byRecency).slice(0, 3);
+
+    res.json({ health, learning: learningStats, recentLearnings: byRecency.slice(0, 5), timeline });
+  } catch (err) {
+    console.error('[business/dashboard]', err.message);
+    res.status(500).json({ error: 'Could not load your Business Brain dashboard.' });
+  }
+});
+
 // GET /api/google/diag â€” non-destructive diagnostic: token state + dev token presence
 app.get('/api/google/diag', async (req, res) => {
   try {
@@ -6711,6 +9628,491 @@ cron.schedule('0 2 * * *', async () => {
   }
 }, { timezone: 'UTC' });
 
+// ── V6 Final Phase â€” Continuous Monitoring â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// Runs _analyzeGoogleAccount / _analyzeMetaAccount for every connected user
+// every 4 hours â€” the SAME analysis functions the on-demand routes use, no
+// new analysis logic. Only inserts a finding/recommendation into the event
+// log if it wasn't already logged for that user+platform in the last 24h,
+// which is what makes this "detect changes" instead of spamming the same
+// condition six times a day.
+// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+// V7 Final Phase â€” Business Learning Engine (Epic 1). Called once per
+// platform, per monitoring cycle, from _monitorPlatform below â€” reuses the
+// exact same `analysis` object (real campaigns/creatives, already scored by
+// _campaignPriority and the CTR-percentile classifier), no separate data
+// pull. Writes to business_learnings are silent/automatic: these are
+// Oriven's own derived observations from real numbers, not user-stated
+// facts, so unlike business_memory they don't go through a confirmation
+// card â€” just always visible on the Business Brain and removable.
+// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+const PLATFORM_LABEL = { google: 'Google Ads', meta: 'Meta Ads' };
+
+// Epic 4 â€” Creative DNA, honestly scoped to real text. Google's creative
+// `.name` is the actual headline text (server.js, pulled from
+// responsiveSearchAd headlines) so lexical patterns are genuinely
+// calculated, not guessed; Meta's `.name` is an internal ad title rather
+// than displayed copy, so this only runs for Google.
+function _detectHeadlinePatterns(creatives) {
+  const withData = (creatives || []).filter(c => c.impressions >= 100 && c.name);
+  const short = withData.filter(c => c.name.trim().split(/\s+/).length <= 5);
+  const long  = withData.filter(c => c.name.trim().split(/\s+/).length > 5);
+  if (short.length < 3 || long.length < 3) return [];
+  const shortCtr = _avg(short, 'ctr'), longCtr = _avg(long, 'ctr');
+  if (!shortCtr || !longCtr) return [];
+  const gap = (shortCtr - longCtr) / Math.max(shortCtr, longCtr);
+  if (Math.abs(gap) < 0.2) return [];
+  const winner = gap > 0 ? short : long;
+  const label = gap > 0 ? 'Shorter headlines (5 words or fewer)' : 'Longer, more descriptive headlines';
+  const clicks = winner.reduce((s, c) => s + c.clicks, 0);
+  const conversions = winner.reduce((s, c) => s + c.conversions, 0);
+  return [{
+    entity_type: 'headline', entity_name: gap > 0 ? 'short_headlines' : 'long_headlines', category: 'creative_pattern',
+    pattern: `${label} outperform the alternative by ${Math.round(Math.abs(gap) * 100)}% CTR across your Google ads`,
+    confidence: _calcConfidence({ clicks, conversions, days: 7 }),
+    evidence: { campaigns: winner.length, clicks, conversions, days: 7 }
+  }];
+}
+
+// Simple, deterministic keyword classification of REAL headline text â€” not
+// AI guessing a style from nothing.
+function _classifyMessaging(text) {
+  const t = (text || '').toLowerCase();
+  const discountWords = ['% off', 'sale', 'discount', 'free', 'save', 'deal', 'cheap', 'clearance'];
+  const premiumWords  = ['premium', 'exclusive', 'luxury', 'elevate', 'finest', 'crafted', 'bespoke'];
+  const hasDiscount = discountWords.some(w => t.includes(w));
+  const hasPremium  = premiumWords.some(w => t.includes(w));
+  if (hasDiscount && !hasPremium) return 'discount';
+  if (hasPremium && !hasDiscount) return 'premium';
+  return null;
+}
+
+async function _runLearningEngine(user, platform, analysis) {
+  try {
+    const [productsRes, audiencesRes, brandCore] = await Promise.all([
+      supabaseAdmin.from('business_products').select('name').eq('user_id', user.id),
+      supabaseAdmin.from('business_audiences').select('name').eq('user_id', user.id),
+      _getBrandCore(user.id)
+    ]);
+    const products = (productsRes.data || []).filter(p => p.name);
+    const audiences = (audiencesRes.data || []).filter(a => a.name);
+    const platformLabel = PLATFORM_LABEL[platform] || platform;
+
+    // Winning campaigns â†’ products â†’ audiences (Epic 1, 2, 3)
+    for (const c of (analysis.campaigns || [])) {
+      if (!c.priority || (c.priority.level !== 'excellent' && c.priority.level !== 'scaling') || !c.name) continue;
+      const confidence = _calcConfidence({ clicks: c.clicks, conversions: c.conversions, days: 7 });
+      const evidence = { campaigns: 1, clicks: c.clicks, conversions: c.conversions, days: 7 };
+      await _upsertLearning(user.id, {
+        entity_type: 'campaign', entity_name: c.name, platform, category: 'winning_campaign',
+        pattern: `"${c.name}" is a ${c.priority.level === 'excellent' ? 'top' : 'scaling'} performer on ${platformLabel} â€” ${c.priority.reason}`,
+        confidence, evidence
+      });
+
+      const nameLc = c.name.toLowerCase();
+      const matchedProduct = products.find(p => nameLc.includes(p.name.toLowerCase()));
+      if (matchedProduct) {
+        await _upsertLearning(user.id, {
+          entity_type: 'product', entity_name: matchedProduct.name, platform, category: 'winning_product',
+          pattern: `"${matchedProduct.name}" performs well in campaigns like "${c.name}" on ${platformLabel}`,
+          confidence, evidence
+        });
+      }
+      const matchedAudience = audiences.find(a => nameLc.includes(a.name.toLowerCase()));
+      if (matchedAudience) {
+        await _upsertLearning(user.id, {
+          entity_type: 'audience', entity_name: matchedAudience.name, platform, category: 'winning_audience',
+          pattern: `"${matchedAudience.name}" responds well to campaigns like "${c.name}" on ${platformLabel}`,
+          confidence, evidence
+        });
+      }
+    }
+
+    // Winning creatives (Epic 1)
+    const topCreatives = (analysis.creatives || []).filter(c => c.performance === 'top' && c.name);
+    for (const cr of topCreatives) {
+      await _upsertLearning(user.id, {
+        entity_type: 'creative', entity_name: cr.name, platform, category: 'winning_creative',
+        pattern: `"${cr.name}" is well above the account's average CTR on ${platformLabel}`,
+        confidence: _calcConfidence({ clicks: cr.clicks, conversions: cr.conversions, days: 7 }),
+        evidence: { campaigns: 1, clicks: cr.clicks, conversions: cr.conversions, days: 7 }
+      });
+    }
+
+    // Creative DNA + messaging + Brand Evolution drift check (Epic 4, 5) â€”
+    // Google only, since only Google's creative name is real ad copy.
+    if (platform === 'google') {
+      for (const pattern of _detectHeadlinePatterns(analysis.creatives)) {
+        await _upsertLearning(user.id, Object.assign({ platform }, pattern));
+      }
+
+      for (const cr of topCreatives) {
+        const style = _classifyMessaging(cr.name);
+        if (!style) continue;
+        const confidence = _calcConfidence({ clicks: cr.clicks, conversions: cr.conversions, days: 7 });
+        await _upsertLearning(user.id, {
+          entity_type: 'messaging', entity_name: style, platform, category: 'winning_messaging',
+          pattern: `"${style}" messaging is winning in your top-performing ads (e.g. "${cr.name}")`,
+          confidence, evidence: { campaigns: 1, clicks: cr.clicks, conversions: cr.conversions, days: 7 }
+        });
+
+        const tone = ((brandCore && brandCore.toneOfVoice) || '').toLowerCase();
+        const contradicts = (style === 'premium' && /budget|casual|affordable|value/.test(tone))
+          || (style === 'discount' && /premium|luxury|upscale|exclusive/.test(tone));
+        if (contradicts) {
+          const title = 'Your winning messaging may not match your saved brand voice';
+          const since = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
+          const { data: recentEvt } = await supabaseAdmin.from('intelligence_events')
+            .select('id').eq('user_id', user.id).eq('title', title).gte('created_at', since);
+          if (!recentEvt || !recentEvt.length) {
+            await supabaseAdmin.from('intelligence_events').insert({
+              user_id: user.id, platform, type: 'brand_drift', title,
+              detail: `Your top-performing ads lean "${style}", but your saved brand tone of voice reads differently. Worth reviewing?`,
+              severity: 'low',
+              message: `My winning ads lean "${style}" messaging but my saved brand voice says something different â€” help me review it.`
+            });
+          }
+        }
+      }
+    }
+  } catch (err) {
+    console.warn(`[LearningEngine] ${platform} | user ${user.id} | failed:`, err.message);
+  }
+}
+
+// Epic 2/3 "best platform" â€” genuinely needs both platforms' data in hand at
+// once, so this runs from _runIntelligenceMonitoring after both per-platform
+// passes complete, reusing their already-fetched analyses (no extra API
+// calls).
+async function _runCrossPlatformLearning(user, analyses) {
+  try {
+    const { google, meta } = analyses;
+    if (!google || !meta) return;
+    const { data: productsData } = await supabaseAdmin.from('business_products').select('name').eq('user_id', user.id);
+    for (const p of (productsData || []).filter(p => p.name)) {
+      const nameLc = p.name.toLowerCase();
+      const gCamps = (google.campaigns || []).filter(c => c.name && c.name.toLowerCase().includes(nameLc) && c.conversions >= 3);
+      const mCamps = (meta.campaigns   || []).filter(c => c.name && c.name.toLowerCase().includes(nameLc) && c.conversions >= 3);
+      if (!gCamps.length || !mCamps.length) continue;
+      const gRoas = _avg(gCamps, 'roas'), mRoas = _avg(mCamps, 'roas');
+      if (!gRoas || !mRoas) continue;
+      const gap = Math.abs(gRoas - mRoas) / Math.max(gRoas, mRoas);
+      if (gap < 0.15) continue;
+      const winner = gRoas > mRoas ? 'google' : 'meta';
+      const winnerCamps = winner === 'google' ? gCamps : mCamps;
+      const clicks = winnerCamps.reduce((s, c) => s + c.clicks, 0);
+      const conversions = winnerCamps.reduce((s, c) => s + c.conversions, 0);
+      await _upsertLearning(user.id, {
+        entity_type: 'product', entity_name: p.name, platform: winner, category: 'best_platform',
+        pattern: `${PLATFORM_LABEL[winner]} outperforms ${PLATFORM_LABEL[winner === 'google' ? 'meta' : 'google']} for "${p.name}" by ROAS`,
+        confidence: _calcConfidence({ clicks, conversions, days: 7 }),
+        evidence: { campaigns: winnerCamps.length, clicks, conversions, days: 7 }
+      });
+    }
+  } catch (err) {
+    console.warn(`[LearningEngine] cross-platform | user ${user.id} | failed:`, err.message);
+  }
+}
+
+// Epic 10 â€” Knowledge Quality. Dedup is free (upsert on a unique key); this
+// is the other half: anything the engine hasn't re-confirmed in 90+ days
+// gets archived (not deleted â€” still visible, still removable by the user).
+async function _archiveStaleLearnings() {
+  const cutoff = new Date(Date.now() - 90 * 24 * 60 * 60 * 1000).toISOString();
+  const { error } = await supabaseAdmin.from('business_learnings').update({ status: 'archived' }).eq('status', 'active').lt('updated_at', cutoff);
+  if (error) console.warn('[LearningEngine] archive pass failed:', error.message);
+}
+
+// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+// V9 â€” Autopilot: Recommendation Engine (Epic 4). Every number here
+// (confidence, evidence) is already computed elsewhere (_calcConfidence,
+// the same confidence_basis pattern _monitorPlatform already builds) â€”
+// this only assembles the structured shape and asks the AI to narrate the
+// reasoning, never invent the numbers.
+// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+async function _generateRecommendation({ userId, sourceEventId, platform, campaignName, type, problem, confidence, evidence, riskLevel, toolName, toolParams }) {
+  try {
+    // Dedup: don't re-suggest the same unresolved issue every monitoring
+    // cycle â€” one open recommendation per user+campaign+type at a time.
+    const { data: existing } = await supabaseAdmin.from('autopilot_recommendations')
+      .select('id').eq('user_id', userId).eq('type', type).eq('campaign_name', campaignName || null).eq('status', 'suggested').limit(1);
+    if (existing && existing.length) return null;
+
+    const system = `You are a senior marketing strategist explaining a detected issue to a business owner. Given the real, already-computed problem and evidence below, write: businessReason (why this matters to the business, 1 sentence), marketingReason (why this matters from a marketing/platform perspective, 1 sentence), estimatedImprovement (a qualitative, honest estimate, e.g. "could reduce wasted spend" â€” never invent a specific percentage unless it already appears in the evidence given), estimatedRoi (qualitative, same rule), suggestedAction (1 short, plain-English sentence). Reply ONLY with valid JSON: {"businessReason":"...","marketingReason":"...","estimatedImprovement":"...","estimatedRoi":"...","suggestedAction":"..."}.`;
+    const userMsg = `Problem: ${problem}\nConfidence: ${confidence}%\nEvidence: ${evidence ? JSON.stringify(evidence) : 'n/a'}\nPlatform: ${platform || 'n/a'}\nCampaign: ${campaignName || 'n/a'}\nType: ${type}`;
+    const raw = await _aimlText('autopilot-recommendation', system, userMsg, { max_tokens: 400 });
+    const cleaned = raw.replace(/^```(?:json)?\s*/i, '').replace(/```\s*$/, '').trim();
+    let ai = {};
+    try { ai = JSON.parse(cleaned); } catch (_) { console.warn('[Autopilot] recommendation narration unparseable'); }
+
+    const row = {
+      user_id: userId, source_event_id: sourceEventId || null, platform: platform || null, campaign_name: campaignName || null,
+      type, problem, impact: ai.businessReason || null, confidence, evidence: evidence || null,
+      business_reason: ai.businessReason || null, marketing_reason: ai.marketingReason || null,
+      estimated_improvement: ai.estimatedImprovement || null, estimated_roi: ai.estimatedRoi || null,
+      suggested_action: ai.suggestedAction || problem,
+      risk: riskLevel || 'low', tool_name: toolName || null, tool_params: toolParams || null, status: 'suggested'
+    };
+    const { data, error } = await supabaseAdmin.from('autopilot_recommendations').insert(row).select().maybeSingle();
+    if (error) throw error;
+    return data;
+  } catch (err) {
+    console.warn('[Autopilot] _generateRecommendation failed:', err.message);
+    return null;
+  }
+}
+
+// Epic 6 â€” Automation Rules. Evaluated inside the same per-campaign pass
+// _campaignPriority already runs over â€” no second monitoring loop. Per the
+// Golden Rule ("never execute destructive actions without approval"),
+// rules never auto-execute here: every trigger creates a `suggested`
+// recommendation the user approves from the Autopilot Center. This is
+// also an architectural necessity, not just a safety choice â€” executing a
+// Tool Router action requires a real user auth token (_authedFetch calls
+// an internal route that verifies a Bearer JWT), which a background cron
+// tick has no way to hold; only a live, authenticated "Approve" click does.
+const AUTOPILOT_RULE_OPERATORS = { '<': (a, b) => a < b, '>': (a, b) => a > b, '==': (a, b) => a === b };
+async function _evaluateAutomationRules(user, platform, campaigns) {
+  try {
+    const { data: rules } = await supabaseAdmin.from('automation_rules').select('*').eq('user_id', user.id).eq('enabled', true);
+    if (!rules || !rules.length) return;
+    const today = new Date().toISOString().slice(0, 10);
+
+    for (const rule of rules) {
+      if (rule.platform && rule.platform !== platform) continue;
+      if (rule.trigger_metric !== 'ctr' && rule.trigger_metric !== 'cpa' && rule.trigger_metric !== 'roas') continue;
+      if (rule.last_triggered_at && rule.last_triggered_at.slice(0, 10) === today) continue; // at most once/day per rule
+      const op = AUTOPILOT_RULE_OPERATORS[rule.trigger_operator];
+      if (!op) continue;
+
+      const match = (campaigns || []).find(c => op(c[rule.trigger_metric] || 0, Number(rule.trigger_value)));
+      if (!match) continue;
+
+      const toolMap = {
+        generate_headlines: { name: 'generate_headlines', params: { seed: match.name, count: 5 } },
+        generate_images: { name: 'generate_landing_page', params: { prompt: match.name } }, // closest existing generator for a rule-triggered "new image set" request
+        recommend_budget_decrease: { name: null, params: null }, // recommendation-only, no direct tool
+        suggest_scaling: { name: null, params: null },
+        refresh_business_brain: { name: null, params: null }
+      };
+      const mapped = toolMap[rule.action_type] || { name: null, params: null };
+
+      await _generateRecommendation({
+        userId: user.id, platform, campaignName: match.name, type: rule.action_type,
+        problem: `Automation rule "${rule.name}" triggered: ${rule.trigger_metric} ${rule.trigger_operator} ${rule.trigger_value} for "${match.name}".`,
+        confidence: _calcConfidence({ clicks: match.clicks, conversions: match.conversions, days: 7 }),
+        evidence: { metric: rule.trigger_metric, operator: rule.trigger_operator, value: rule.trigger_value, actual: match[rule.trigger_metric] },
+        riskLevel: mapped.name ? 'low' : 'medium',
+        toolName: mapped.name, toolParams: mapped.params
+      });
+      await supabaseAdmin.from('automation_rules').update({ last_triggered_at: new Date().toISOString() }).eq('id', rule.id);
+    }
+  } catch (err) {
+    console.warn(`[Autopilot] rule evaluation failed for user ${user.id}:`, err.message);
+  }
+}
+
+async function _monitorPlatform(user, platform) {
+  try {
+    const analysis = platform === 'google'
+      ? await _analyzeGoogleAccount(user, 'LAST_7_DAYS')
+      : await _analyzeMetaAccount(user, 'LAST_7_DAYS');
+
+    const since = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
+    const { data: recent } = await supabaseAdmin.from('intelligence_events')
+      .select('title').eq('user_id', user.id).eq('platform', platform).gte('created_at', since);
+    const seen = new Set((recent || []).map(r => r.title));
+
+    const rows = [];
+    (analysis.findings || []).slice(0, 4).forEach(f => {
+      if (seen.has(f.title)) return;
+      rows.push({ user_id: user.id, platform, campaign_name: f.campaign || null, type: 'finding',
+        title: f.title, detail: f.detail, severity: f.severity || null,
+        confidence: f.confidence != null ? f.confidence : null, confidence_basis: f.confidenceBasis || null,
+        message: f.action || f.title });
+    });
+    (analysis.recommendations || []).slice(0, 2).forEach(r => {
+      if (seen.has(r.title)) return;
+      rows.push({ user_id: user.id, platform, campaign_name: r.campaign || null, type: 'recommendation',
+        title: r.title, detail: r.detail, severity: r.priority || null,
+        confidence: r.confidence != null ? r.confidence : null, confidence_basis: r.confidenceBasis || null,
+        message: r.detail ? r.title + ' â€” ' + r.detail : r.title });
+    });
+    (analysis.creatives || []).filter(c => c.performance === 'underperforming').slice(0, 1).forEach(c => {
+      const title = `Creative fatigue: "${c.name}"`;
+      if (seen.has(title)) return;
+      rows.push({ user_id: user.id, platform, type: 'creative_fatigue', title,
+        detail: `"${c.name}" is underperforming the account's average CTR.`, severity: 'medium',
+        confidence: _calcConfidence({ clicks: c.clicks, conversions: c.conversions, days: 7 }),
+        confidence_basis: `7 days, ${c.clicks} clicks, ${c.conversions} conversions`,
+        message: `Review the creative "${c.name}" on ${platform === 'google' ? 'Google Ads' : 'Meta Ads'} â€” it may need refreshing.` });
+    });
+
+    // V7 Phase 2 â€” Memory Evolution (Epic 5/13). A winner surfaces once as an
+    // "opportunity" event; clicking it opens chat and asks Oriven to remember
+    // it, which routes through the existing remember_business_fact tool and
+    // its confirmation card â€” no new save-without-asking path.
+    (analysis.campaigns || []).filter(c => c.priority && (c.priority.level === 'excellent' || c.priority.level === 'scaling')).slice(0, 1).forEach(c => {
+      const title = `Winning campaign: "${c.name}"`;
+      if (seen.has(title)) return;
+      rows.push({ user_id: user.id, platform, campaign_name: c.name, type: 'opportunity', title,
+        detail: c.priority.reason, severity: 'low',
+        message: `Remember "${c.name}" as a winning campaign on ${platform === 'google' ? 'Google Ads' : 'Meta Ads'}?` });
+    });
+    (analysis.creatives || []).filter(c => c.performance === 'top').slice(0, 1).forEach(c => {
+      const title = `Winning creative: "${c.name}"`;
+      if (seen.has(title)) return;
+      rows.push({ user_id: user.id, platform, type: 'opportunity', title,
+        detail: `"${c.name}" is well above the account's average CTR.`, severity: 'low',
+        message: `Remember "${c.name}" as a winning creative on ${platform === 'google' ? 'Google Ads' : 'Meta Ads'}?` });
+    });
+
+    if (rows.length) {
+      await supabaseAdmin.from('intelligence_events').insert(rows);
+      console.log(`[Monitoring] ${platform} | user ${user.id} | logged ${rows.length} event(s)`);
+    }
+
+    // V9 (Epic 2/3) â€” "budget waste" and "audience saturation" reuse the
+    // exact same _campaignPriority classifications _monitorPlatform already
+    // computes (critical = spend with zero conversions; needs_attention =
+    // CTR well below account average on real impression volume), now also
+    // surfaced as structured, approvable recommendations rather than only
+    // a passive finding.
+    const wasteCampaign = (analysis.campaigns || []).find(c => c.priority && c.priority.level === 'critical');
+    if (wasteCampaign) {
+      await _generateRecommendation({
+        userId: user.id, platform, campaignName: wasteCampaign.name, type: 'budget_waste',
+        problem: `"${wasteCampaign.name}" has spent without producing conversions.`,
+        confidence: _calcConfidence({ clicks: wasteCampaign.clicks, conversions: wasteCampaign.conversions, days: 7 }),
+        evidence: { spend: wasteCampaign.spend, conversions: wasteCampaign.conversions, clicks: wasteCampaign.clicks, days: 7 },
+        riskLevel: 'medium', toolName: 'change_budget', toolParams: { campaignName: wasteCampaign.name, platform, action: 'decrease' }
+      });
+    }
+    const saturatedCampaign = (analysis.campaigns || []).find(c => c.priority && c.priority.level === 'needs_attention');
+    if (saturatedCampaign) {
+      await _generateRecommendation({
+        userId: user.id, platform, campaignName: saturatedCampaign.name, type: 'audience_saturation',
+        problem: `"${saturatedCampaign.name}"'s CTR is well below the account average despite real impression volume â€” a sign the audience may be seeing the same creative too often.`,
+        confidence: _calcConfidence({ clicks: saturatedCampaign.clicks, conversions: saturatedCampaign.conversions, days: 7 }),
+        evidence: { ctr: saturatedCampaign.ctr, impressions: saturatedCampaign.impressions, days: 7 },
+        riskLevel: 'low', toolName: 'generate_headlines', toolParams: { seed: saturatedCampaign.name, count: 5 }
+      });
+    }
+
+    await _evaluateAutomationRules(user, platform, analysis.campaigns);
+    await _runLearningEngine(user, platform, analysis);
+    return analysis;
+  } catch (err) {
+    console.warn(`[Monitoring] ${platform} | user ${user.id} | failed:`, err.message);
+    return null;
+  }
+}
+
+// Epic 8 â€” Smart Task Manager. Generated during the same monitoring pass
+// from three sources that already exist: stale/broken Business Brain
+// knowledge (_validateBusinessKnowledge, V7 Phase 2), Business Health
+// recommendations (_computeBusinessHealth, V7 Phase 2/3), and open
+// high-confidence Autopilot recommendations â€” not a new detection engine.
+const AUTOPILOT_TASK_TIME_MINUTES = { review_campaign: 10, review_product: 5, refresh_website: 5, update_competitor: 5, prepare_report: 15 };
+const AUTOPILOT_TASK_DEADLINE_DAYS = { high: 1, medium: 3, low: 7 };
+async function _generateAutopilotTasks(user) {
+  try {
+    const [validation, health, openRecs] = await Promise.all([
+      _validateBusinessKnowledge(user.id).catch(() => ({ findings: [] })),
+      _computeBusinessHealth(user.id).catch(() => ({ recommendations: [] })),
+      supabaseAdmin.from('autopilot_recommendations').select('id,problem,confidence').eq('user_id', user.id).eq('status', 'suggested').gte('confidence', 60).limit(5)
+    ]);
+
+    const candidates = [];
+    (validation.findings || []).forEach(f => {
+      candidates.push({ title: f.title, task_type: f.tab === 'competitors' ? 'update_competitor' : 'review_product', priority: f.severity === 'medium' ? 'medium' : 'low', source_recommendation_id: null, business_impact: f.detail || null });
+    });
+    (health.recommendations || []).slice(0, 3).forEach(r => {
+      candidates.push({ title: r.title, task_type: r.tab === 'website' ? 'refresh_website' : 'review_product', priority: r.severity === 'high' ? 'high' : 'medium', source_recommendation_id: null, business_impact: r.detail || null });
+    });
+    (openRecs.data || []).forEach(r => {
+      candidates.push({ title: `Review: ${r.problem}`.slice(0, 200), task_type: 'review_campaign', priority: r.confidence >= 80 ? 'high' : 'medium', source_recommendation_id: r.id, business_impact: r.problem });
+    });
+
+    for (const c of candidates) {
+      const { data: existing } = await supabaseAdmin.from('autopilot_tasks').select('id').eq('user_id', user.id).eq('title', c.title).eq('status', 'pending').limit(1);
+      if (existing && existing.length) continue;
+      const deadlineDays = AUTOPILOT_TASK_DEADLINE_DAYS[c.priority] || 7;
+      await supabaseAdmin.from('autopilot_tasks').insert({
+        user_id: user.id, title: c.title, task_type: c.task_type, priority: c.priority,
+        deadline: new Date(Date.now() + deadlineDays * 24 * 60 * 60 * 1000).toISOString(),
+        business_impact: c.business_impact, estimated_minutes: AUTOPILOT_TASK_TIME_MINUTES[c.task_type] || 10,
+        source_recommendation_id: c.source_recommendation_id
+      });
+    }
+  } catch (err) {
+    console.warn(`[Autopilot] task generation failed for user ${user.id}:`, err.message);
+  }
+}
+
+async function _runIntelligenceMonitoring() {
+  const { data: rows, error } = await supabaseAdmin.from('integrations')
+    .select('user_id, provider').in('provider', ['google_ads', 'meta_ads']);
+  if (error) { console.error('[Monitoring] Could not list connected users:', error.message); return; }
+
+  const byUser = {};
+  (rows || []).forEach(r => { (byUser[r.user_id] = byUser[r.user_id] || new Set()).add(r.provider); });
+
+  const userIds = Object.keys(byUser);
+  console.log(`[Monitoring] Run starting â€” ${userIds.length} connected user(s)`);
+  for (const userId of userIds) {
+    const user = { id: userId };
+    const providers = byUser[userId];
+    const analyses = {};
+    if (providers.has('google_ads')) analyses.google = await _monitorPlatform(user, 'google');
+    if (providers.has('meta_ads'))   analyses.meta   = await _monitorPlatform(user, 'meta');
+    if (analyses.google && analyses.meta) await _runCrossPlatformLearning(user, analyses);
+    await _generateAutopilotTasks(user);
+  }
+  await _archiveStaleLearnings();
+  console.log('[Monitoring] Run complete');
+}
+
+// Every 4 hours â€” frequent enough to feel continuous, light enough to keep
+// live-API usage reasonable across all connected users.
+cron.schedule('0 */4 * * *', () => {
+  _runIntelligenceMonitoring().catch(err => console.error('[Monitoring] Fatal:', err.message));
+}, { timezone: 'UTC' });
+
+// V9 (Epic 10) â€” Daily Operations. Reuses /api/business/reflection's exact
+// mechanism (see the daily_morning/daily_midday/daily_evening periods added
+// to that route) for every connected user, logging the result into
+// intelligence_events (type 'daily_brief') so it surfaces in notifications
+// and history instead of needing new storage.
+async function _runDailyBrief(period) {
+  try {
+    const { data: rows } = await supabaseAdmin.from('integrations').select('user_id').in('provider', ['google_ads', 'meta_ads']);
+    const userIds = [...new Set((rows || []).map(r => r.user_id))];
+    for (const userId of userIds) {
+      try {
+        const days = 1;
+        const [learnings, platformIntel] = await Promise.all([
+          _fetchActiveLearnings(userId, { limit: 30 }),
+          _gatherPlatformIntelligence({ id: userId }, days)
+        ]);
+        if (!learnings.length) continue;
+        const learningLines = learnings.slice(0, 10).map(l => `${l.entity_type} "${l.entity_name}": ${l.pattern} (${l.confidence}%)`).join('\n');
+        const system = `You are a marketing strategist writing a one-paragraph ${period.replace('daily_', '')} brief. Ground every statement in the real data given; never invent numbers.`;
+        const raw = await _aimlText('autopilot-brief', system, `LEARNINGS:\n${learningLines}`, { max_tokens: 250 });
+        await supabaseAdmin.from('intelligence_events').insert({
+          user_id: userId, type: 'daily_brief', title: `${period.replace('daily_', '').replace(/^\w/, c => c.toUpperCase())} brief ready`,
+          detail: raw.trim().slice(0, 500), severity: 'low', message: raw.trim().slice(0, 200)
+        });
+      } catch (err) {
+        console.warn(`[Autopilot] daily brief failed for user ${userId}:`, err.message);
+      }
+    }
+  } catch (err) {
+    console.error('[Autopilot] _runDailyBrief fatal:', err.message);
+  }
+}
+cron.schedule('0 8 * * *',  () => _runDailyBrief('daily_morning').catch(err => console.error('[Autopilot] morning brief fatal:', err.message)), { timezone: 'UTC' });
+cron.schedule('0 13 * * *', () => _runDailyBrief('daily_midday').catch(err => console.error('[Autopilot] midday brief fatal:', err.message)), { timezone: 'UTC' });
+cron.schedule('0 18 * * *', () => _runDailyBrief('daily_evening').catch(err => console.error('[Autopilot] evening brief fatal:', err.message)), { timezone: 'UTC' });
 
 app.listen(PORT, async () => {
   console.log(`Server running on http://localhost:${PORT}`);

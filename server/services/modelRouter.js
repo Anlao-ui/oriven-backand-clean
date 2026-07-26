@@ -41,6 +41,12 @@ const TASKS = {
     model:    MODELS.aiml.text,
     label:    'Ad Copy',
   },
+  'chat': {
+    provider: 'aiml',
+    type:     'text',
+    model:    MODELS.aiml.text,
+    label:    'Oriven Chat',
+  },
 
   // ── Web / Code ────────────────────────────────────────────────
   'web': {
@@ -102,6 +108,90 @@ const TASKS = {
     type:     'text',
     model:    MODELS.aiml.text,
     label:    'Competitor Intelligence',
+  },
+  'daily-brief': {
+    provider: 'aiml',
+    type:     'text',
+    model:    MODELS.aiml.text,
+    label:    'Daily Brief',
+  },
+  'opportunities': {
+    provider: 'aiml',
+    type:     'text',
+    model:    MODELS.aiml.text,
+    label:    'Opportunities',
+  },
+  'market-research': {
+    provider: 'aiml',
+    type:     'text',
+    model:    MODELS.aiml.text,
+    label:    'Market Research',
+  },
+  'website-monitor': {
+    provider: 'aiml',
+    type:     'text',
+    model:    MODELS.aiml.text,
+    label:    'Website Monitor',
+  },
+  'home-briefing': {
+    provider: 'aiml',
+    type:     'text',
+    model:    MODELS.aiml.text,
+    label:    'Home Briefing',
+  },
+  'forecast': {
+    provider: 'aiml',
+    type:     'text',
+    model:    MODELS.aiml.text,
+    label:    'Forecast',
+  },
+  'website-intel': {
+    provider: 'aiml',
+    type:     'text',
+    model:    MODELS.aiml.text,
+    label:    'Website Intelligence',
+  },
+  'business-insights': {
+    provider: 'aiml',
+    type:     'text',
+    model:    MODELS.aiml.text,
+    label:    'Business Insights',
+  },
+  'business-reflection': {
+    provider: 'aiml',
+    type:     'text',
+    model:    MODELS.aiml.text,
+    label:    'Business Reflection',
+  },
+  'creative-variations': {
+    provider: 'aiml',
+    type:     'text',
+    model:    MODELS.aiml.text,
+    label:    'Creative Variations',
+  },
+  'creative-improve': {
+    provider: 'aiml',
+    type:     'text',
+    model:    MODELS.aiml.text,
+    label:    'Creative Improve',
+  },
+  'creative-score': {
+    provider: 'aiml',
+    type:     'text',
+    model:    MODELS.aiml.text,
+    label:    'Creative Score',
+  },
+  'autopilot-recommendation': {
+    provider: 'aiml',
+    type:     'text',
+    model:    MODELS.aiml.text,
+    label:    'Autopilot Recommendation',
+  },
+  'autopilot-brief': {
+    provider: 'aiml',
+    type:     'text',
+    model:    MODELS.aiml.text,
+    label:    'Autopilot Daily Brief',
   },
 
   // ── Image Prompt Building ─────────────────────────────────────
@@ -180,13 +270,6 @@ const TASKS = {
     model:    MODELS.aiml.image,
     endpoint: '/v1/images/generations',
     label:    'Campaign Visual',
-  },
-  'posters-image': {
-    provider: 'aiml',
-    type:     'image',
-    model:    MODELS.aiml.image,
-    endpoint: '/v1/images/generations',
-    label:    'Poster Visual',
   },
 
   // ── Video Generation ──────────────────────────────────────────
