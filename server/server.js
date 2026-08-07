@@ -6170,18 +6170,152 @@ app.post('/api/google/campaign/:id/pause', async (req, res) => {
 });
 
 // POST /api/google/campaign/:id/resume
+//
+// TEMPORARY DIAGNOSTIC BUILD -- logging only, no behavior/logic change.
+// The actual Google Ads request (URL, method, headers, body) and the
+// error contract returned to the frontend (err.status / err.message)
+// are identical to the previous implementation via _gadsMutate. This
+// version additionally captures and prints the complete, untruncated
+// Google Ads API response plus supporting context so the real root
+// cause of the Resume permissions error can be identified. Remove/
+// simplify once root-caused.
 app.post('/api/google/campaign/:id/resume', async (req, res) => {
   try {
     const user = await getUserFromToken(req);
     if (!user) return res.status(401).json({ error: 'Authentication required' });
     const campaignId = String(req.params.id).replace(/[^0-9]/g, '');
     if (!campaignId) return res.status(400).json({ error: 'Invalid campaign ID' });
-    const { accessToken, customerId, loginCustomerId } = await _getGadsAccess(user);
-    console.log('[Google Campaign Resume] campaign:', campaignId, '| user:', user.id, '| customer:', customerId);
-    await _gadsMutate(accessToken, customerId, 'campaigns', [{
+    const { accessToken, customerId, loginCustomerId, activeAccount } = await _getGadsAccess(user);
+
+    // ── DIAGNOSTIC CONTEXT ──────────────────────────────────────────────
+    let _diagGoogleEmail = null;
+    try {
+      const { data: intgRow } = await supabaseAdmin
+        .from('integrations')
+        .select('google_email')
+        .eq('user_id', user.id)
+        .eq('provider', 'google_ads')
+        .maybeSingle();
+      _diagGoogleEmail = intgRow && intgRow.google_email;
+    } catch (_) {}
+
+    console.log('════════════════════════════════════════════════════════');
+    console.log('[Resume DIAG] campaign_id         :', campaignId);
+    console.log('[Resume DIAG] oriven user_id       :', user.id);
+    console.log('[Resume DIAG] OAuth google_email   :', _diagGoogleEmail || '(unknown)');
+    console.log('[Resume DIAG] customer_id (target) :', customerId);
+    console.log('[Resume DIAG] login_customer_id    :', loginCustomerId,
+      loginCustomerId === customerId ? '(same as target -- header omitted, non-MCC)' : '(different -- real MCC, header sent)');
+    console.log('[Resume DIAG] active_ad_account    :', JSON.stringify(activeAccount));
+
+    // Diagnostic only: does this campaign actually exist under the target
+    // customer right now? A miss here would mean the campaign belongs to
+    // a different customer than the one currently active/selected (e.g.
+    // publish happened under a different account than resume is using).
+    try {
+      const camRows = await _gadsQuery(accessToken, customerId,
+        'SELECT campaign.id, campaign.name, campaign.status, campaign.resource_name FROM campaign WHERE campaign.id = ' + campaignId,
+        loginCustomerId);
+      console.log('[Resume DIAG] campaign lookup under', customerId, ':', JSON.stringify(camRows));
+      if (!camRows.length) {
+        console.warn('[Resume DIAG] ⚠ campaign', campaignId, 'NOT found under customer', customerId,
+          '-- likely belongs to a different customer account than the one currently active.');
+      }
+    } catch (lookupErr) {
+      console.warn('[Resume DIAG] campaign lookup failed (non-fatal):', lookupErr.message,
+        '| raw:', (lookupErr.gadsRawBody || '').slice(0, 3000));
+    }
+
+    // Diagnostic only: what access role does this OAuth account have on
+    // the target customer -- STANDARD or ADMIN (or not listed at all)?
+    try {
+      const accessRows = await _gadsQuery(accessToken, customerId,
+        'SELECT customer_user_access.email_address, customer_user_access.access_role FROM customer_user_access',
+        loginCustomerId);
+      console.log('[Resume DIAG] customer_user_access:', JSON.stringify(accessRows));
+      const mine = accessRows.find(function(r) {
+        return r.customerUserAccess && _diagGoogleEmail && r.customerUserAccess.emailAddress === _diagGoogleEmail;
+      });
+      console.log('[Resume DIAG] this account\'s access_role:', mine ? mine.customerUserAccess.accessRole : '(not found in access list)');
+    } catch (accessErr) {
+      console.warn('[Resume DIAG] customer_user_access lookup failed (non-fatal):', accessErr.message,
+        '| raw:', (accessErr.gadsRawBody || '').slice(0, 3000));
+    }
+
+    const operations = [{
       updateMask: 'status',
       update: { resourceName: 'customers/' + customerId + '/campaigns/' + campaignId, status: 'ENABLED' }
-    }], loginCustomerId);
+    }];
+    console.log('[Resume DIAG] mutate operation     :', JSON.stringify(operations));
+
+    // ── ACTUAL REQUEST -- identical URL/method/headers/body to _gadsMutate,
+    // inlined here only so the full raw response can be captured for this
+    // diagnostic pass without touching the shared helper used elsewhere. ──
+    const mutateUrl = 'https://googleads.googleapis.com/v24/customers/' + customerId + '/campaigns:mutate';
+    const mutateHeaders = {
+      'Authorization':   'Bearer ' + accessToken,
+      'developer-token': GOOGLE_ADS_DEVELOPER_TOKEN,
+      'Content-Type':    'application/json',
+    };
+    if (loginCustomerId && loginCustomerId !== customerId) mutateHeaders['login-customer-id'] = loginCustomerId;
+    console.log('[Resume DIAG] request URL          :', mutateUrl);
+    console.log('[Resume DIAG] request headers       :', JSON.stringify(Object.assign({}, mutateHeaders, { Authorization: 'Bearer ***redacted***' })));
+
+    console.log('[Google Campaign Resume] campaign:', campaignId, '| user:', user.id, '| customer:', customerId);
+
+    const ctrl = new AbortController();
+    const tid  = setTimeout(function() { ctrl.abort(); }, 20000);
+    let gRes, gText;
+    try {
+      gRes  = await fetch(mutateUrl, { method: 'POST', headers: mutateHeaders, body: JSON.stringify({ operations }), signal: ctrl.signal });
+      gText = await gRes.text();
+    } finally {
+      clearTimeout(tid);
+    }
+
+    const respHeaders = {};
+    gRes.headers.forEach(function(v, k) { respHeaders[k] = v; });
+    console.log('[Resume DIAG] response HTTP status :', gRes.status);
+    console.log('[Resume DIAG] response headers      :', JSON.stringify(respHeaders));
+    console.log('[Resume DIAG] response body (FULL, untruncated):');
+    console.log(gText);
+
+    let gData;
+    try { gData = JSON.parse(gText); } catch (_) { gData = {}; }
+
+    if (!gRes.ok) {
+      const gErrObj  = gData.error || {};
+      const detail0  = (gErrObj.details && gErrObj.details[0]) || {};
+      const gadsErrs = Array.isArray(detail0.errors) ? detail0.errors : [];
+
+      console.error('════════════════════════════════════════════════════════');
+      console.error('[Resume DIAG] ✗✗✗ GOOGLE ADS REJECTED THE RESUME REQUEST ✗✗✗');
+      console.error('[Resume DIAG] Google error.code    :', gErrObj.code);
+      console.error('[Resume DIAG] Google error.status   :', gErrObj.status);
+      console.error('[Resume DIAG] Google error.message  :', gErrObj.message);
+      gadsErrs.forEach(function(e, i) {
+        console.error('[Resume DIAG]   errors[' + i + '].errorCode :', JSON.stringify(e.errorCode));
+        console.error('[Resume DIAG]   errors[' + i + '].message   :', e.message);
+        console.error('[Resume DIAG]   errors[' + i + '].trigger   :', JSON.stringify(e.trigger));
+        console.error('[Resume DIAG]   errors[' + i + '].location  :', JSON.stringify(e.location));
+      });
+      console.error('[Resume DIAG] request-id (if any)  :', respHeaders['request-id'] || respHeaders['x-request-id'] || '(none present in response headers)');
+      console.error('════════════════════════════════════════════════════════');
+
+      const errCodes = [];
+      gadsErrs.forEach(function(e) {
+        if (e.errorCode) errCodes.push(JSON.stringify(e.errorCode));
+        if (e.message)   errCodes.push('msg:' + e.message);
+      });
+      const msg = gErrObj.message || ('Google Ads API HTTP ' + gRes.status);
+      const err = new Error(msg);
+      err.status = gRes.status;
+      err.gadsStatus = gErrObj;
+      err.gadsErrorCodes = errCodes;
+      err.gadsRawBody = gText;
+      throw err;
+    }
+
     console.log('[Google Campaign Resume] OK');
     res.json({ ok: true, status: 'ENABLED' });
   } catch (err) {
