@@ -24,6 +24,7 @@ const PORT = parseInt(process.env.PORT || '5500', 10);
 const toolRouter = require('./services/toolRouter');
 require('./tools/campaignTools'); // registers Tool Router entries as a side effect
 require('./tools/businessTools'); // V7 Phase 1 — registers remember_business_fact
+const creditManager = require('./services/creditManager'); // no client of its own -- initialized below, right after supabaseAdmin exists
 
 console.log(
   "[Config] Stripe key suffix:",
@@ -64,6 +65,10 @@ const supabaseAdmin = createClient(
   process.env.SUPABASE_SERVICE_ROLE_KEY,
   { auth: { autoRefreshToken: false, persistSession: false } }
 );
+// Credit Manager shares this exact client -- one Supabase connection for
+// the whole app, and no risk of it racing dotenv at import time (see
+// services/creditManager.js's init() doc comment for why that mattered).
+creditManager.init(supabaseAdmin);
 
 // â”€â”€ Startup sanity checks â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 (function checkEnv() {
@@ -220,6 +225,42 @@ app.post('/api/stripe-webhook', express.raw({ type: 'application/json' }), async
     return res.json({ received: true });
   }
 
+  // -- Invoice paid (real billing-cycle boundary) -- resets credits_balance
+  // to the plan's allowance and anchors credits_cycle_start/end to Stripe's
+  // own period, which does not necessarily align to a calendar month.
+  if (event.type === 'invoice.payment_succeeded') {
+    const invoice = event.data.object;
+    const customerId = invoice.customer;
+    const periodStart = invoice.period_start ? new Date(invoice.period_start * 1000).toISOString() : null;
+    const periodEnd   = invoice.period_end   ? new Date(invoice.period_end   * 1000).toISOString() : null;
+    console.log('[Webhook] invoice.payment_succeeded -> customer:', customerId);
+    if (customerId) {
+      try {
+        const { data: profile } = await supabaseAdmin.from('profiles')
+          .select('id, subscription_status').eq('stripe_customer_id', customerId).maybeSingle();
+        if (profile) {
+          const allowance = creditManager.PLAN_ALLOWANCES[profile.subscription_status];
+          if (allowance != null) {
+            await supabaseAdmin.from('profiles').update({
+              credits_balance: allowance,
+              credits_cycle_start: periodStart,
+              credits_cycle_end: periodEnd,
+              credits_last_reset_source: 'stripe',
+            }).eq('id', profile.id);
+            console.log(`[Webhook] Credits reset to ${allowance} for ${profile.id} (plan: ${profile.subscription_status})`);
+          } else {
+            console.log('[Webhook] No credit allowance for plan:', profile.subscription_status, '- skipping reset');
+          }
+        } else {
+          console.warn('[Webhook] invoice.payment_succeeded - no profile found for customer:', customerId);
+        }
+      } catch (err) {
+        console.error('[Webhook] invoice.payment_succeeded credit reset error:', err.message);
+      }
+    }
+    return res.json({ received: true });
+  }
+
   if (event.type !== 'checkout.session.completed') {
     console.log('[Webhook] â„¹ï¸  Ignoring event type:', event.type);
     return res.json({ received: true });
@@ -270,7 +311,14 @@ app.post('/api/stripe-webhook', express.raw({ type: 'application/json' }), async
     .update({
       subscription_status: plan,
       stripe_subscription_id: session.subscription || null,
-      stripe_customer_id: session.customer || null
+      stripe_customer_id: session.customer || null,
+      // First-activation credit grant -- immediately corrected to Stripe's
+      // real billing period by the invoice.payment_succeeded handler above,
+      // which fires right after checkout completes.
+      credits_balance: creditManager.PLAN_ALLOWANCES[plan] || 0,
+      credits_cycle_start: new Date().toISOString(),
+      credits_cycle_end: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString(),
+      credits_last_reset_source: 'signup',
     })
     .eq('id', userId)
     .select('id, subscription_status');
@@ -558,6 +606,65 @@ async function requireSubIfAuthed(req, res, next) {
 }
 
 // â”€â”€ Shared SMTP transporter factory â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// requireSubOrOnboardingGen -- used ONLY on /api/ai/create-ad, nowhere else.
+// Identical to requireSubIfAuthed, with exactly one addition: a user who
+// hasn't finished onboarding yet AND hasn't already used their one free
+// generation gets waved through for a single real generation instead of
+// a 403. The onboarding tour's own Publish step (client-side, unchanged)
+// is what actually shows the paywall next -- this middleware only stops
+// the tour from dying one step too early. Marks free_campaign_used=true
+// server-side on successful generation (see the route handler) so the
+// exception can never be reused -- not a standing bypass, one-shot only.
+async function requireSubOrOnboardingGen(req, res, next) {
+  const auth = req.headers.authorization || '';
+  if (!auth) { console.log('[middleware] requireSubOrOnboardingGen - no auth, guest pass-through'); return next(); }
+  const user = await getUserFromToken(req);
+  if (!user) return next();
+  try {
+    const { data, error: dbErr } = await supabaseAdmin
+      .from('profiles').select('subscription_status, onboarding_completed, free_campaign_used').eq('id', user.id).maybeSingle();
+    if (dbErr) console.warn('[middleware] requireSubOrOnboardingGen query error:', dbErr.message);
+    const status = (data && data.subscription_status) || 'none';
+    if (PAID_PLANS.includes(status)) { req.user = user; return next(); }
+
+    const onboardingDone = data ? data.onboarding_completed === true : false;
+    const freeGenUsed = data ? data.free_campaign_used === true : false;
+    if (!onboardingDone && !freeGenUsed) {
+      console.log('[middleware] Onboarding free-generation exception granted for', user.id);
+      req.user = user;
+      req._onboardingFreeGen = true;
+      return next();
+    }
+
+    console.log('[middleware] 403 - subscription required for', user.id, '| onboardingDone:', onboardingDone, '| freeGenUsed:', freeGenUsed);
+    return res.status(403).json({ error: 'Active subscription required', code: 'SUBSCRIPTION_REQUIRED' });
+  } catch (err) {
+    console.warn('[middleware] requireSubOrOnboardingGen threw - fail open:', err.message);
+    next();
+  }
+}
+
+// Called once a generation actually succeeds for a user who was let through
+// via the onboarding exception above -- burns the one-time allowance
+// server-side so it can't be triggered again by retrying, refreshing, or
+// never finishing onboarding. Fire-and-forget, matches the DB-write style
+// already used elsewhere in this file.
+function _consumeOnboardingFreeGen(req) {
+  if (!req._onboardingFreeGen || !req.user) return;
+  // upsert, not update -- a brand-new signup's profiles row can lag behind
+  // the very first authenticated request (confirmed directly against
+  // prod: immediately after /api/signup returns, the row can still be
+  // unreadable). .update() on a not-yet-existent row silently matches zero
+  // rows and "succeeds" while writing nothing, which would let the
+  // exception be used more than once. Same fix already applied to the
+  // preferences route for the same underlying timing issue.
+  supabaseAdmin.from('profiles').upsert({ id: req.user.id, free_campaign_used: true }, { onConflict: 'id' })
+    .then((r) => {
+      if (r && r.error) console.warn('[middleware] Could not persist free_campaign_used:', r.error.message);
+      else console.log('[middleware] free_campaign_used=true persisted for', req.user.id, '(onboarding exception consumed)');
+    })
+    .catch((e) => console.warn('[middleware] _consumeOnboardingFreeGen threw:', e.message));
+}
 function _smtpTransporter() {
   return nodemailer.createTransport({
     host:   SMTP_HOST,
@@ -1104,6 +1211,15 @@ app.post('/api/generate-campaign', requireSubIfAuthed, async (req, res) => {
   if (!prompt) return res.status(400).json({ error: 'prompt is required' });
 
   const resolvedSize = size || '1024x1024';
+  let reservation;
+  if (req.user) {
+    try {
+      reservation = await creditManager.reserveCredits(req.user, 'campaign_generation');
+    } catch (err) {
+      if (err instanceof creditManager.InsufficientCreditsError) return res.status(402).json({ error: 'Out of credits', code: 'CREDITS_EXHAUSTED', balance: err.balance });
+      console.warn('[Campaign] Credit reservation error:', err.message);
+    }
+  }
 
   // â”€â”€ Step 1: Generate all variation copy + image prompts via Anthropic â”€â”€
   console.log('[Campaign] Step 1 â€” Anthropic â†’ generating campaign variations...');
@@ -1132,11 +1248,13 @@ Rules:
       if (!Array.isArray(variations) || !variations.length) throw new Error('Empty or non-array');
     } catch (parseErr) {
       console.error('[Campaign] JSON parse failed. Raw output:', raw.slice(0, 300));
+      if (reservation) creditManager.finalizeCreditLog(reservation, 'campaign_generation', { success: false, error: 'parse failed', route: req.path }).catch(() => {});
       return res.status(500).json({ error: 'Failed to parse campaign variations output' });
     }
     console.log(`[Campaign] Step 1 â€” ${variations.length} variations ready`);
   } catch (err) {
     console.error('[Campaign] AIML error:', err.message);
+    if (reservation) creditManager.finalizeCreditLog(reservation, 'campaign_generation', { success: false, error: err.message, route: req.path }).catch(() => {});
     return res.status(500).json({ error: 'Failed to generate campaign variations' });
   }
 
@@ -1167,6 +1285,7 @@ Rules:
 
   console.log(`[Campaign] Done â€” ${variationsWithImages.length} variations with images`);
   variationsWithImages.forEach(v => _recordCreativeAsset(req.user && req.user.id, { kind: 'ad', title: v.title || prompt.slice(0, 80), content: v, source_route: '/api/generate-campaign' }));
+  if (reservation) creditManager.finalizeCreditLog(reservation, 'campaign_generation', { provider: 'aiml', success: true, route: req.path }).catch(() => {});
   res.json({ variations: variationsWithImages });
 });
 
@@ -1183,6 +1302,16 @@ app.post('/api/generate-brandcore', requireSubIfAuthed, async (req, res) => {
   } = req.body;
 
   if (!brandName) return res.status(400).json({ error: 'brandName is required' });
+
+  let reservation;
+  if (req.user) {
+    try {
+      reservation = await creditManager.reserveCredits(req.user, 'brand_voice');
+    } catch (err) {
+      if (err instanceof creditManager.InsufficientCreditsError) return res.status(402).json({ error: 'Out of credits', code: 'CREDITS_EXHAUSTED', balance: err.balance });
+      console.warn('[BrandCore] Credit reservation error:', err.message);
+    }
+  }
 
   const effectiveIndustry    = industry    || type         || '';
   const effectiveVisualStyle = visualStyle || brandStyle   || '';
@@ -1285,13 +1414,16 @@ Generate the complete BrandCore JSON now. Every field must be specific to this b
     } catch {
       console.error('[BrandCore] JSON parse failed. Raw length:', raw.length);
       console.error('[BrandCore] Raw preview:', raw.slice(0, 500));
+      if (reservation) creditManager.finalizeCreditLog(reservation, 'brand_voice', { success: false, error: 'parse failed', route: req.path }).catch(() => {});
       return res.status(500).json({ error: 'Failed to parse brand identity. Please try again.' });
     }
 
     console.log('[BrandCore] Generated for:', brandName, '| tagline:', bc.tagline);
+    if (reservation) creditManager.finalizeCreditLog(reservation, 'brand_voice', { provider: 'aiml', success: true, route: req.path }).catch(() => {});
     res.json(bc);
   } catch (err) {
     console.error('[BrandCore] Generation error:', err.message);
+    if (reservation) creditManager.finalizeCreditLog(reservation, 'brand_voice', { success: false, error: err.message, route: req.path }).catch(() => {});
     res.status(500).json({ error: 'Brand generation failed. Please try again.' });
   }
 });
@@ -1304,6 +1436,16 @@ app.post('/api/brand-check', requireSubIfAuthed, async (req, res) => {
     personality, toneOfVoice, values, positioning, logoConcept,
   } = req.body;
   if (!brandName) return res.status(400).json({ error: 'brandName is required' });
+
+  let reservation;
+  if (req.user) {
+    try {
+      reservation = await creditManager.reserveCredits(req.user, 'brand_voice');
+    } catch (err) {
+      if (err instanceof creditManager.InsufficientCreditsError) return res.status(402).json({ error: 'Out of credits', code: 'CREDITS_EXHAUSTED', balance: err.balance });
+      console.warn('[BrandCheck] Credit reservation error:', err.message);
+    }
+  }
 
   console.log('[BrandCheck] AIML â†’ analysing brand:', brandName);
   try {
@@ -1382,13 +1524,16 @@ Rules:
       report = JSON.parse(cleaned);
     } catch {
       console.error('[BrandCheck] JSON parse failed');
+      if (reservation) creditManager.finalizeCreditLog(reservation, 'brand_voice', { success: false, error: 'parse failed', route: req.path }).catch(() => {});
       return res.status(500).json({ error: 'Failed to parse brand check output' });
     }
 
     console.log('[BrandCheck] AIML â†’ analysis ready for:', brandName, '| Score:', report.score);
+    if (reservation) creditManager.finalizeCreditLog(reservation, 'brand_voice', { provider: 'aiml', success: true, route: req.path }).catch(() => {});
     res.json(report);
   } catch (err) {
     console.error('[BrandCheck] AIML error:', err.message);
+    if (reservation) creditManager.finalizeCreditLog(reservation, 'brand_voice', { success: false, error: err.message, route: req.path }).catch(() => {});
     res.status(500).json({ error: 'Failed to run brand check' });
   }
 });
@@ -1473,6 +1618,16 @@ Rules:
 
   const userMsg = `Competitor URL: ${url}\n\n${bcLines.length ? `User's Brand Core:\n${bcLines.join('\n')}` : 'No brand core provided â€” use strategic defaults for the user brand.'}`;
 
+  let reservation;
+  if (req.user) {
+    try {
+      reservation = await creditManager.reserveCredits(req.user, 'competitor_analysis');
+    } catch (err) {
+      if (err instanceof creditManager.InsufficientCreditsError) return res.status(402).json({ error: 'Out of credits', code: 'CREDITS_EXHAUSTED', balance: err.balance });
+      console.warn('[CompetitorIntel] Credit reservation error:', err.message);
+    }
+  }
+
   try {
     const raw = await _aimlText('competitor-intel', system, userMsg, { max_tokens: 1800 });
     const cleaned = raw.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '').trim();
@@ -1482,13 +1637,16 @@ Rules:
       report = JSON.parse(cleaned);
     } catch {
       console.error('[CompetitorIntel] JSON parse failed:', cleaned.slice(0, 200));
+      if (reservation) creditManager.finalizeCreditLog(reservation, 'competitor_analysis', { success: false, error: 'parse failed', route: req.path }).catch(() => {});
       return res.status(500).json({ error: 'Failed to parse competitor analysis' });
     }
 
     console.log('[CompetitorIntel] Analysis complete for:', url);
+    if (reservation) creditManager.finalizeCreditLog(reservation, 'competitor_analysis', { provider: 'aiml', success: true, route: req.path }).catch(() => {});
     res.json(report);
   } catch (err) {
     console.error('[CompetitorIntel] AIML error:', err.message);
+    if (reservation) creditManager.finalizeCreditLog(reservation, 'competitor_analysis', { success: false, error: err.message, route: req.path }).catch(() => {});
     res.status(500).json({ error: 'Failed to run competitor intelligence analysis' });
   }
 });
@@ -1754,6 +1912,109 @@ app.post('/api/increment-usage', requireSubscription, async (req, res) => {
   }
 });
 
+// -- GET /api/credits/status ------------------------------------
+// Real, backend-authoritative credit balance -- the single source of truth
+// consumed by usage.js (sidebar badge) and settings.js (Subscription panel).
+app.get('/api/credits/status', requireSubscription, async (req, res) => {
+  try {
+    const status = await creditManager.getCreditStatus(req.user.id);
+    res.json(status);
+  } catch (err) {
+    console.error('[CreditsStatus] Error:', err.message);
+    res.status(500).json({ error: 'Failed to fetch credit status' });
+  }
+});
+
+// -- PATCH /api/profile/timezone ---------------------------------
+// Fire-and-forget from the client whenever the browser's IANA timezone
+// differs from what's stored -- feeds the once-per-local-day daily briefing.
+// Body: { timezone: "Europe/Berlin" }
+app.patch('/api/profile/timezone', async (req, res) => {
+  const user = await getUserFromToken(req);
+  if (!user) return res.status(401).json({ error: 'Unauthorized' });
+  const tz = req.body && req.body.timezone;
+  if (!tz || typeof tz !== 'string' || tz.length > 100) {
+    return res.status(400).json({ error: 'A valid IANA timezone string is required' });
+  }
+  try {
+    await supabaseAdmin.from('profiles').upsert({ id: user.id, timezone: tz }, { onConflict: 'id' });
+    res.json({ ok: true });
+  } catch (err) {
+    console.error('[Timezone] Error:', err.message);
+    res.status(500).json({ error: 'Failed to save timezone' });
+  }
+});
+
+// -- Priority Support chat (Professional plan only) --------------
+// GET returns the caller's own flat message thread; POST appends a user
+// message and emails a notification (email is notification-only, not the
+// reply transport -- replies land back in-app via /api/support/admin-reply).
+app.get('/api/support/messages', requireSubscription, async (req, res) => {
+  try {
+    const { data, error } = await supabaseAdmin
+      .from('support_messages').select('id, sender, body, created_at')
+      .eq('user_id', req.user.id).order('created_at', { ascending: true });
+    if (error) throw error;
+    res.json({ messages: data || [] });
+  } catch (err) {
+    console.error('[Support] GET messages error:', err.message);
+    res.status(500).json({ error: 'Failed to load support messages' });
+  }
+});
+
+app.post('/api/support/messages', requireSubscription, async (req, res) => {
+  const body = (req.body && req.body.body || '').trim();
+  if (!body) return res.status(400).json({ error: 'Message body is required' });
+  if (body.length > 4000) return res.status(400).json({ error: 'Message is too long' });
+  try {
+    const { data: profile } = await supabaseAdmin
+      .from('profiles').select('subscription_status, email').eq('id', req.user.id).maybeSingle();
+    if (!profile || profile.subscription_status !== 'professional') {
+      return res.status(403).json({ error: 'Priority Support is a Professional plan feature', code: 'PLAN_REQUIRED' });
+    }
+    const { error: insertErr } = await supabaseAdmin.from('support_messages')
+      .insert({ user_id: req.user.id, sender: 'user', body });
+    if (insertErr) throw insertErr;
+
+    // Email is notification-only -- best-effort, never blocks the response.
+    if (process.env.SMTP_USER && process.env.SMTP_PASS) {
+      _smtpTransporter().sendMail({
+        from:    process.env.SMTP_FROM || `ORIVEN <${process.env.SMTP_USER}>`,
+        to:      'studio.oriven@outlook.com',
+        subject: `[Priority Support] New message from ${profile.email || req.user.id}`,
+        text:    `${profile.email || req.user.id} (Professional plan) sent a Priority Support message:\n\n${body}`,
+      }).catch((e) => console.warn('[Support] Notification email failed:', e.message));
+    }
+    res.json({ ok: true });
+  } catch (err) {
+    console.error('[Support] POST message error:', err.message);
+    res.status(500).json({ error: 'Failed to send message' });
+  }
+});
+
+// Minimal admin-reply path -- the seed of a future admin dashboard, not the
+// dashboard itself. Gated by a static env allowlist (reuses existing auth,
+// no new admin-auth system) since Oriven support is currently a one-person
+// operation; callable directly (curl/Postman) until a real UI exists.
+app.post('/api/support/admin-reply', async (req, res) => {
+  const user = await getUserFromToken(req);
+  if (!user) return res.status(401).json({ error: 'Unauthorized' });
+  const adminIds = (process.env.ADMIN_USER_IDS || '').split(',').map((s) => s.trim()).filter(Boolean);
+  if (!adminIds.includes(user.id)) return res.status(403).json({ error: 'Not authorized' });
+  const targetUserId = req.body && req.body.userId;
+  const body = (req.body && req.body.body || '').trim();
+  if (!targetUserId || !body) return res.status(400).json({ error: 'userId and body are required' });
+  try {
+    const { error } = await supabaseAdmin.from('support_messages')
+      .insert({ user_id: targetUserId, sender: 'admin', body });
+    if (error) throw error;
+    res.json({ ok: true });
+  } catch (err) {
+    console.error('[Support] Admin reply error:', err.message);
+    res.status(500).json({ error: 'Failed to send reply' });
+  }
+});
+
 // â”€â”€ POST /api/signup â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 // Creates a user immediately (email_confirm:true bypasses Supabase gate),
 // stores email_verified:false in profiles, sends verification email.
@@ -1897,11 +2158,72 @@ app.post('/api/resend-verification', async (req, res) => {
 // â”€â”€ POST /api/send-invite â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 // Sends a team invite email via Outlook SMTP.
 // Body: { name, email, role, message, workspaceName }
+// -- GET /api/team/members -----------------------------------------
+// Lists the caller's own team (pending + accepted seats only -- revoked
+// seats don't count against the limit and aren't shown).
+app.get('/api/team/members', requireSubscription, async (req, res) => {
+  try {
+    const { data, error } = await supabaseAdmin.from('team_members')
+      .select('id, invitee_name, invitee_email, role, status, created_at')
+      .eq('owner_user_id', req.user.id)
+      .in('status', ['pending', 'accepted'])
+      .order('created_at', { ascending: true });
+    if (error) throw error;
+    res.json({ members: data || [] });
+  } catch (err) {
+    console.error('[Team] GET members error:', err.message);
+    res.status(500).json({ error: 'Could not load team members' });
+  }
+});
+
+// -- DELETE /api/team/members/:id -----------------------------------
+app.delete('/api/team/members/:id', requireSubscription, async (req, res) => {
+  try {
+    const { data, error } = await supabaseAdmin.from('team_members')
+      .update({ status: 'revoked' })
+      .eq('id', req.params.id)
+      .eq('owner_user_id', req.user.id)
+      .select('id')
+      .maybeSingle();
+    if (error) throw error;
+    if (!data) return res.status(404).json({ error: 'Team member not found' });
+    res.json({ ok: true });
+  } catch (err) {
+    console.error('[Team] DELETE member error:', err.message);
+    res.status(500).json({ error: 'Could not remove that team member' });
+  }
+});
+
 app.post('/api/send-invite', requireSubscription, async (req, res) => {
   const { name, email, role, message, workspaceName } = req.body || {};
 
   if (!email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
     return res.status(400).json({ error: 'A valid email address is required' });
+  }
+
+  // Seat limit -- the single source of truth for plan seat counts is
+  // creditManager.PLAN_TEAM_SEATS (starter:1, creator:1, professional:10),
+  // the same config the credit system itself uses. The UI shows the same
+  // numbers from plans.js's ORIVEN_PLANS[plan].teamMembers, kept in sync
+  // manually with this table -- this is the real, server-side enforcement
+  // that actually blocks a 2nd Starter/Creator seat or an 11th Professional one.
+  try {
+    const { data: profile } = await supabaseAdmin.from('profiles').select('subscription_status').eq('id', req.user.id).maybeSingle();
+    const plan = (profile && profile.subscription_status) || 'free';
+    const seatLimit = creditManager.PLAN_TEAM_SEATS[plan] || 0;
+    const { count, error: countErr } = await supabaseAdmin.from('team_members')
+      .select('id', { count: 'exact', head: true })
+      .eq('owner_user_id', req.user.id)
+      .in('status', ['pending', 'accepted']);
+    if (countErr) throw countErr;
+    // +1 accounts for the account owner, who is always seat 1 -- e.g.
+    // Professional's "up to 10 team members" means 10 total including the owner.
+    if ((count || 0) + 1 >= seatLimit) {
+      return res.status(403).json({ error: `Your ${plan} plan allows up to ${seatLimit} team member${seatLimit === 1 ? '' : 's'} (including you). Upgrade to invite more.`, code: 'TEAM_SEAT_LIMIT' });
+    }
+  } catch (err) {
+    console.error('[Invite] Seat limit check error:', err.message);
+    return res.status(500).json({ error: 'Could not verify your team seat limit right now.' });
   }
 
   const smtpUser = process.env.SMTP_USER;
@@ -1973,8 +2295,13 @@ app.post('/api/send-invite', requireSubscription, async (req, res) => {
       text:    `Hi ${recipientName},\n\nYou've been invited to join "${senderWorkspace}" on ORIVEN as a ${roleLabel}.\n\nVisit https://orivenai.com/app to accept.\n\nâ€” The ORIVEN Team`
     });
 
+    const { data: memberRow, error: insertErr } = await supabaseAdmin.from('team_members').insert({
+      owner_user_id: req.user.id, invitee_email: email, invitee_name: name || null, role: roleLabel, status: 'pending',
+    }).select('id, invitee_name, invitee_email, role, status, created_at').maybeSingle();
+    if (insertErr) console.error('[Invite] Email sent but DB insert failed (non-fatal, seat count may under-report):', insertErr.message);
+
     console.log(`[Invite] âœ… Invite sent to ${email} (role: ${roleLabel}, workspace: ${senderWorkspace})`);
-    res.json({ ok: true });
+    res.json({ ok: true, member: memberRow || null });
   } catch (err) {
     console.error('[Invite] âŒ Failed to send invite email:', err.message);
     res.status(500).json({ error: 'Could not send that invite right now. Please try again.' });
@@ -1996,6 +2323,16 @@ app.post('/api/generate-logo', requireSubIfAuthed, async (req, res) => {
     colorPalette = colorPalette || (brandCore && brandCore.colors);
   }
   if (!brandName) return res.status(400).json({ error: 'brandName is required' });
+
+  let reservation;
+  if (req.user) {
+    try {
+      reservation = await creditManager.reserveCredits(req.user, 'image_generation');
+    } catch (err) {
+      if (err instanceof creditManager.InsufficientCreditsError) return res.status(402).json({ error: 'Out of credits', code: 'CREDITS_EXHAUSTED', balance: err.balance });
+      console.warn('[LogoGen] Credit reservation error:', err.message);
+    }
+  }
 
   console.log(`[LogoGen] Generating AI logo for: ${brandName}`);
 
@@ -2029,9 +2366,11 @@ Brand description: ${description || 'a professional brand'}`;
     const imageUrl = await _aimlImage('logo', imagePrompt, { aspect_ratio: '1:1' });
     console.log(`[LogoGen] âœ… Logo generated for: ${brandName}`);
     _recordCreativeAsset(req.user && req.user.id, { kind: 'logo', title: brandName, content: { url: imageUrl, prompt: imagePrompt }, source_route: '/api/generate-logo' });
+    if (reservation) creditManager.finalizeCreditLog(reservation, 'image_generation', { provider: 'aiml', success: true, route: req.path }).catch(() => {});
     res.json({ imageUrl, prompt: imagePrompt });
   } catch (err) {
     console.error('[LogoGen] Error:', err.message);
+    if (reservation) creditManager.finalizeCreditLog(reservation, 'image_generation', { success: false, error: err.message, route: req.path }).catch(() => {});
     res.status(500).json({ error: 'Could not generate that logo right now. Please try again.' });
   }
 });
@@ -2149,6 +2488,14 @@ app.post('/api/generate-ugc', requireSubIfAuthed, async (req, res) => {
     },
   };
 
+  let reservation;
+  try {
+    reservation = await creditManager.reserveCredits(user, 'video_generation');
+  } catch (err) {
+    if (err instanceof creditManager.InsufficientCreditsError) return res.status(402).json({ error: 'Out of credits', code: 'CREDITS_EXHAUSTED', balance: err.balance });
+    console.warn('[UGC] Credit reservation error:', err.message);
+  }
+
   // â”€â”€ Step 1: Script â€” use provided or generate with AI â”€â”€â”€â”€â”€â”€â”€â”€
   let script;
   if (customScript && customScript.trim()) {
@@ -2218,10 +2565,14 @@ Script rules:
       ].filter(Boolean).join('\n');
 
       script = (await _aimlText('ugc-script', system, userMsg, { max_tokens: 1024 })).trim();
-      if (!script) return res.status(500).json({ error: 'AIML returned an empty script' });
+      if (!script) {
+        if (reservation) creditManager.finalizeCreditLog(reservation, 'video_generation', { success: false, error: 'empty script', route: req.path }).catch(() => {});
+        return res.status(500).json({ error: 'AIML returned an empty script' });
+      }
       console.log('[UGC] Script generated (', script.length, 'chars ) | feeling:', adFeeling, '| goal:', adGoal || 'none');
     } catch (err) {
       console.error('[UGC] Script generation error:', err.message);
+      if (reservation) creditManager.finalizeCreditLog(reservation, 'video_generation', { success: false, error: err.message, route: req.path }).catch(() => {});
       return res.status(500).json({ error: 'Could not write that script right now. Please try again.' });
     }
   }
@@ -2240,9 +2591,11 @@ Script rules:
     });
     console.log('[UGC] Video submitted to AIML:', generationId, '| user:', user.id);
     _recordCreativeAsset(user.id, { kind: 'ugc', title: (adContext || script).slice(0, 80), content: { script, generationId }, source_route: '/api/generate-ugc' });
+    if (reservation) creditManager.finalizeCreditLog(reservation, 'video_generation', { provider: 'aiml', model: 'kling', success: true, route: req.path }).catch(() => {});
     return res.json({ ok: true, videoId: generationId, status: 'processing' });
   } catch (err) {
     console.error('[UGC] AIML video submission error:', err.message);
+    if (reservation) creditManager.finalizeCreditLog(reservation, 'video_generation', { success: false, error: err.message, route: req.path }).catch(() => {});
     return res.status(500).json({ error: 'Could not submit that video right now. Please try again.' });
   }
 });
@@ -2381,6 +2734,14 @@ app.post('/api/video-ads/generate', requireSubIfAuthed, async (req, res) => {
     return res.status(503).json({ error: 'Video Ads is not configured â€” set AIML_API_KEY in environment variables.' });
   }
 
+  let reservation;
+  try {
+    reservation = await creditManager.reserveCredits(user, 'video_generation');
+  } catch (err) {
+    if (err instanceof creditManager.InsufficientCreditsError) return res.status(402).json({ error: 'Out of credits', code: 'CREDITS_EXHAUSTED', balance: err.balance });
+    console.warn('[VideoAds] Credit reservation error:', err.message);
+  }
+
   const _rawDuration = Number(String(length || '5').replace(/[^0-9]/g, '')) || 5;
   const normDuration = _rawDuration <= 7 ? 5 : 10;
   const t1 = Math.round(normDuration * 0.33);
@@ -2399,9 +2760,11 @@ app.post('/api/video-ads/generate', requireSubIfAuthed, async (req, res) => {
       });
       console.log('[VideoAds/image] Generation started:', result.generationId, 'â€” user:', user.id);
       _recordCreativeAsset(user.id, { kind: 'video', title: 'Image-to-video', content: { generationId: result.generationId }, source_route: '/api/video-ads/generate' });
+      if (reservation) creditManager.finalizeCreditLog(reservation, 'video_generation', { provider: 'aiml', success: true, route: req.path }).catch(() => {});
       return res.json({ generationId: result.generationId, status: 'queued' });
     } catch (err) {
       console.error('[VideoAds/image] error:', err.message);
+      if (reservation) creditManager.finalizeCreditLog(reservation, 'video_generation', { success: false, error: err.message, route: req.path }).catch(() => {});
       return res.status(500).json({ error: err.message });
     }
   }
@@ -2414,9 +2777,11 @@ app.post('/api/video-ads/generate', requireSubIfAuthed, async (req, res) => {
       const result = await aiml.generateVideo(script.trim(), { duration: normDuration, aspect_ratio: '16:9' });
       console.log('[VideoAds/script] Generation started:', result.generationId, 'â€” user:', user.id);
       _recordCreativeAsset(user.id, { kind: 'video', title: script.trim().slice(0, 80), content: { generationId: result.generationId, script: script.trim() }, source_route: '/api/video-ads/generate' });
+      if (reservation) creditManager.finalizeCreditLog(reservation, 'video_generation', { provider: 'aiml', success: true, route: req.path }).catch(() => {});
       return res.json({ generationId: result.generationId, status: 'queued' });
     } catch (err) {
       console.error('[VideoAds/script] error:', err.message);
+      if (reservation) creditManager.finalizeCreditLog(reservation, 'video_generation', { success: false, error: err.message, route: req.path }).catch(() => {});
       return res.status(500).json({ error: err.message });
     }
   }
@@ -2476,9 +2841,11 @@ Rules:
     const result = await aiml.generateVideo(vidPrompt, { duration: normDuration, aspect_ratio: '16:9' });
     console.log('[VideoAds/ai] Generation started:', result.generationId, 'â€” user:', user.id);
     _recordCreativeAsset(user.id, { kind: 'video', title: _product.trim().slice(0, 80), content: { generationId: result.generationId, prompt: vidPrompt }, source_route: '/api/video-ads/generate' });
+    if (reservation) creditManager.finalizeCreditLog(reservation, 'video_generation', { provider: 'aiml', success: true, route: req.path }).catch(() => {});
     return res.json({ generationId: result.generationId, status: 'queued' });
   } catch (err) {
     console.error('[VideoAds/ai] error:', err.message);
+    if (reservation) creditManager.finalizeCreditLog(reservation, 'video_generation', { success: false, error: err.message, route: req.path }).catch(() => {});
     return res.status(500).json({ error: err.message });
   }
 });
@@ -2516,6 +2883,14 @@ app.post('/api/motion-graphics/generate', requireSubIfAuthed, async (req, res) =
   if (!user) return res.status(401).json({ error: 'Unauthorized' });
 
   const { style, duration, notes, brandCore, logoUrl, customPrompt } = req.body || {};
+
+  let reservation;
+  try {
+    reservation = await creditManager.reserveCredits(user, 'video_generation');
+  } catch (err) {
+    if (err instanceof creditManager.InsufficientCreditsError) return res.status(402).json({ error: 'Out of credits', code: 'CREDITS_EXHAUSTED', balance: err.balance });
+    console.warn('[MotionGraphics] Credit reservation error:', err.message);
+  }
 
   const aiml = require('./providers/aimlProvider');
   if (!aiml.isConfigured()) {
@@ -2597,9 +2972,11 @@ Strict rules:
       : await aiml.generateVideo(videoPrompt, genOpts);
     console.log('[MotionGraphics] Generation queued:', result.generationId);
     _recordCreativeAsset(user.id, { kind: 'video', title: styleInfo.label, content: { generationId: result.generationId, prompt: videoPrompt }, source_route: '/api/motion-graphics/generate' });
+    if (reservation) creditManager.finalizeCreditLog(reservation, 'video_generation', { provider: 'aiml', success: true, route: req.path }).catch(() => {});
     return res.json({ generationId: result.generationId, status: 'queued' });
   } catch (err) {
     console.error('[MotionGraphics] Generation error:', err.message);
+    if (reservation) creditManager.finalizeCreditLog(reservation, 'video_generation', { success: false, error: err.message, route: req.path }).catch(() => {});
     return res.status(500).json({ error: err.message || 'Motion graphic generation failed.' });
   }
 });
@@ -2641,6 +3018,15 @@ app.post('/api/product-shoots/generate', requireSubIfAuthed, async (req, res) =>
     if (prods && prods[0]) product = prods[0].description ? `${prods[0].name} — ${prods[0].description}` : prods[0].name;
   }
   if (!product || !product.trim()) return res.status(400).json({ error: 'Product description is required.' });
+
+  let reservation;
+  try {
+    reservation = await creditManager.reserveCredits(user, 'image_generation');
+  } catch (err) {
+    if (err instanceof creditManager.InsufficientCreditsError) return res.status(402).json({ error: 'Out of credits', code: 'CREDITS_EXHAUSTED', balance: err.balance });
+    console.warn('[ProductShoots] Credit reservation error:', err.message);
+  }
+
   const _bizCtx = await _creativeContext(user.id);
 
   // Derive aspect ratio from goal (ecommerce/social â†’ square; advertising/website â†’ wide)
@@ -2701,9 +3087,11 @@ Output ONLY the prompt. 2â€“3 sentences. No quotes, no preamble.${_bizCtx ?
     const url = await _aimlImage('product-shoots', dallEPrompt, { aspect_ratio: aimlRatio });
     console.log('[ProductShoots] Image generated successfully');
     _recordCreativeAsset(user.id, { kind: 'image', platform: null, product_name: product.trim().slice(0, 80), title: product.trim().slice(0, 80), content: { url }, source_route: '/api/product-shoots/generate' });
+    if (reservation) creditManager.finalizeCreditLog(reservation, 'image_generation', { provider: 'aiml', success: true, route: req.path }).catch(() => {});
     return res.json({ images: [url], ratio: aimlRatio, prompt: dallEPrompt });
   } catch (err) {
     console.error('[ProductShoots] Error:', err.message);
+    if (reservation) creditManager.finalizeCreditLog(reservation, 'image_generation', { success: false, error: err.message, route: req.path }).catch(() => {});
     return res.status(500).json({ error: err.message || 'Image generation failed.' });
   }
 });
@@ -2721,6 +3109,16 @@ app.post('/api/creative/variations', requireSubIfAuthed, async (req, res) => {
     if (!seed || !String(seed).trim()) return res.status(400).json({ error: 'seed is required' });
     const n = Math.min(20, Math.max(1, parseInt(count, 10) || 10));
 
+    let reservation;
+    if (req.user) {
+      try {
+        reservation = await creditManager.reserveCredits(req.user, 'campaign_improvement');
+      } catch (err) {
+        if (err instanceof creditManager.InsufficientCreditsError) return res.status(402).json({ error: 'Out of credits', code: 'CREDITS_EXHAUSTED', balance: err.balance });
+        console.warn('[creative/variations] Credit reservation error:', err.message);
+      }
+    }
+
     const _bizCtx = await _creativeContext(req.user && req.user.id);
     const system = `You are a senior creative copywriter. Generate ${n} distinct ${CREATIVE_KINDS[kind].label} variations based on the seed provided. Each must be genuinely different â€” a different angle, not a rephrasing. Reply ONLY with a valid JSON array of ${n} strings, no markdown, no extra text.${_bizCtx ? `\n\nBUSINESS KNOWLEDGE (real, stored data about this business â€” use it instead of generic copy):\n${_bizCtx.text}` : ''}`;
     const raw = await _aimlText('creative-variations', system, `${CREATIVE_KINDS[kind].label} seed: ${seed}`, { max_tokens: 1200 });
@@ -2734,6 +3132,7 @@ app.post('/api/creative/variations', requireSubIfAuthed, async (req, res) => {
     }
 
     _recordCreativeAsset(req.user && req.user.id, { kind, title: String(seed).slice(0, 80), content: { variations }, source_route: '/api/creative/variations' });
+    if (reservation) creditManager.finalizeCreditLog(reservation, 'campaign_improvement', { provider: 'aiml', success: true, route: req.path }).catch(() => {});
     res.json({ kind, variations });
   } catch (err) {
     console.error('[creative/variations]', err.message);
@@ -2775,9 +3174,20 @@ app.post('/api/creative/improve', requireSubIfAuthed, async (req, res) => {
     if (!instruction) return res.status(400).json({ error: `action must be one of: ${Object.keys(CREATIVE_IMPROVE_ACTIONS).join(', ')}` });
     if ((action === 'translate' || action === 'localize') && !targetLanguage) return res.status(400).json({ error: 'targetLanguage is required for translate/localize' });
 
+    let reservation;
+    if (req.user) {
+      try {
+        reservation = await creditManager.reserveCredits(req.user, 'campaign_improvement');
+      } catch (err) {
+        if (err instanceof creditManager.InsufficientCreditsError) return res.status(402).json({ error: 'Out of credits', code: 'CREDITS_EXHAUSTED', balance: err.balance });
+        console.warn('[creative/improve] Credit reservation error:', err.message);
+      }
+    }
+
     const _bizCtx = await _creativeContext(req.user && req.user.id);
     const system = `You are a senior copy editor. ${instruction}${(action === 'translate' || action === 'localize') ? ` Target language: ${targetLanguage}.` : ''} Reply ONLY with the resulting text â€” no preamble, no quotes, no explanation.${_bizCtx ? `\n\nBUSINESS KNOWLEDGE (keep this brand's real identity consistent):\n${_bizCtx.text}` : ''}`;
     const result = (await _aimlText('creative-improve', system, String(text), { max_tokens: 1000 })).trim();
+    if (reservation) creditManager.finalizeCreditLog(reservation, 'campaign_improvement', { provider: 'aiml', success: true, route: req.path }).catch(() => {});
 
     // Epic 6 â€” Version History. If this improve call is linked to a real
     // asset, create a new version row in that asset's family instead of a
@@ -3020,6 +3430,10 @@ app.get('/api/creative/assets/:id/comments', async (req, res) => {
   try {
     const user = await getUserFromToken(req);
     if (!user) return res.status(401).json({ error: 'Authentication required' });
+    // Ownership check first -- without this, any authenticated user could
+    // read comments on ANY other user's asset by guessing/incrementing id.
+    const { data: asset } = await supabaseAdmin.from('creative_assets').select('id').eq('id', req.params.id).eq('user_id', user.id).maybeSingle();
+    if (!asset) return res.status(404).json({ error: 'Asset not found.' });
     const { data, error } = await supabaseAdmin.from('creative_asset_comments').select('*').eq('asset_id', req.params.id).order('created_at', { ascending: true });
     if (error) throw error;
     res.json({ comments: data || [] });
@@ -3161,13 +3575,24 @@ app.post('/api/creative/score', requireSubIfAuthed, async (req, res) => {
 
     let ai = {};
     if (text.trim().length >= 5) {
+      let reservation;
+      if (req.user) {
+        try {
+          reservation = await creditManager.reserveCredits(req.user, 'campaign_improvement');
+        } catch (err) {
+          if (err instanceof creditManager.InsufficientCreditsError) return res.status(402).json({ error: 'Out of credits', code: 'CREDITS_EXHAUSTED', balance: err.balance });
+          console.warn('[creative/score] Credit reservation error:', err.message);
+        }
+      }
       const system = `You are a senior creative director scoring an ad/creative for QUALITY POTENTIAL â€” these are predictions, not measurements, since no campaign has run yet. Score 0-100 for each: ctrPrediction (likely click-through appeal), attention (scroll-stopping power), brandFit (how well it matches the described brand), emotion (emotional resonance), conversionPotential (likelihood to drive action). Reply ONLY with valid JSON: {"ctrPrediction":N,"ctrWhy":"...","attention":N,"attentionWhy":"...","brandFit":N,"brandFitWhy":"...","emotion":N,"emotionWhy":"...","conversionPotential":N,"conversionWhy":"..."}. Be honest and varied â€” do not default every score to 70-80.${_bizCtx ? `\n\nBUSINESS KNOWLEDGE:\n${_bizCtx.text}` : ''}`;
       try {
         const raw = await _aimlText('creative-score', system, text.slice(0, 3000), { max_tokens: 500 });
         const cleaned = raw.replace(/^```(?:json)?\s*/i, '').replace(/```\s*$/, '').trim();
         ai = JSON.parse(cleaned);
+        if (reservation) creditManager.finalizeCreditLog(reservation, 'campaign_improvement', { provider: 'aiml', success: true, route: req.path }).catch(() => {});
       } catch (aiErr) {
         console.warn('[creative/score] AI scoring failed (non-fatal):', aiErr.message);
+        if (reservation) creditManager.finalizeCreditLog(reservation, 'campaign_improvement', { success: false, error: aiErr.message, route: req.path }).catch(() => {});
       }
     }
 
@@ -3367,27 +3792,64 @@ app.get('/api/autopilot/rules', async (req, res) => {
   }
 });
 
-// V10 (Epic 4) â€” constrained to the exact sets _evaluateAutomationRules
-// and its toolMap actually understand, so a malformed rule can never be
-// silently created and then silently never fire.
-const AUTOPILOT_RULE_METRICS = ['ctr', 'cpa', 'roas'];
-const AUTOPILOT_RULE_OPERATOR_VALUES = ['<', '>', '=='];
-const AUTOPILOT_RULE_ACTION_TYPES = ['generate_headlines', 'generate_images', 'recommend_budget_decrease', 'suggest_scaling', 'refresh_business_brain'];
-const AUTOPILOT_RULE_PLATFORMS = ['google', 'meta'];
+// Autopilot Complete Redesign â€” constrained to the exact sets
+// _evaluateAutomationRules actually understands, so a malformed rule can
+// never be silently created and then silently never fire. Widened from
+// the original {ctr,cpa,roas} / 5 actions / google+meta to the real,
+// currently-fetched metric set and the real, currently-callable actions â€”
+// see _ruleMetricValue() and _execRuleAction() below for what each one
+// actually does. Frequency and a per-campaign "approval status" are
+// deliberately NOT included: neither is fetched anywhere in this codebase
+// today (confirmed by grep), so exposing them in the rule builder would
+// let a user build a condition that can never evaluate to anything real.
+const AUTOPILOT_RULE_METRICS = ['roas', 'ctr', 'cpc', 'cpa', 'conversions', 'spend', 'clicks', 'impressions', 'budget', 'status'];
+const AUTOPILOT_RULE_OPERATOR_VALUES = ['<', '>', '==', '>=', '<='];
+const AUTOPILOT_RULE_ACTION_TYPES = ['increase_budget', 'decrease_budget', 'pause_campaign', 'resume_campaign', 'generate_creative', 'generate_recommendations', 'notify', 'request_approval', 'create_report', 'create_briefing', 'run_optimisation'];
+const AUTOPILOT_RULE_PLATFORMS = ['google', 'meta', 'tiktok'];
+// Budget changes have no TikTok endpoint today (no PATCH /api/tiktok/campaign/:id
+// exists) â€” real gap, not an oversight; enforced both here and in the
+// frontend's action dropdown so a TikTok rule can never be saved with an
+// action that would silently never execute.
+const AUTOPILOT_BUDGET_UNSUPPORTED_PLATFORMS = ['tiktok'];
+const AUTOPILOT_RULE_MODES = ['suggest_only', 'require_approval', 'fully_automatic'];
+
+// Shared validation for both create and update. `full` = every field is
+// required (create); otherwise only whatever's present is checked (update).
+function _validateAutopilotRuleFields(b, full) {
+  if (full && (!b.name || !b.trigger_metric || !b.trigger_operator || b.trigger_value == null || !b.action_type)) {
+    return 'name, trigger_metric, trigger_operator, trigger_value, and action_type are required';
+  }
+  if (b.trigger_metric !== undefined && !AUTOPILOT_RULE_METRICS.includes(b.trigger_metric)) return `trigger_metric must be one of: ${AUTOPILOT_RULE_METRICS.join(', ')}`;
+  if (b.trigger_operator !== undefined && !AUTOPILOT_RULE_OPERATOR_VALUES.includes(b.trigger_operator)) return `trigger_operator must be one of: ${AUTOPILOT_RULE_OPERATOR_VALUES.join(', ')}`;
+  if (b.action_type !== undefined && !AUTOPILOT_RULE_ACTION_TYPES.includes(b.action_type)) return `action_type must be one of: ${AUTOPILOT_RULE_ACTION_TYPES.join(', ')}`;
+  if (b.platform !== undefined && b.platform !== null && !AUTOPILOT_RULE_PLATFORMS.includes(b.platform)) return `platform must be one of: ${AUTOPILOT_RULE_PLATFORMS.join(', ')}`;
+  if (b.trigger_value !== undefined && (typeof b.trigger_value !== 'number' || !isFinite(b.trigger_value))) return 'trigger_value must be a number';
+  const isBudgetAction = b.action_type === 'increase_budget' || b.action_type === 'decrease_budget';
+  if (isBudgetAction && b.platform && AUTOPILOT_BUDGET_UNSUPPORTED_PLATFORMS.includes(b.platform)) {
+    return `Budget changes aren't available on ${b.platform} yet — no budget-change endpoint exists for that platform.`;
+  }
+  if (b.action_params !== undefined && b.action_params !== null) {
+    const ap = b.action_params;
+    if (typeof ap !== 'object' || Array.isArray(ap)) return 'action_params must be an object';
+    if (isBudgetAction && ap.percent !== undefined) {
+      if (typeof ap.percent !== 'number' || !isFinite(ap.percent) || ap.percent <= 0 || ap.percent > 100) {
+        return 'Budget change percent must be a number greater than 0 and at most 100.';
+      }
+    }
+    if (ap.mode !== undefined && ap.mode !== null && !AUTOPILOT_RULE_MODES.includes(ap.mode)) {
+      return `action_params.mode must be one of: ${AUTOPILOT_RULE_MODES.join(', ')}`;
+    }
+  }
+  return null;
+}
 
 app.post('/api/autopilot/rules', async (req, res) => {
   try {
     const user = await getUserFromToken(req);
     if (!user) return res.status(401).json({ error: 'Authentication required' });
     const { name, trigger_metric, trigger_operator, trigger_value, platform, action_type, action_params } = req.body || {};
-    if (!name || !trigger_metric || !trigger_operator || trigger_value == null || !action_type) {
-      return res.status(400).json({ error: 'name, trigger_metric, trigger_operator, trigger_value, and action_type are required' });
-    }
-    if (!AUTOPILOT_RULE_METRICS.includes(trigger_metric)) return res.status(400).json({ error: `trigger_metric must be one of: ${AUTOPILOT_RULE_METRICS.join(', ')}` });
-    if (!AUTOPILOT_RULE_OPERATOR_VALUES.includes(trigger_operator)) return res.status(400).json({ error: `trigger_operator must be one of: ${AUTOPILOT_RULE_OPERATOR_VALUES.join(', ')}` });
-    if (!AUTOPILOT_RULE_ACTION_TYPES.includes(action_type)) return res.status(400).json({ error: `action_type must be one of: ${AUTOPILOT_RULE_ACTION_TYPES.join(', ')}` });
-    if (platform && !AUTOPILOT_RULE_PLATFORMS.includes(platform)) return res.status(400).json({ error: `platform must be one of: ${AUTOPILOT_RULE_PLATFORMS.join(', ')}` });
-    if (typeof trigger_value !== 'number' || !isFinite(trigger_value)) return res.status(400).json({ error: 'trigger_value must be a number' });
+    const validationErr = _validateAutopilotRuleFields(req.body || {}, true);
+    if (validationErr) return res.status(400).json({ error: validationErr });
 
     const { data, error } = await supabaseAdmin.from('automation_rules').insert({
       user_id: user.id, name: String(name).slice(0, 120), trigger_metric, trigger_operator, trigger_value, platform: platform || null,
@@ -3406,11 +3868,8 @@ app.patch('/api/autopilot/rules/:id', async (req, res) => {
     const user = await getUserFromToken(req);
     if (!user) return res.status(401).json({ error: 'Authentication required' });
     const b = req.body || {};
-    if (b.trigger_metric !== undefined && !AUTOPILOT_RULE_METRICS.includes(b.trigger_metric)) return res.status(400).json({ error: `trigger_metric must be one of: ${AUTOPILOT_RULE_METRICS.join(', ')}` });
-    if (b.trigger_operator !== undefined && !AUTOPILOT_RULE_OPERATOR_VALUES.includes(b.trigger_operator)) return res.status(400).json({ error: `trigger_operator must be one of: ${AUTOPILOT_RULE_OPERATOR_VALUES.join(', ')}` });
-    if (b.action_type !== undefined && !AUTOPILOT_RULE_ACTION_TYPES.includes(b.action_type)) return res.status(400).json({ error: `action_type must be one of: ${AUTOPILOT_RULE_ACTION_TYPES.join(', ')}` });
-    if (b.platform !== undefined && b.platform !== null && !AUTOPILOT_RULE_PLATFORMS.includes(b.platform)) return res.status(400).json({ error: `platform must be one of: ${AUTOPILOT_RULE_PLATFORMS.join(', ')}` });
-    if (b.trigger_value !== undefined && (typeof b.trigger_value !== 'number' || !isFinite(b.trigger_value))) return res.status(400).json({ error: 'trigger_value must be a number' });
+    const validationErr = _validateAutopilotRuleFields(b, false);
+    if (validationErr) return res.status(400).json({ error: validationErr });
 
     const allowed = ['name', 'trigger_metric', 'trigger_operator', 'trigger_value', 'platform', 'action_type', 'action_params', 'enabled'];
     const row = {};
@@ -3435,6 +3894,52 @@ app.delete('/api/autopilot/rules/:id', async (req, res) => {
   } catch (err) {
     console.error('[autopilot/rules DELETE]', err.message);
     res.status(500).json({ error: 'Could not delete that rule.' });
+  }
+});
+
+// "Every automation should be testable" â€” evaluates the rule's condition
+// against real, freshly-fetched campaign data right now, and reports
+// whether it would trigger and against which campaign(s). Read-only: never
+// executes the action, never updates last_triggered_at.
+app.post('/api/autopilot/rules/:id/test', async (req, res) => {
+  try {
+    const user = await getUserFromToken(req);
+    if (!user) return res.status(401).json({ error: 'Authentication required' });
+    const { data: rule } = await supabaseAdmin.from('automation_rules').select('*').eq('id', req.params.id).eq('user_id', user.id).maybeSingle();
+    if (!rule) return res.status(404).json({ error: 'Rule not found.' });
+    if (!rule.platform) return res.status(400).json({ error: 'Testing requires a rule scoped to one platform.' });
+
+    let pool = [];
+    if (rule.platform === 'google') {
+      pool = (await _analyzeGoogleAccount(user, 'LAST_7_DAYS')).campaigns || [];
+    } else if (rule.platform === 'meta') {
+      pool = (await _analyzeMetaAccount(user, 'LAST_7_DAYS')).campaigns || [];
+    } else if (rule.platform === 'tiktok') {
+      if (rule.trigger_metric !== 'status' && rule.trigger_metric !== 'budget') {
+        return res.status(400).json({ error: "TikTok campaigns don't have performance metrics available yet — only Status and Budget conditions can be tested for TikTok." });
+      }
+      const { accessToken, advertiserId } = await _getTikTokAccess(user);
+      const data = await _tiktokFetch('/campaign/get/', accessToken, {
+        advertiser_id: advertiserId, fields: JSON.stringify(['campaign_id', 'campaign_name', 'status', 'operation_status', 'budget']), page_size: '100'
+      });
+      pool = ((data && data.list) || []).map(c => ({ id: String(c.campaign_id), name: c.campaign_name || 'Unnamed', status: c.operation_status || c.status || '', daily_budget: c.budget || null }));
+    }
+
+    const ap = rule.action_params || {};
+    const scopedCampaignId = ap.campaign_id && ap.campaign_id !== 'all' ? ap.campaign_id : null;
+    if (scopedCampaignId) pool = pool.filter(c => String(c.id) === String(scopedCampaignId));
+
+    const op = AUTOPILOT_RULE_OPERATORS[rule.trigger_operator];
+    const compareVal = rule.trigger_metric === 'status' ? rule.trigger_value : Number(rule.trigger_value);
+    const matches = pool.filter(c => {
+      const actual = _ruleMetricValue(c, rule.trigger_metric);
+      return actual != null && op(actual, compareVal);
+    }).map(c => ({ id: c.id, name: c.name, actual: _ruleMetricValue(c, rule.trigger_metric) }));
+
+    res.json({ wouldTrigger: matches.length > 0, matchingCampaigns: matches, checkedCampaigns: pool.length });
+  } catch (err) {
+    console.error('[autopilot/rules/:id/test]', err.message);
+    res.status(500).json({ error: err.message || 'Could not test that rule right now.' });
   }
 });
 
@@ -3793,6 +4298,16 @@ Rules:
 
   const userMsg = `Website URL: ${url.trim()}\n\n${bcLines.length ? `Brand Core:\n${bcLines.join('\n')}` : 'No brand core â€” assess against best practices.'}`;
 
+  let reservation;
+  if (req.user) {
+    try {
+      reservation = await creditManager.reserveCredits(req.user, 'website_analysis');
+    } catch (err) {
+      if (err instanceof creditManager.InsufficientCreditsError) return res.status(402).json({ error: 'Out of credits', code: 'CREDITS_EXHAUSTED', balance: err.balance });
+      console.warn('[WebsiteMonitor] Credit reservation error:', err.message);
+    }
+  }
+
   try {
     const raw = await _aimlText('website-monitor', system, userMsg, { max_tokens: 1200 });
     const cleaned = raw.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '').trim();
@@ -3801,12 +4316,15 @@ Rules:
       report = JSON.parse(cleaned);
     } catch {
       console.error('[WebsiteMonitor] JSON parse failed:', cleaned.slice(0, 200));
+      if (reservation) creditManager.finalizeCreditLog(reservation, 'website_analysis', { success: false, error: 'parse failed', route: req.path }).catch(() => {});
       return res.status(500).json({ error: 'Failed to parse website report' });
     }
     console.log('[WebsiteMonitor] Analysis complete for:', url);
+    if (reservation) creditManager.finalizeCreditLog(reservation, 'website_analysis', { provider: 'aiml', success: true, route: req.path }).catch(() => {});
     res.json(report);
   } catch (err) {
     console.error('[WebsiteMonitor] AIML error:', err.message);
+    if (reservation) creditManager.finalizeCreditLog(reservation, 'website_analysis', { success: false, error: err.message, route: req.path }).catch(() => {});
     res.status(500).json({ error: 'Failed to monitor website' });
   }
 });
@@ -4105,7 +4623,7 @@ ${platformRules}
   return pkg;
 }
 
-app.post('/api/ai/create-ad', requireSubIfAuthed, async (req, res) => {
+app.post('/api/ai/create-ad', requireSubOrOnboardingGen, async (req, res) => {
   console.log('[create-ad] ← route handler entered');
   console.log('[create-ad] req.body keys:', Object.keys(req.body || {}));
   const { product, goal, platforms, mode, brandCore, productImages } = req.body;
@@ -4128,6 +4646,19 @@ app.post('/api/ai/create-ad', requireSubIfAuthed, async (req, res) => {
     ? platforms.join(', ')
     : 'Google Ads, Meta Ads, TikTok Ads';
   console.log('[create-ad] resolved platform:', platform, '| mode:', mode, '| brandCore:', brandCore ? brandCore.name : 'none', '| productImages:', productImages ? productImages.length : 0);
+
+  // No charge for the one-time onboarding free generation (req._onboardingFreeGen,
+  // granted by requireSubOrOnboardingGen above) -- that's a free trial shot for
+  // a not-yet-paying user, not a paid-plan credit spend.
+  let reservation;
+  if (req.user && !req._onboardingFreeGen) {
+    try {
+      reservation = await creditManager.reserveCredits(req.user, 'campaign_generation');
+    } catch (err) {
+      if (err instanceof creditManager.InsufficientCreditsError) return res.status(402).json({ error: 'Out of credits', code: 'CREDITS_EXHAUSTED', balance: err.balance });
+      console.warn('[create-ad] Credit reservation error:', err.message);
+    }
+  }
 
   if (mode === 'concepts') {
     console.log('[create-ad] → mode=concepts branch');
@@ -4154,10 +4685,15 @@ Reply ONLY with valid JSON array (no markdown, no extra text):
       const raw = await _aimlText('ads-copy', system, conceptsUserMsg, { max_tokens: 1800 });
       const cleaned = raw.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/i, '').trim();
       const concepts = JSON.parse(cleaned);
+      _consumeOnboardingFreeGen(req);
+      if (reservation) creditManager.finalizeCreditLog(reservation, 'campaign_generation', { provider: 'aiml', success: true, route: req.path }).catch(() => {});
       return res.json({ ok: true, data: { concepts } });
     } catch (err) {
-      console.error('[create-ad concepts] error:', err.message);
-      return res.status(500).json({ ok: false, error: err.message || 'Generation failed' });
+      // Full detail server-side only — the client never sees provider/billing internals.
+      console.error('[create-ad concepts] provider error:', err.message);
+      if (err.stack) console.error(err.stack);
+      if (reservation) creditManager.finalizeCreditLog(reservation, 'campaign_generation', { success: false, error: err.message, route: req.path }).catch(() => {});
+      return res.status(500).json({ ok: false, error: "We're unable to generate your campaign right now. Please try again later.", code: 'GENERATION_FAILED' });
     }
   }
 
@@ -4168,10 +4704,15 @@ Reply ONLY with valid JSON array (no markdown, no extra text):
   try {
     const pkg = await _generateAdPackage({ user: req.user, product, goal, platform, brandCore, productImages });
     console.log(`[create-ad] Package ready — keys: ${Object.keys(pkg).join(', ')} | visualConcepts: ${(pkg.visualConcepts||[]).length}`);
+    _consumeOnboardingFreeGen(req);
+    if (reservation) creditManager.finalizeCreditLog(reservation, 'campaign_generation', { provider: 'aiml', success: true, route: req.path }).catch(() => {});
     return res.json({ ok: true, data: pkg });
   } catch (err) {
-    console.error('[create-ad full] error:', err.message);
-    return res.status(500).json({ ok: false, error: err.message || 'Generation failed' });
+    // Full detail server-side only — the client never sees provider/billing internals.
+    console.error('[create-ad full] provider error:', err.message);
+    if (err.stack) console.error(err.stack);
+    if (reservation) creditManager.finalizeCreditLog(reservation, 'campaign_generation', { success: false, error: err.message, route: req.path }).catch(() => {});
+    return res.status(500).json({ ok: false, error: "We're unable to generate your campaign right now. Please try again later.", code: 'GENERATION_FAILED' });
   }
 });
 
@@ -4229,16 +4770,45 @@ app.post('/api/ai/chat', requireSubIfAuthed, async (req, res) => {
 
   const pageSection = ctx.page ? `\n\nThe user is currently on the "${ctx.page}" screen of Ads Manager.` : '';
 
-  const currentCampaign = ctx.currentCampaign && ctx.currentCampaign.campaignId ? ctx.currentCampaign : null;
+  // Oriven 1.0 (Epic 1) â€” gate on campaignName, not campaignId: the sentence
+  // below only ever uses campaignName/platform, and a freshly generated
+  // (not-yet-published) campaign package genuinely has no platform-assigned
+  // id yet but still deserves to be "the current campaign" in context.
+  const currentCampaign = ctx.currentCampaign && ctx.currentCampaign.campaignName ? ctx.currentCampaign : null;
   const campaignSection = currentCampaign
     ? `\n\nThe user currently has the campaign "${currentCampaign.campaignName}" (${currentCampaign.platform}) open. If they say "this campaign" or "it" without naming one, assume they mean this campaign.`
     : '';
 
+  // Oriven 1.0 (Epic 2/3) â€” Global Context Engine: the score/grade/strengths
+  // /weaknesses shown on the Campaign Review screen the user is looking at
+  // right now, so "explain my score" never has to ask what score.
+  const review = ctx.review && typeof ctx.review.score === 'number' ? ctx.review : null;
+  // Oriven 1.0 (V3, Epic 3) â€” name the strongest/weakest sub-score by name so
+  // the model can make the kind of concrete comparison a real strategist
+  // would ("your audience score is much lower than your copy score"),
+  // computed from categories already present on the review, never invented.
+  let categorySection = '';
+  if (review && Array.isArray(review.categories) && review.categories.length >= 2) {
+    const cats = review.categories.filter(c => c && c.name && typeof c.score === 'number');
+    if (cats.length >= 2) {
+      const best = cats.reduce((a, b) => (b.score > a.score ? b : a));
+      const worst = cats.reduce((a, b) => (b.score < a.score ? b : a));
+      if (best.name !== worst.name) {
+        categorySection = ` Category breakdown: ${best.name} scores highest at ${best.score}, ${worst.name} scores lowest at ${worst.score} — call out this gap when it's relevant instead of just repeating the overall score.`;
+      }
+    }
+  }
+  const reviewSection = review
+    ? `\n\nThe campaign review the user is currently looking at scored ${review.score}/100 (Grade ${review.grade || '?'}).${(review.strengths && review.strengths.length) ? ` Strengths: ${review.strengths.join('; ')}.` : ''}${(review.weaknesses && review.weaknesses.length) ? ` Weaknesses: ${review.weaknesses.join('; ')}.` : ''}${categorySection} If asked to "explain the score" or similar, use these real numbers rather than asking what the score is.`
+    : '';
+
   const toolsSection = `\n\nTOOLS AVAILABLE — call one when the user is clearly asking for an action to be taken (not when they're just asking a question or making conversation):\n${toolRouter.getCatalogPrompt()}\n\nTo use a tool, reply with ONLY a JSON object on its own, nothing else: {"tool": "<tool_name>", "params": {...}}. No markdown fences, no extra text before or after. If a required param is missing or ambiguous, don't guess — ask the user a short clarifying question in plain text instead of calling the tool. For anything that isn't an action request, just reply normally in plain conversational text. Tool names like "create_campaign_package" are internal — never write them out in a conversational reply; describe the action in plain English instead (e.g. "generate a campaign package", not "use create_campaign_package").`;
 
-  const systemPrompt = `You are Oriven, an AI marketing co-pilot built into Ads Manager. You help the user plan, create, and optimise their Google, Meta, and TikTok ad campaigns.${hasBrand ? `\n\nBRAND CONTEXT (draw on this when relevant):\n${brandSection}` : ''}${businessSection}${accountsSection}${pageSection}${campaignSection}${toolsSection}
+  const systemPrompt = `You are Oriven, an AI marketing co-pilot built into Ads Manager. You help the user plan, create, and optimise their Google, Meta, and TikTok ad campaigns.${hasBrand ? `\n\nBRAND CONTEXT (draw on this when relevant):\n${brandSection}` : ''}${businessSection}${accountsSection}${pageSection}${campaignSection}${reviewSection}${toolsSection}
 
-Be conversational and natural. Match the energy of the message — brief for casual small talk, thorough for strategic or campaign questions. Think like a knowledgeable colleague, not a branded bot. Never start with hollow affirmations like "Great!" or "Absolutely!". Be direct. Never mention that you are powered by any specific AI provider or model — you are simply Oriven.${businessContext ? ' When it is relevant, reference specific business knowledge by name (a real product, audience, or competitor) instead of speaking in generalities — it shows the user Oriven actually remembers their business. If competitor information is present, use it only for strategic positioning advice, never to copy or replicate a competitor\'s messaging or content.' : ''}`;
+Be conversational and natural. Match the energy of the message — brief for casual small talk, thorough for strategic or campaign questions. Think like a knowledgeable colleague, not a branded bot. Never start with hollow affirmations like "Great!" or "Absolutely!". Be direct. Never mention that you are powered by any specific AI provider or model — you are simply Oriven.${businessContext ? ' When it is relevant, reference specific business knowledge by name (a real product, audience, or competitor) instead of speaking in generalities — it shows the user Oriven actually remembers their business. If competitor information is present, use it only for strategic positioning advice, never to copy or replicate a competitor\'s messaging or content.' : ''}
+
+You are a senior marketing strategist, not a generic chatbot — assume responsibility, guide rather than react, and never ask for information already given above in this prompt. For analytical questions (score explanations, performance reviews, "why" questions), structure the answer as: the situation, the reason behind it, a concrete recommendation, and the result to expect — without labeling these parts or turning it into a rigid template for short/casual replies. If a claim would need evidence you don't have (sample size, historical performance, real conversion data), say so plainly instead of stating it with false confidence.`;
 
   const messages = [{ role: 'system', content: systemPrompt }];
   if (Array.isArray(history)) {
@@ -4251,6 +4821,19 @@ Be conversational and natural. Match the energy of the message — brief for cas
   messages.push({ role: 'user', content: message });
 
   const toolCtx = { user: req.user, authHeader: req.headers.authorization || '', currentCampaign, brandCore };
+
+  // Charged once per user message, not per internal tool-loop AI call below
+  // (up to MAX_TOOL_STEPS _aimlChat calls can fire for a single message) --
+  // credits price the user action, not the provider call count.
+  let reservation;
+  if (req.user) {
+    try {
+      reservation = await creditManager.reserveCredits(req.user, 'ai_chat');
+    } catch (err) {
+      if (err instanceof creditManager.InsufficientCreditsError) return res.status(402).json({ error: 'Out of credits', code: 'CREDITS_EXHAUSTED', balance: err.balance });
+      console.warn('[ai/chat] Credit reservation error:', err.message);
+    }
+  }
 
   try {
     const MAX_TOOL_STEPS = 5;
@@ -4288,10 +4871,12 @@ Be conversational and natural. Match the energy of the message — brief for cas
       break;
     }
 
+    if (reservation) creditManager.finalizeCreditLog(reservation, 'ai_chat', { provider: 'aiml', success: true, route: req.path }).catch(() => {});
     if (pendingAction) return res.json({ pendingAction });
     res.json({ reply: reply || "I wasn't able to complete that — could you rephrase?", usedContext: businessContext ? businessContext.sources : undefined });
   } catch (err) {
     console.error('[ai/chat] error:', err.message);
+    if (reservation) creditManager.finalizeCreditLog(reservation, 'ai_chat', { success: false, error: err.message, route: req.path }).catch(() => {});
     res.status(500).json({ error: 'Failed to generate a response. Please try again.' });
   }
 });
@@ -6139,6 +6724,46 @@ function _metaDatePreset(range) {
   return { LAST_7_DAYS: 'last_7d', LAST_14_DAYS: 'last_14d', LAST_30_DAYS: 'last_30d', LAST_90_DAYS: 'last_90d' }[range] || 'last_30d';
 }
 
+// â”€â”€ Shared date-range resolution for the Campaigns Overview endpoints â”€â”€â”€â”€â”€
+// Google Ads' GAQL `segments.date DURING X` clause only accepts a fixed
+// literal enum (TODAY, YESTERDAY, LAST_7_DAYS, LAST_30_DAYS, THIS_MONTH,
+// LAST_MONTH â€” notably NOT LAST_90_DAYS, which the old 4-option range
+// selector silently sent anyway; see git history). Everything outside that
+// enum has to be an explicit `BETWEEN 'YYYY-MM-DD' AND 'YYYY-MM-DD'` clause.
+// Meta's Graph API takes either a named date_preset or an explicit
+// time_range({since,until}) field expansion. This resolves one requested
+// range key into whatever each platform's API actually needs.
+const ORV_DATE_RANGE_KEYS = ['TODAY', 'YESTERDAY', 'LAST_7_DAYS', 'LAST_30_DAYS', 'LAST_90_DAYS', 'THIS_MONTH', 'LAST_MONTH', 'LAST_12_MONTHS', 'LIFETIME', 'CUSTOM'];
+const _GAQL_NATIVE_DURING  = { TODAY: 'TODAY', YESTERDAY: 'YESTERDAY', LAST_7_DAYS: 'LAST_7_DAYS', LAST_30_DAYS: 'LAST_30_DAYS', THIS_MONTH: 'THIS_MONTH', LAST_MONTH: 'LAST_MONTH' };
+const _META_NATIVE_PRESET  = { TODAY: 'today', YESTERDAY: 'yesterday', LAST_7_DAYS: 'last_7d', LAST_30_DAYS: 'last_30d', LAST_90_DAYS: 'last_90d', THIS_MONTH: 'this_month', LAST_MONTH: 'last_month', LIFETIME: 'maximum' };
+
+function _orvFmtDate(d) { return d.toISOString().slice(0, 10); }
+
+function resolveDateRange(rawKey, customSince, customUntil) {
+  const key = ORV_DATE_RANGE_KEYS.includes(rawKey) ? rawKey : 'LAST_30_DAYS';
+  const today = new Date();
+  const daysAgo = n => { const d = new Date(today); d.setDate(d.getDate() - n); return _orvFmtDate(d); };
+
+  let since = null, until = null;
+  if (key === 'LAST_90_DAYS')        { since = daysAgo(89);  until = _orvFmtDate(today); }
+  else if (key === 'LAST_12_MONTHS') { since = daysAgo(365); until = _orvFmtDate(today); }
+  else if (key === 'LIFETIME')       { since = '2005-01-01'; until = _orvFmtDate(today); }
+  else if (key === 'CUSTOM') {
+    since = /^\d{4}-\d{2}-\d{2}$/.test(customSince || '') ? customSince : daysAgo(29);
+    until = /^\d{4}-\d{2}-\d{2}$/.test(customUntil || '') ? customUntil : _orvFmtDate(today);
+  }
+
+  const gaqlDuring = _GAQL_NATIVE_DURING[key];
+  const gaqlWhere  = gaqlDuring ? ('DURING ' + gaqlDuring) : ("BETWEEN '" + since + "' AND '" + until + "'");
+
+  const metaPreset = key !== 'CUSTOM' ? _META_NATIVE_PRESET[key] : null;
+  const metaFieldFragment = metaPreset
+    ? ('date_preset(' + metaPreset + ')')
+    : ('time_range(' + JSON.stringify({ since, until }) + ')');
+
+  return { key, since, until, gaqlWhere, metaPreset, metaFieldFragment };
+}
+
 // â”€â”€ Helper: sum conversion actions from Meta insights.actions array â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 function _metaConversions(actions) {
   const convTypes = new Set([
@@ -6470,12 +7095,11 @@ app.get('/api/meta/campaigns', async (req, res) => {
 
     const { accessToken, accountId } = await _getMetaAccess(user);
 
-    const VALID_RANGES = ['LAST_7_DAYS', 'LAST_14_DAYS', 'LAST_30_DAYS', 'LAST_90_DAYS'];
-    const range      = VALID_RANGES.includes(req.query.date_range) ? req.query.date_range : 'LAST_30_DAYS';
-    const datePreset = _metaDatePreset(range);
+    const dr    = resolveDateRange(req.query.date_range, req.query.date_since, req.query.date_until);
+    const range = dr.key;
 
     const campData = await _metaFetch('/' + accountId + '/campaigns', accessToken, {
-      fields:           'id,name,status,objective,daily_budget,lifetime_budget,created_time,insights.date_preset(' + datePreset + '){spend,impressions,clicks,ctr,actions}',
+      fields:           'id,name,status,objective,daily_budget,lifetime_budget,created_time,insights.' + dr.metaFieldFragment + '{spend,impressions,clicks,ctr,actions}',
       limit:            '100',
       effective_status: '["ACTIVE","PAUSED","ARCHIVED"]'
     });
@@ -6520,21 +7144,19 @@ app.get('/api/meta/campaigns', async (req, res) => {
 // Mirrors _analyzeGoogleAccount's shape/contract exactly so callers
 // (POST /api/meta/analyze, GET /api/intelligence/home) can treat Google
 // and Meta analysis interchangeably.
-const META_ANALYZE_VALID_RANGES = ['LAST_7_DAYS', 'LAST_14_DAYS', 'LAST_30_DAYS', 'LAST_90_DAYS'];
-
-async function _analyzeMetaAccount(user, range) {
-  range = META_ANALYZE_VALID_RANGES.includes(range) ? range : 'LAST_30_DAYS';
+async function _analyzeMetaAccount(user, range, customSince, customUntil) {
+  const dr = resolveDateRange(range, customSince, customUntil);
+  range = dr.key;
   const { accessToken, accountId, accountName } = await _getMetaAccess(user);
-  const datePreset = _metaDatePreset(range);
 
   const [campData, adData] = await Promise.all([
     _metaFetch('/' + accountId + '/campaigns', accessToken, {
-      fields:           'id,name,status,objective,daily_budget,lifetime_budget,created_time,insights.date_preset(' + datePreset + '){spend,impressions,clicks,ctr,actions}',
+      fields:           'id,name,status,objective,daily_budget,lifetime_budget,created_time,insights.' + dr.metaFieldFragment + '{spend,impressions,clicks,ctr,actions}',
       limit:            '100',
       effective_status: '["ACTIVE","PAUSED","ARCHIVED"]'
     }),
     _metaFetch('/' + accountId + '/ads', accessToken, {
-      fields:  'id,name,status,adset_id,campaign_id,creative{id,title,body,call_to_action_type},insights.date_preset(' + datePreset + '){spend,impressions,clicks,ctr,actions}',
+      fields:  'id,name,status,adset_id,campaign_id,creative{id,title,body,call_to_action_type},insights.' + dr.metaFieldFragment + '{spend,impressions,clicks,ctr,actions}',
       limit:   '50',
       effective_status: '["ACTIVE","PAUSED"]'
     }).catch(() => ({ data: [] }))
@@ -6551,7 +7173,7 @@ async function _analyzeMetaAccount(user, range) {
     const cv = _metaConversions(ins.actions);
     totalSpend += sp; totalImpr += im; totalClicks += cl; totalConv += cv;
     return {
-      name: c.name || '', status: c.status || '', objective: c.objective || '',
+      id: c.id || '', name: c.name || '', status: c.status || '', objective: c.objective || '',
       spend: sp, impressions: im, clicks: cl, ctr: im > 0 ? (cl / im) * 100 : 0,
       conversions: cv, cpa: cv > 0 ? sp / cv : 0,
       daily_budget: c.daily_budget ? Number(c.daily_budget) / 100 : null
@@ -6690,12 +7312,19 @@ ${adLines.length > 0 ? adLines.join('\n') : 'No ad-level data'}`;
 }
 
 app.post('/api/meta/analyze', async (req, res) => {
+  let reservation;
   try {
     const user = await getUserFromToken(req);
     if (!user) return res.status(401).json({ error: 'Authentication required' });
-    const result = await _analyzeMetaAccount(user, req.body && req.body.date_range);
+    reservation = await creditManager.reserveCredits(user, 'ai_analysis');
+    // Explicit "Analyze with AI" click -- always bypasses the shared cache.
+    const dr = resolveDateRange(req.body && req.body.date_range, req.body && req.body.date_since, req.body && req.body.date_until);
+    const result = await getOrRefreshAnalysis(user, 'meta', dr.key, { forceRefresh: true });
+    await creditManager.finalizeCreditLog(reservation, 'ai_analysis', { provider: 'aiml', success: true, route: req.path });
     res.json(result);
   } catch (err) {
+    if (reservation) creditManager.finalizeCreditLog(reservation, 'ai_analysis', { success: false, error: err.message, route: req.path }).catch(() => {});
+    if (err instanceof creditManager.InsufficientCreditsError) return res.status(402).json({ error: 'Out of credits', code: 'CREDITS_EXHAUSTED', balance: err.balance });
     console.error('[Meta/analyze]', err.message);
     res.status(err.status || 500).json({ error: err.message || 'Internal server error', meta_code: err.metaCode || null });
   }
@@ -7127,10 +7756,10 @@ app.get('/api/ads/overview', async (req, res) => {
     _diagLoginId    = loginCustomerId;
     _diagActive     = activeAccount;
 
-    const VALID_RANGES = ['LAST_7_DAYS', 'LAST_14_DAYS', 'LAST_30_DAYS', 'LAST_90_DAYS'];
-    const range = VALID_RANGES.includes(req.query.date_range) ? req.query.date_range : 'LAST_30_DAYS';
+    const dr    = resolveDateRange(req.query.date_range, req.query.date_since, req.query.date_until);
+    const range = dr.key;
 
-    _diagQuery = `SELECT campaign.id, campaign.name, campaign.status, campaign.advertising_channel_type, metrics.cost_micros, metrics.impressions, metrics.clicks, metrics.ctr, metrics.conversions, metrics.cost_per_conversion, metrics.conversions_value FROM campaign WHERE segments.date DURING ${range} AND campaign.status != 'REMOVED' ORDER BY metrics.cost_micros DESC LIMIT 100`;
+    _diagQuery = `SELECT campaign.id, campaign.name, campaign.status, campaign.advertising_channel_type, metrics.cost_micros, metrics.impressions, metrics.clicks, metrics.ctr, metrics.conversions, metrics.cost_per_conversion, metrics.conversions_value FROM campaign WHERE segments.date ${dr.gaqlWhere} AND campaign.status != 'REMOVED' ORDER BY metrics.cost_micros DESC LIMIT 100`;
 
     const results = await _gadsQuery(accessToken, customerId, `
       SELECT
@@ -7146,7 +7775,7 @@ app.get('/api/ads/overview', async (req, res) => {
         metrics.cost_per_conversion,
         metrics.conversions_value
       FROM campaign
-      WHERE segments.date DURING ${range}
+      WHERE segments.date ${dr.gaqlWhere}
         AND campaign.status != 'REMOVED'
       ORDER BY metrics.cost_micros DESC
       LIMIT 100
@@ -7624,10 +8253,9 @@ app.get('/api/ads/campaign/:id/assets', async (req, res) => {
 // ── Google Ads account analysis — live data + AI narrative ──────
 // Used by: POST /api/ads/analyze (below) and GET /api/intelligence/home
 // (V6 Home Dashboard). Extracted so both callers share one implementation.
-const GADS_ANALYZE_VALID_RANGES = ['LAST_7_DAYS', 'LAST_14_DAYS', 'LAST_30_DAYS', 'LAST_90_DAYS'];
-
-async function _analyzeGoogleAccount(user, range) {
-    range = GADS_ANALYZE_VALID_RANGES.includes(range) ? range : 'LAST_30_DAYS';
+async function _analyzeGoogleAccount(user, range, customSince, customUntil) {
+    const dr = resolveDateRange(range, customSince, customUntil);
+    range = dr.key;
     const { accessToken, customerId, accountName, loginCustomerId } = await _getGadsAccess(user);
 
     // Fetch all data in parallel from Google Ads API
@@ -7641,7 +8269,7 @@ async function _analyzeGoogleAccount(user, range) {
           metrics.cost_micros, metrics.impressions, metrics.clicks,
           metrics.ctr, metrics.conversions, metrics.conversions_value
         FROM campaign
-        WHERE segments.date DURING ${range}
+        WHERE segments.date ${dr.gaqlWhere}
           AND campaign.status != 'REMOVED'
         ORDER BY metrics.cost_micros DESC
         LIMIT 50
@@ -7656,7 +8284,7 @@ async function _analyzeGoogleAccount(user, range) {
           metrics.cost_micros, metrics.clicks, metrics.impressions,
           metrics.ctr, metrics.conversions
         FROM keyword_view
-        WHERE segments.date DURING ${range}
+        WHERE segments.date ${dr.gaqlWhere}
           AND metrics.impressions > 0
         ORDER BY metrics.cost_micros DESC
         LIMIT 50
@@ -7672,7 +8300,7 @@ async function _analyzeGoogleAccount(user, range) {
           metrics.cost_micros, metrics.clicks, metrics.conversions,
           metrics.impressions
         FROM search_term_view
-        WHERE segments.date DURING ${range}
+        WHERE segments.date ${dr.gaqlWhere}
           AND metrics.impressions > 0
         ORDER BY metrics.cost_micros DESC
         LIMIT 50
@@ -7689,7 +8317,7 @@ async function _analyzeGoogleAccount(user, range) {
           metrics.impressions, metrics.clicks, metrics.ctr,
           metrics.conversions, metrics.cost_micros
         FROM ad_group_ad
-        WHERE segments.date DURING ${range}
+        WHERE segments.date ${dr.gaqlWhere}
           AND ad_group_ad.status != 'REMOVED'
           AND metrics.impressions > 0
         ORDER BY metrics.impressions DESC
@@ -7707,7 +8335,7 @@ async function _analyzeGoogleAccount(user, range) {
       const cl = Number(m.clicks || 0), cv = Number(m.conversions || 0), vl = Number(m.conversionsValue || 0);
       const sp = cm / 1e6;
       totalSpend += sp; totalImpr += im; totalClicks += cl; totalConv += cv; totalConvVal += vl;
-      return { name: c.name || '', status: c.status || '', type: c.advertisingChannelType || '',
+      return { id: c.id || '', name: c.name || '', status: c.status || '', type: c.advertisingChannelType || '',
         spend: sp, impressions: im, clicks: cl, ctr: im > 0 ? (cl / im) * 100 : 0,
         conversions: cv, cpa: cv > 0 ? sp / cv : 0, roas: sp > 0 ? vl / sp : 0 };
     });
@@ -7883,12 +8511,19 @@ ${adLines.length > 0 ? adLines.join('\n') : 'No ad-level data'}`;
 }
 
 app.post('/api/ads/analyze', async (req, res) => {
+  let reservation;
   try {
     const user = await getUserFromToken(req);
     if (!user) return res.status(401).json({ error: 'Authentication required' });
-    const result = await _analyzeGoogleAccount(user, req.body && req.body.date_range);
+    reservation = await creditManager.reserveCredits(user, 'ai_analysis');
+    // Explicit "Analyze with AI" click -- always bypasses the shared cache.
+    const dr = resolveDateRange(req.body && req.body.date_range, req.body && req.body.date_since, req.body && req.body.date_until);
+    const result = await getOrRefreshAnalysis(user, 'google', dr.key, { forceRefresh: true });
+    await creditManager.finalizeCreditLog(reservation, 'ai_analysis', { provider: 'aiml', success: true, route: req.path });
     res.json(result);
   } catch (err) {
+    if (reservation) creditManager.finalizeCreditLog(reservation, 'ai_analysis', { success: false, error: err.message, route: req.path }).catch(() => {});
+    if (err instanceof creditManager.InsufficientCreditsError) return res.status(402).json({ error: 'Out of credits', code: 'CREDITS_EXHAUSTED', balance: err.balance });
     console.error('[Ads/analyze]', err.message);
     res.status(err.status || 500).json({ error: err.message || 'Internal server error', gads_status: err.gadsStatus || null, gads_codes: err.gadsErrorCodes || null });
   }
@@ -7904,8 +8539,8 @@ app.post('/api/ads/recommend', async (req, res) => {
 
     const { accessToken, customerId, accountName, loginCustomerId } = await _getGadsAccess(user);
 
-    const VALID_RANGES = ['LAST_7_DAYS', 'LAST_14_DAYS', 'LAST_30_DAYS', 'LAST_90_DAYS'];
-    const range = VALID_RANGES.includes(req.body && req.body.date_range) ? req.body.date_range : 'LAST_30_DAYS';
+    const dr    = resolveDateRange(req.body && req.body.date_range, req.body && req.body.date_since, req.body && req.body.date_until);
+    const range = dr.key;
 
     const [campResults, kwResults, stResults] = await Promise.all([
 
@@ -7916,7 +8551,7 @@ app.post('/api/ads/recommend', async (req, res) => {
           metrics.cost_micros, metrics.impressions, metrics.clicks,
           metrics.ctr, metrics.conversions, metrics.conversions_value
         FROM campaign
-        WHERE segments.date DURING ${range}
+        WHERE segments.date ${dr.gaqlWhere}
           AND campaign.status != 'REMOVED'
         ORDER BY metrics.cost_micros DESC
         LIMIT 20
@@ -7930,7 +8565,7 @@ app.post('/api/ads/recommend', async (req, res) => {
           metrics.cost_micros, metrics.clicks, metrics.ctr,
           metrics.conversions, metrics.impressions
         FROM keyword_view
-        WHERE segments.date DURING ${range}
+        WHERE segments.date ${dr.gaqlWhere}
           AND metrics.impressions > 0
         ORDER BY metrics.cost_micros DESC
         LIMIT 30
@@ -7943,7 +8578,7 @@ app.post('/api/ads/recommend', async (req, res) => {
           campaign.name,
           metrics.cost_micros, metrics.clicks, metrics.conversions
         FROM search_term_view
-        WHERE segments.date DURING ${range}
+        WHERE segments.date ${dr.gaqlWhere}
           AND metrics.cost_micros > 1000000
         ORDER BY metrics.cost_micros DESC
         LIMIT 30
@@ -8050,12 +8685,13 @@ function _periodWindows(days) {
   };
 }
 
-async function _gadsFetchTotals(accessToken, customerId, loginCustomerId, sinceISO, untilISO) {
+async function _gadsFetchTotals(accessToken, customerId, loginCustomerId, sinceISO, untilISO, campaignId) {
+  const campFilter = /^\d+$/.test(String(campaignId || '')) ? ` AND campaign.id = ${Number(campaignId)}` : '';
   const results = await _gadsQuery(accessToken, customerId, `
     SELECT metrics.cost_micros, metrics.impressions, metrics.clicks, metrics.conversions, metrics.conversions_value
     FROM campaign
     WHERE segments.date BETWEEN '${sinceISO}' AND '${untilISO}'
-      AND campaign.status != 'REMOVED'
+      AND campaign.status != 'REMOVED'${campFilter}
   `, loginCustomerId);
   let spend = 0, impr = 0, clicks = 0, conv = 0, convVal = 0;
   results.forEach(r => {
@@ -8075,8 +8711,9 @@ async function _gadsFetchTotals(accessToken, customerId, loginCustomerId, sinceI
   };
 }
 
-async function _metaFetchTotals(accessToken, accountId, sinceISO, untilISO) {
-  const data = await _metaFetch('/' + accountId + '/insights', accessToken, {
+async function _metaFetchTotals(accessToken, accountId, sinceISO, untilISO, campaignId) {
+  const target = /^\d+$/.test(String(campaignId || '')) ? String(campaignId) : accountId;
+  const data = await _metaFetch('/' + target + '/insights', accessToken, {
     time_range: JSON.stringify({ since: sinceISO, until: untilISO }),
     fields: 'spend,impressions,clicks,ctr,actions'
   });
@@ -8097,15 +8734,16 @@ async function _metaFetchTotals(accessToken, accountId, sinceISO, untilISO) {
 // deterministic trend forecast (same real-data-only ethos as the Confidence
 // Engine): the AI is only ever asked to narrate numbers already computed
 // here, never to produce the numbers itself.
-async function _gadsFetchDailySeries(accessToken, customerId, loginCustomerId, days) {
+async function _gadsFetchDailySeries(accessToken, customerId, loginCustomerId, days, campaignId) {
   const fmt = d => d.toISOString().slice(0, 10);
   const until = new Date();
   const since = new Date(); since.setDate(since.getDate() - (days - 1));
+  const campFilter = /^\d+$/.test(String(campaignId || '')) ? ` AND campaign.id = ${Number(campaignId)}` : '';
   const results = await _gadsQuery(accessToken, customerId, `
     SELECT segments.date, metrics.cost_micros, metrics.impressions, metrics.clicks, metrics.conversions, metrics.conversions_value
     FROM campaign
     WHERE segments.date BETWEEN '${fmt(since)}' AND '${fmt(until)}'
-      AND campaign.status != 'REMOVED'
+      AND campaign.status != 'REMOVED'${campFilter}
   `, loginCustomerId);
   const byDate = {};
   results.forEach(r => {
@@ -8122,11 +8760,12 @@ async function _gadsFetchDailySeries(accessToken, customerId, loginCustomerId, d
   return Object.values(byDate).sort((a, b) => (a.date < b.date ? -1 : 1));
 }
 
-async function _metaFetchDailySeries(accessToken, accountId, days) {
+async function _metaFetchDailySeries(accessToken, accountId, days, campaignId) {
   const fmt = d => d.toISOString().slice(0, 10);
   const until = new Date();
   const since = new Date(); since.setDate(since.getDate() - (days - 1));
-  const data = await _metaFetch('/' + accountId + '/insights', accessToken, {
+  const target = /^\d+$/.test(String(campaignId || '')) ? String(campaignId) : accountId;
+  const data = await _metaFetch('/' + target + '/insights', accessToken, {
     time_range: JSON.stringify({ since: fmt(since), until: fmt(until) }),
     time_increment: '1',
     fields: 'spend,impressions,clicks,actions'
@@ -8258,8 +8897,16 @@ function _computeDelta(current, previous) {
   return out;
 }
 
-function _rangeDays(range) {
-  return { LAST_7_DAYS: 7, LAST_14_DAYS: 14, LAST_30_DAYS: 30, LAST_90_DAYS: 90 }[range] || 30;
+function _rangeDays(range, customSince, customUntil) {
+  const STATIC_DAYS = { LAST_7_DAYS: 7, LAST_14_DAYS: 14, LAST_30_DAYS: 30, LAST_90_DAYS: 90, TODAY: 1, YESTERDAY: 1, LAST_12_MONTHS: 365, LIFETIME: 1825 };
+  if (STATIC_DAYS[range] != null) return STATIC_DAYS[range];
+  const now = new Date();
+  if (range === 'THIS_MONTH') return now.getDate();
+  if (range === 'LAST_MONTH') return new Date(now.getFullYear(), now.getMonth(), 0).getDate();
+  if (range === 'CUSTOM' && /^\d{4}-\d{2}-\d{2}$/.test(customSince || '') && /^\d{4}-\d{2}-\d{2}$/.test(customUntil || '')) {
+    return Math.max(1, Math.round((new Date(customUntil) - new Date(customSince)) / 86400000) + 1);
+  }
+  return 30;
 }
 
 // V6 Phase 2 â€” Confidence Engine. Confidence is a function of REAL observed
@@ -8377,22 +9024,23 @@ app.get('/api/intelligence/kpi-trend', requireSubIfAuthed, async (req, res) => {
     if (!req.user) return res.status(401).json({ error: 'Authentication required' });
     const platform = req.query.platform === 'meta' ? 'meta' : 'google';
     const range = req.query.date_range;
-    const days = _rangeDays(range);
+    const days = _rangeDays(range, req.query.date_since, req.query.date_until);
     const windows = _periodWindows(days);
 
+    const campaignId = req.query.campaignId || null;
     let delta;
     if (platform === 'google') {
       const { accessToken, customerId, loginCustomerId } = await _getGadsAccess(req.user);
       const [current, previous] = await Promise.all([
-        _gadsFetchTotals(accessToken, customerId, loginCustomerId, windows.current.since, windows.current.until),
-        _gadsFetchTotals(accessToken, customerId, loginCustomerId, windows.previous.since, windows.previous.until)
+        _gadsFetchTotals(accessToken, customerId, loginCustomerId, windows.current.since, windows.current.until, campaignId),
+        _gadsFetchTotals(accessToken, customerId, loginCustomerId, windows.previous.since, windows.previous.until, campaignId)
       ]);
       delta = _computeDelta(current, previous);
     } else {
       const { accessToken, accountId } = await _getMetaAccess(req.user);
       const [current, previous] = await Promise.all([
-        _metaFetchTotals(accessToken, accountId, windows.current.since, windows.current.until),
-        _metaFetchTotals(accessToken, accountId, windows.previous.since, windows.previous.until)
+        _metaFetchTotals(accessToken, accountId, windows.current.since, windows.current.until, campaignId),
+        _metaFetchTotals(accessToken, accountId, windows.previous.since, windows.previous.until, campaignId)
       ]);
       delta = _computeDelta(current, previous);
     }
@@ -8400,6 +9048,34 @@ app.get('/api/intelligence/kpi-trend', requireSubIfAuthed, async (req, res) => {
   } catch (err) {
     console.error('[intelligence/kpi-trend]', err.message);
     res.status(err.status || 500).json({ error: err.message || 'Could not compute trend' });
+  }
+});
+
+// GET /api/intelligence/kpi-series â€” real day-by-day spend/conversions/ROAS/CTR
+// for the Campaigns Overview charts. Reuses the exact daily-fetch helpers the
+// Predictive Autopilot forecast already relies on (_gadsFetchDailySeries /
+// _metaFetchDailySeries) rather than a new fetch path â€” same real-data-only
+// ethos as the rest of the Confidence/Forecast engine, just exposed directly
+// instead of only ever feeding a forecast.
+app.get('/api/intelligence/kpi-series', requireSubIfAuthed, async (req, res) => {
+  try {
+    if (!req.user) return res.status(401).json({ error: 'Authentication required' });
+    const platform = req.query.platform === 'meta' ? 'meta' : 'google';
+    const days = Math.min(400, Math.max(1, _rangeDays(req.query.date_range, req.query.date_since, req.query.date_until)));
+    const campaignId = req.query.campaignId || null;
+
+    let series;
+    if (platform === 'google') {
+      const { accessToken, customerId, loginCustomerId } = await _getGadsAccess(req.user);
+      series = await _gadsFetchDailySeries(accessToken, customerId, loginCustomerId, days, campaignId);
+    } else {
+      const { accessToken, accountId } = await _getMetaAccess(req.user);
+      series = await _metaFetchDailySeries(accessToken, accountId, days, campaignId);
+    }
+    res.json({ series: series || [], days });
+  } catch (err) {
+    console.error('[intelligence/kpi-series]', err.message);
+    res.status(err.status || 500).json({ error: err.message || 'Could not load KPI series' });
   }
 });
 
@@ -8489,7 +9165,7 @@ async function _gatherPlatformIntelligence(user, days) {
         const [current, previous, analysis] = await Promise.all([
           _gadsFetchTotals(accessToken, customerId, loginCustomerId, windows.current.since, windows.current.until),
           _gadsFetchTotals(accessToken, customerId, loginCustomerId, windows.previous.since, windows.previous.until),
-          _analyzeGoogleAccount(user, range)
+          getOrRefreshAnalysis(user, 'google', range)
         ]);
         platforms.google = { delta: _computeDelta(current, previous), score: analysis.score, findings: analysis.findings, recommendations: analysis.recommendations, campaigns: analysis.campaigns, creatives: analysis.creatives };
       } catch (err) {
@@ -8505,7 +9181,7 @@ async function _gatherPlatformIntelligence(user, days) {
         const [current, previous, analysis] = await Promise.all([
           _metaFetchTotals(accessToken, accountId, windows.current.since, windows.current.until),
           _metaFetchTotals(accessToken, accountId, windows.previous.since, windows.previous.until),
-          _analyzeMetaAccount(user, range)
+          getOrRefreshAnalysis(user, 'meta', range)
         ]);
         platforms.meta = { delta: _computeDelta(current, previous), score: analysis.score, findings: analysis.findings, recommendations: analysis.recommendations, campaigns: analysis.campaigns, creatives: analysis.creatives };
       } catch (err) {
@@ -8789,14 +9465,78 @@ app.put('/api/business/profile', async (req, res) => {
       country: b.country || null, languages: Array.isArray(b.languages) ? b.languages : null,
       description: b.description || null, mission: b.mission || null, vision: b.vision || null,
       primary_goals: b.primary_goals || null, business_stage: b.business_stage || null,
+      // Business Experience Redesign (Oriven 1.0) — Brand Voice chips.
+      // `brand_voice` is a new column with no migration path available from
+      // this environment; attempted opportunistically and dropped on error
+      // so the rest of the profile still saves on databases that don't have
+      // it yet (needs: ALTER TABLE business_profile ADD COLUMN brand_voice text[];).
+      brand_voice: Array.isArray(b.brand_voice) ? b.brand_voice : null,
       updated_at: new Date().toISOString()
     };
-    const { data, error } = await supabaseAdmin.from('business_profile').upsert(row, { onConflict: 'user_id' }).select().maybeSingle();
+    let { data, error } = await supabaseAdmin.from('business_profile').upsert(row, { onConflict: 'user_id' }).select().maybeSingle();
+    if (error && /brand_voice/.test(error.message || '')) {
+      delete row.brand_voice;
+      ({ data, error } = await supabaseAdmin.from('business_profile').upsert(row, { onConflict: 'user_id' }).select().maybeSingle());
+    }
     if (error) throw error;
     res.json({ profile: data });
   } catch (err) {
     console.error('[business/profile PUT]', err.message);
     res.status(500).json({ error: 'Could not save your business profile.' });
+  }
+});
+
+// â”€â”€ Settings Completion (Oriven 1.0) â”€â”€ user preferences (accent, theme,
+// language, notification toggles, workspace name) as one JSONB blob on
+// `profiles`, mirroring the existing localStorage shape 1:1 (settings.js
+// SETTINGS_DEFAULTS) so the client can merge DB + local cache without a
+// translation layer. `preferences` is a new column with no migration path
+// available from this environment; every query degrades gracefully if it
+// doesn't exist yet (needs: ALTER TABLE profiles ADD COLUMN preferences jsonb;) â”€â”€
+app.get('/api/user/preferences', async (req, res) => {
+  try {
+    const user = await getUserFromToken(req);
+    if (!user) return res.status(401).json({ error: 'Authentication required' });
+    const { data, error } = await supabaseAdmin.from('profiles').select('preferences').eq('id', user.id).maybeSingle();
+    if (error && /preferences/.test(error.message || '')) {
+      return res.json({ preferences: null, columnMissing: true });
+    }
+    if (error) throw error;
+    res.json({ preferences: (data && data.preferences) || null });
+  } catch (err) {
+    console.error('[user/preferences GET]', err.message);
+    res.status(500).json({ error: 'Could not load your preferences.' });
+  }
+});
+
+app.put('/api/user/preferences', async (req, res) => {
+  try {
+    const user = await getUserFromToken(req);
+    if (!user) return res.status(401).json({ error: 'Authentication required' });
+    const patch = req.body || {};
+    // Merge onto whatever's already stored so a partial save (e.g. just
+    // { accent: 'blue' }) never clobbers the rest of the user's preferences.
+    // Supabase's query builder isn't a real Promise (no .catch()), so any
+    // failure here — including the "preferences" column not existing yet —
+    // has to be handled with a real try/catch around the await.
+    let existing = null;
+    try {
+      const { data: existingData, error: existingErr } = await supabaseAdmin.from('profiles').select('preferences').eq('id', user.id).maybeSingle();
+      if (!existingErr) existing = existingData;
+    } catch (_) { /* treat as no existing preferences */ }
+    const merged = Object.assign({}, (existing && existing.preferences) || {}, patch);
+    // upsert (not update) — a user without a profiles row yet (edge case around
+    // signup timing) would otherwise have this silently match zero rows and
+    // report success while persisting nothing. Same pattern as /api/signup.
+    const { data, error } = await supabaseAdmin.from('profiles').upsert({ id: user.id, preferences: merged }, { onConflict: 'id' }).select('preferences').maybeSingle();
+    if (error && /preferences/.test(error.message || '')) {
+      return res.json({ preferences: merged, columnMissing: true });
+    }
+    if (error) throw error;
+    res.json({ preferences: (data && data.preferences) || merged });
+  } catch (err) {
+    console.error('[user/preferences PUT]', err.message);
+    res.status(500).json({ error: 'Could not save your preferences.' });
   }
 });
 
@@ -8970,11 +9710,20 @@ app.post('/api/business/website/refresh', async (req, res) => {
 
     const { data: existing } = await supabaseAdmin.from('business_website_knowledge').select('*').eq('user_id', user.id).maybeSingle();
 
+    let reservation;
+    try {
+      reservation = await creditManager.reserveCredits(user, 'website_analysis');
+    } catch (err) {
+      if (err instanceof creditManager.InsufficientCreditsError) return res.status(402).json({ error: 'Out of credits', code: 'CREDITS_EXHAUSTED', balance: err.balance });
+      console.warn('[business/website/refresh] Credit reservation error:', err.message);
+    }
+
     const page = await _fetchWebsiteText(url);
 
     const system = `You are a business analyst. Analyze this REAL website content (already fetched, not guessed) and return ONLY valid JSON, no markdown, no code fences: { "products": "short summary of products/services offered", "services": "short summary", "ctas": "main calls to action seen on the page", "positioning": "how the brand positions itself", "tone": "the tone/voice of the copy" }`;
     const userMsg = `URL: ${url}\nTitle: ${page.title}\nMeta description: ${page.description}\nNav/link labels: ${page.navLinks.join(', ')}\n\nPage text (excerpt):\n${page.text}`;
     const raw = await _aimlText('website-intel', system, userMsg, { max_tokens: 700 });
+    if (reservation) creditManager.finalizeCreditLog(reservation, 'website_analysis', { provider: 'aiml', success: true, route: req.path }).catch(() => {});
     const cleaned = raw.replace(/^```(?:json)?\s*/i, '').replace(/```\s*$/, '').trim();
     let parsed = {};
     try { parsed = JSON.parse(cleaned); } catch (_) { console.warn('[business/website/refresh] AI response unparseable, storing fetch-only result'); }
@@ -9628,6 +10377,38 @@ cron.schedule('0 2 * * *', async () => {
   }
 }, { timezone: 'UTC' });
 
+// -- Nightly credit-cycle safety net -- invoice.payment_succeeded (the
+// webhook handler above) is the primary reset mechanism; this catches any
+// user whose reset was missed (failed webhook delivery, etc.). Advances
+// credits_cycle_end by the plan's period length added to the OLD
+// credits_cycle_end (not to now()), so a delayed cron run doesn't drift the
+// billing anchor day forward.
+cron.schedule('0 3 * * *', async () => {
+  try {
+    const { data: overdue, error } = await supabaseAdmin.from('profiles')
+      .select('id, subscription_status, credits_cycle_end')
+      .in('subscription_status', ['starter', 'creator', 'professional'])
+      .lt('credits_cycle_end', new Date().toISOString());
+    if (error) { console.error('[CreditReset] Query error:', error.message); return; }
+    if (!overdue || !overdue.length) { console.log('[CreditReset] No overdue credit cycles'); return; }
+    console.log(`[CreditReset] Resetting ${overdue.length} overdue credit cycle(s)`);
+    for (const row of overdue) {
+      const allowance = creditManager.PLAN_ALLOWANCES[row.subscription_status];
+      if (allowance == null) continue;
+      const oldEnd = row.credits_cycle_end ? new Date(row.credits_cycle_end) : new Date();
+      const nextEnd = new Date(oldEnd.getTime() + 30 * 24 * 60 * 60 * 1000);
+      await supabaseAdmin.from('profiles').update({
+        credits_balance: allowance,
+        credits_cycle_start: oldEnd.toISOString(),
+        credits_cycle_end: nextEnd.toISOString(),
+        credits_last_reset_source: 'fallback_cron',
+      }).eq('id', row.id);
+    }
+  } catch (err) {
+    console.error('[CreditReset] Unexpected error:', err.message);
+  }
+}, { timezone: 'UTC' });
+
 // ── V6 Final Phase â€” Continuous Monitoring â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 // Runs _analyzeGoogleAccount / _analyzeMetaAccount for every connected user
 // every 4 hours â€” the SAME analysis functions the on-demand routes use, no
@@ -9861,16 +10642,176 @@ async function _generateRecommendation({ userId, sourceEventId, platform, campai
   }
 }
 
-// Epic 6 â€” Automation Rules. Evaluated inside the same per-campaign pass
-// _campaignPriority already runs over â€” no second monitoring loop. Per the
-// Golden Rule ("never execute destructive actions without approval"),
-// rules never auto-execute here: every trigger creates a `suggested`
-// recommendation the user approves from the Autopilot Center. This is
-// also an architectural necessity, not just a safety choice â€” executing a
-// Tool Router action requires a real user auth token (_authedFetch calls
-// an internal route that verifies a Bearer JWT), which a background cron
-// tick has no way to hold; only a live, authenticated "Approve" click does.
-const AUTOPILOT_RULE_OPERATORS = { '<': (a, b) => a < b, '>': (a, b) => a > b, '==': (a, b) => a === b };
+// â”€â”€ Autopilot Complete Redesign â”€â”€ real rule evaluation + execution â”€â”€
+// Evaluated inside the same per-campaign pass _campaignPriority already
+// runs over â€” no second monitoring loop. Each rule's own action_params.mode
+// (default 'require_approval', the original behavior) decides what
+// happens on trigger:
+//   'suggest_only' / 'require_approval' â†’ creates a `suggested`
+//     recommendation a human approves from the Autopilot Center (the
+//     original, already-tested execution path).
+//   'fully_automatic' â†’ actually executes immediately, no click needed â€”
+//     but only for actions that don't need a live user JWT beyond what
+//     _getGadsAccess/_getMetaAccess/_getTikTokAccess already provide from
+//     a stored refresh token (status/budget changes, and DB-only actions
+//     like notify/report/briefing/recommendations). "Generate creative"
+//     still queues an approvable recommendation even in fully_automatic
+//     mode â€” real unattended generation would need the same kind of
+//     internal-HTTP+JWT chain that status/budget changes needed dedicated
+//     helpers to avoid, and extending that is out of scope here.
+const AUTOPILOT_RULE_OPERATORS = { '<': (a, b) => a < b, '>': (a, b) => a > b, '==': (a, b) => a === b, '>=': (a, b) => a >= b, '<=': (a, b) => a <= b };
+
+function _ruleMetricValue(c, metric) {
+  if (metric === 'cpc') return c.clicks > 0 ? c.spend / c.clicks : 0;
+  if (metric === 'status') {
+    const s = String(c.status || '').toUpperCase();
+    return (s.indexOf('PAUS') !== -1 || s === 'DISABLE') ? 'paused' : 'active';
+  }
+  if (metric === 'budget') return c.daily_budget != null ? c.daily_budget : (c.budget != null ? c.budget : null);
+  return c[metric] != null ? c[metric] : 0;
+}
+
+// Intentionally separate from the PATCH/pause/resume HTTP routes above
+// (already live and tested against real ad accounts) rather than
+// refactored to share code with them â€” a bug in a shared helper would put
+// BOTH the human-driven routes and this unattended executor at risk
+// together; these are small enough (one mutation call each) that a little
+// duplication is the safer trade for code that moves real ad spend.
+async function _execSetCampaignStatus(user, platform, campaignId, pause) {
+  if (platform === 'google') {
+    const { accessToken, customerId, loginCustomerId } = await _getGadsAccess(user);
+    await _gadsMutate(accessToken, customerId, 'campaigns', [{
+      updateMask: 'status',
+      update: { resourceName: 'customers/' + customerId + '/campaigns/' + campaignId, status: pause ? 'PAUSED' : 'ENABLED' }
+    }], loginCustomerId);
+    return pause ? 'PAUSED' : 'ENABLED';
+  }
+  if (platform === 'meta') {
+    const { accessToken } = await _getMetaAccess(user);
+    await _metaApiPost('/' + campaignId, accessToken, { status: pause ? 'PAUSED' : 'ACTIVE' });
+    return pause ? 'PAUSED' : 'ACTIVE';
+  }
+  if (platform === 'tiktok') {
+    const { accessToken, advertiserId } = await _getTikTokAccess(user);
+    await _tiktokPost('/campaign/status/update/', accessToken, { advertiser_id: advertiserId, campaign_ids: [campaignId], operation_status: pause ? 'DISABLE' : 'ENABLE' });
+    return pause ? 'DISABLE' : 'ENABLE';
+  }
+  throw new Error('Unsupported platform: ' + platform);
+}
+
+async function _execFetchGoogleBudget(customerId, loginCustomerId, accessToken, campaignId) {
+  const bQ = 'SELECT campaign_budget.resource_name, campaign_budget.amount_micros FROM campaign WHERE campaign.id = ' + campaignId + ' LIMIT 1';
+  const bR = await _gadsQuery(accessToken, customerId, bQ, loginCustomerId);
+  if (!bR.length) throw new Error('Campaign not found');
+  const cb = bR[0].campaignBudget || {};
+  if (!cb.resourceName) throw new Error('Campaign has no detached budget');
+  return { resourceName: cb.resourceName, amount: Number(cb.amountMicros || 0) / 1e6 };
+}
+
+async function _execSetCampaignBudget(user, platform, campaignId, newDailyBudget) {
+  if (platform === 'google') {
+    const { accessToken, customerId, loginCustomerId } = await _getGadsAccess(user);
+    const { resourceName } = await _execFetchGoogleBudget(customerId, loginCustomerId, accessToken, campaignId);
+    await _gadsMutate(accessToken, customerId, 'campaignBudgets', [{
+      updateMask: 'amountMicros',
+      update: { resourceName, amountMicros: String(Math.round(Number(newDailyBudget) * 1e6)) }
+    }], loginCustomerId);
+    return;
+  }
+  if (platform === 'meta') {
+    const { accessToken } = await _getMetaAccess(user);
+    await _metaApiPost('/' + campaignId, accessToken, { daily_budget: String(Math.round(Number(newDailyBudget) * 100)) }); // Meta daily_budget is in cents
+    return;
+  }
+  throw new Error('Budget changes are not supported on ' + platform + ' yet.');
+}
+
+async function _execRuleAction(user, platform, rule, campaign, mode) {
+  const ap = rule.action_params || {};
+  const problem = `Automation rule "${rule.name}" triggered: ${rule.trigger_metric} ${rule.trigger_operator} ${rule.trigger_value} for "${campaign.name}".`;
+  const confidence = _calcConfidence({ clicks: campaign.clicks, conversions: campaign.conversions, days: 7 });
+  const evidence = { metric: rule.trigger_metric, operator: rule.trigger_operator, value: rule.trigger_value, actual: _ruleMetricValue(campaign, rule.trigger_metric) };
+
+  // "Notify me" is always a plain event-log write, in every mode â€” there's
+  // no live mutation to gate, so there's nothing "unattended-unsafe" about it.
+  if (rule.action_type === 'notify') {
+    await supabaseAdmin.from('intelligence_events').insert({
+      user_id: user.id, platform, campaign_name: campaign.name, type: 'campaign_action',
+      title: `Automation "${rule.name}" fired for "${campaign.name}"`, detail: problem, severity: 'medium', confidence, message: problem
+    });
+    return;
+  }
+
+  if (rule.action_type === 'request_approval' || mode !== 'fully_automatic') {
+    // suggest_only / require_approval (the safe default), and
+    // request_approval regardless of mode â€” the original, already-tested
+    // path: create a recommendation, a human approves it from the
+    // Autopilot Center, POST /api/autopilot/recommendations/:id/approve
+    // does the real execution from there.
+    const toolMap = {
+      pause_campaign:  { name: 'pause_campaign',  params: { campaignName: campaign.name, platform } },
+      resume_campaign: { name: 'resume_campaign', params: { campaignName: campaign.name, platform } },
+      generate_creative: { name: 'generate_headlines', params: { seed: campaign.name, count: 5 } }
+    };
+    const mapped = toolMap[rule.action_type] || { name: null, params: null }; // increase/decrease_budget, generate_recommendations, create_report, create_briefing, run_optimisation: recommendation-only today
+    await _generateRecommendation({
+      userId: user.id, platform, campaignName: campaign.name, type: rule.action_type, problem, confidence, evidence,
+      riskLevel: mapped.name ? 'low' : 'medium', toolName: mapped.name, toolParams: mapped.params
+    });
+    return;
+  }
+
+  // mode === 'fully_automatic' from here â€” genuinely executes, no click.
+  try {
+    if (rule.action_type === 'pause_campaign') {
+      await _execSetCampaignStatus(user, platform, campaign.id, true);
+    } else if (rule.action_type === 'resume_campaign') {
+      await _execSetCampaignStatus(user, platform, campaign.id, false);
+    } else if (rule.action_type === 'increase_budget' || rule.action_type === 'decrease_budget') {
+      const percent = (typeof ap.percent === 'number' && ap.percent > 0) ? ap.percent : 15;
+      let current = campaign.daily_budget;
+      if (current == null && platform === 'google') {
+        const { accessToken, customerId, loginCustomerId } = await _getGadsAccess(user);
+        current = (await _execFetchGoogleBudget(customerId, loginCustomerId, accessToken, campaign.id)).amount;
+      }
+      if (current == null) throw new Error('Could not determine current budget');
+      const next = rule.action_type === 'increase_budget' ? current * (1 + percent / 100) : current * (1 - percent / 100);
+      await _execSetCampaignBudget(user, platform, campaign.id, Math.max(1, next));
+    } else if (rule.action_type === 'generate_recommendations' || rule.action_type === 'run_optimisation') {
+      await _generateRecommendation({
+        userId: user.id, platform, campaignName: campaign.name, type: rule.action_type, problem, confidence, evidence,
+        riskLevel: 'low', toolName: null, toolParams: null
+      });
+      return; // _generateRecommendation already logs its own row; skip the extra "executed" event below
+    } else if (rule.action_type === 'create_report' || rule.action_type === 'create_briefing') {
+      await supabaseAdmin.from('intelligence_events').insert({
+        user_id: user.id, platform, campaign_name: campaign.name, type: 'daily_brief',
+        title: `${rule.action_type === 'create_briefing' ? 'Briefing' : 'Report'} created by automation "${rule.name}"`,
+        detail: problem, severity: 'low', confidence, message: problem
+      });
+      return;
+    } else if (rule.action_type === 'generate_creative') {
+      await _generateRecommendation({
+        userId: user.id, platform, campaignName: campaign.name, type: rule.action_type, problem, confidence, evidence,
+        riskLevel: 'low', toolName: 'generate_headlines', toolParams: { seed: campaign.name, count: 5 }
+      });
+      return;
+    }
+    await supabaseAdmin.from('intelligence_events').insert({
+      user_id: user.id, platform, campaign_name: campaign.name, type: 'campaign_action',
+      title: `Automation "${rule.name}" executed automatically`,
+      detail: problem, severity: 'low', confidence, message: `${rule.action_type.replace(/_/g, ' ')} on "${campaign.name}"`
+    });
+  } catch (err) {
+    console.warn(`[Autopilot] fully_automatic execution failed for rule ${rule.id}:`, err.message);
+    await supabaseAdmin.from('intelligence_events').insert({
+      user_id: user.id, platform, campaign_name: campaign.name, type: 'campaign_action',
+      title: `Automation "${rule.name}" failed to execute`,
+      detail: err.message, severity: 'high', message: `Automatic execution failed: ${err.message}`
+    });
+  }
+}
+
 async function _evaluateAutomationRules(user, platform, campaigns) {
   try {
     const { data: rules } = await supabaseAdmin.from('automation_rules').select('*').eq('user_id', user.id).eq('enabled', true);
@@ -9879,31 +10820,29 @@ async function _evaluateAutomationRules(user, platform, campaigns) {
 
     for (const rule of rules) {
       if (rule.platform && rule.platform !== platform) continue;
-      if (rule.trigger_metric !== 'ctr' && rule.trigger_metric !== 'cpa' && rule.trigger_metric !== 'roas') continue;
+      if (!AUTOPILOT_RULE_METRICS.includes(rule.trigger_metric)) continue;
       if (rule.last_triggered_at && rule.last_triggered_at.slice(0, 10) === today) continue; // at most once/day per rule
       const op = AUTOPILOT_RULE_OPERATORS[rule.trigger_operator];
       if (!op) continue;
 
-      const match = (campaigns || []).find(c => op(c[rule.trigger_metric] || 0, Number(rule.trigger_value)));
-      if (!match) continue;
+      const ap = rule.action_params || {};
+      const scopedCampaignId = ap.campaign_id && ap.campaign_id !== 'all' ? ap.campaign_id : null;
+      const pool = scopedCampaignId ? (campaigns || []).filter(c => String(c.id) === String(scopedCampaignId)) : (campaigns || []);
 
-      const toolMap = {
-        generate_headlines: { name: 'generate_headlines', params: { seed: match.name, count: 5 } },
-        generate_images: { name: 'generate_landing_page', params: { prompt: match.name } }, // closest existing generator for a rule-triggered "new image set" request
-        recommend_budget_decrease: { name: null, params: null }, // recommendation-only, no direct tool
-        suggest_scaling: { name: null, params: null },
-        refresh_business_brain: { name: null, params: null }
-      };
-      const mapped = toolMap[rule.action_type] || { name: null, params: null };
-
-      await _generateRecommendation({
-        userId: user.id, platform, campaignName: match.name, type: rule.action_type,
-        problem: `Automation rule "${rule.name}" triggered: ${rule.trigger_metric} ${rule.trigger_operator} ${rule.trigger_value} for "${match.name}".`,
-        confidence: _calcConfidence({ clicks: match.clicks, conversions: match.conversions, days: 7 }),
-        evidence: { metric: rule.trigger_metric, operator: rule.trigger_operator, value: rule.trigger_value, actual: match[rule.trigger_metric] },
-        riskLevel: mapped.name ? 'low' : 'medium',
-        toolName: mapped.name, toolParams: mapped.params
+      const compareVal = rule.trigger_metric === 'status' ? rule.trigger_value : Number(rule.trigger_value);
+      const matches = pool.filter(c => {
+        const actual = _ruleMetricValue(c, rule.trigger_metric);
+        return actual != null && op(actual, compareVal);
       });
+      if (!matches.length) continue;
+
+      // At most once/day/rule, so only the first qualifying campaign is
+      // acted on per tick even if several matched â€” prevents one noisy
+      // metric from firing a dozen actions in a single pass.
+      const match = matches[0];
+      const mode = AUTOPILOT_RULE_MODES.includes(ap.mode) ? ap.mode : 'require_approval';
+
+      await _execRuleAction(user, platform, rule, match, mode);
       await supabaseAdmin.from('automation_rules').update({ last_triggered_at: new Date().toISOString() }).eq('id', rule.id);
     }
   } catch (err) {
@@ -9911,11 +10850,75 @@ async function _evaluateAutomationRules(user, platform, campaigns) {
   }
 }
 
-async function _monitorPlatform(user, platform) {
+// -- Shared analysis cache -- collapses the cron's _monitorPlatform, the
+// on-demand /api/intelligence/home + /briefing + /opportunities (all via
+// _gatherPlatformIntelligence), and the explicit "Analyze with AI" buttons
+// onto ONE cached result per (user, platform, range), instead of each path
+// independently re-running the expensive _analyzeGoogleAccount/
+// _analyzeMetaAccount AI call. Freshness = a fingerprint of the REAL
+// campaign totals for that window (cheap totals query) plus a 4h TTL that
+// mirrors the cron's own refresh cadence (a rolling "LAST_7_DAYS" window
+// can shift a day even with identical totals, so the TTL catches that).
+const _ANALYSIS_RANGE_DAYS = { LAST_7_DAYS: 7, LAST_30_DAYS: 30, LAST_90_DAYS: 90, LAST_12_MONTHS: 365 };
+const _ANALYSIS_CACHE_TTL_MS = 4 * 60 * 60 * 1000;
+
+async function getOrRefreshAnalysis(user, platform, range, opts) {
+  opts = opts || {};
+  const forceRefresh = !!opts.forceRefresh;
+  const rangeKey = range || 'LAST_7_DAYS';
+  const days = _ANALYSIS_RANGE_DAYS[rangeKey] || 7;
+  const until = new Date();
+  const since = new Date(until.getTime() - days * 24 * 60 * 60 * 1000);
+  const sinceISO = since.toISOString().slice(0, 10);
+  const untilISO = until.toISOString().slice(0, 10);
+
+  let fingerprint = null;
   try {
-    const analysis = platform === 'google'
-      ? await _analyzeGoogleAccount(user, 'LAST_7_DAYS')
-      : await _analyzeMetaAccount(user, 'LAST_7_DAYS');
+    let totals;
+    if (platform === 'google') {
+      const { accessToken, customerId, loginCustomerId } = await _getGadsAccess(user);
+      totals = await _gadsFetchTotals(accessToken, customerId, loginCustomerId, sinceISO, untilISO);
+    } else {
+      const { accessToken, accountId } = await _getMetaAccess(user);
+      totals = await _metaFetchTotals(accessToken, accountId, sinceISO, untilISO);
+    }
+    fingerprint = crypto.createHash('sha256').update(JSON.stringify(totals)).digest('hex');
+  } catch (err) {
+    console.warn(`[analysisCache] Could not fetch totals for fingerprint (${platform}, ${user.id}):`, err.message);
+  }
+
+  if (!forceRefresh && fingerprint) {
+    try {
+      const { data: cached } = await supabaseAdmin.from('platform_analysis_cache')
+        .select('*').eq('user_id', user.id).eq('platform', platform).eq('date_range', rangeKey).maybeSingle();
+      const cacheAgeOk = cached && (Date.now() - new Date(cached.created_at).getTime() < _ANALYSIS_CACHE_TTL_MS);
+      if (cached && cached.input_fingerprint === fingerprint && cacheAgeOk) {
+        return cached.analysis;
+      }
+    } catch (err) {
+      console.warn(`[analysisCache] Cache read failed (${platform}, ${user.id}):`, err.message);
+    }
+  }
+
+  const analysis = platform === 'google'
+    ? await _analyzeGoogleAccount(user, rangeKey)
+    : await _analyzeMetaAccount(user, rangeKey);
+
+  if (fingerprint) {
+    supabaseAdmin.from('platform_analysis_cache').upsert({
+      user_id: user.id, platform, date_range: rangeKey, input_fingerprint: fingerprint,
+      analysis, created_at: new Date().toISOString(),
+    }, { onConflict: 'user_id,platform,date_range' }).then((r) => {
+      if (r && r.error) console.warn(`[analysisCache] Cache write failed (${platform}, ${user.id}):`, r.error.message);
+    });
+  }
+  return analysis;
+}
+
+async function _monitorPlatform(user, platform, opts) {
+  opts = opts || {};
+  try {
+    const analysis = await getOrRefreshAnalysis(user, platform, 'LAST_7_DAYS');
 
     const since = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
     const { data: recent } = await supabaseAdmin.from('intelligence_events')
@@ -9971,34 +10974,42 @@ async function _monitorPlatform(user, platform) {
       console.log(`[Monitoring] ${platform} | user ${user.id} | logged ${rows.length} event(s)`);
     }
 
-    // V9 (Epic 2/3) â€” "budget waste" and "audience saturation" reuse the
-    // exact same _campaignPriority classifications _monitorPlatform already
-    // computes (critical = spend with zero conversions; needs_attention =
-    // CTR well below account average on real impression volume), now also
-    // surfaced as structured, approvable recommendations rather than only
-    // a passive finding.
-    const wasteCampaign = (analysis.campaigns || []).find(c => c.priority && c.priority.level === 'critical');
-    if (wasteCampaign) {
-      await _generateRecommendation({
-        userId: user.id, platform, campaignName: wasteCampaign.name, type: 'budget_waste',
-        problem: `"${wasteCampaign.name}" has spent without producing conversions.`,
-        confidence: _calcConfidence({ clicks: wasteCampaign.clicks, conversions: wasteCampaign.conversions, days: 7 }),
-        evidence: { spend: wasteCampaign.spend, conversions: wasteCampaign.conversions, clicks: wasteCampaign.clicks, days: 7 },
-        riskLevel: 'medium', toolName: 'change_budget', toolParams: { campaignName: wasteCampaign.name, platform, action: 'decrease' }
-      });
+    // Autopilot-specific: recommendation generation + rule evaluation only
+    // run for Creator/Professional users who have >=1 enabled automation
+    // rule -- with no rules, Autopilot does nothing (per the credit-economy
+    // sprint's background-cost rules). Intelligence findings above (events,
+    // score, winning-campaign surfacing) stay unconditional for everyone --
+    // Intelligence itself is a Starter-tier-included feature, this gate is
+    // scoped to Autopilot's own extra AI calls only.
+    if (opts.autopilotEligible) {
+      // V9 (Epic 2/3) â€” "budget waste" and "audience saturation" reuse the
+      // exact same _campaignPriority classifications _monitorPlatform already
+      // computes (critical = spend with zero conversions; needs_attention =
+      // CTR well below account average on real impression volume), now also
+      // surfaced as structured, approvable recommendations rather than only
+      // a passive finding.
+      const wasteCampaign = (analysis.campaigns || []).find(c => c.priority && c.priority.level === 'critical');
+      if (wasteCampaign) {
+        await _generateRecommendation({
+          userId: user.id, platform, campaignName: wasteCampaign.name, type: 'budget_waste',
+          problem: `"${wasteCampaign.name}" has spent without producing conversions.`,
+          confidence: _calcConfidence({ clicks: wasteCampaign.clicks, conversions: wasteCampaign.conversions, days: 7 }),
+          evidence: { spend: wasteCampaign.spend, conversions: wasteCampaign.conversions, clicks: wasteCampaign.clicks, days: 7 },
+          riskLevel: 'medium', toolName: 'change_budget', toolParams: { campaignName: wasteCampaign.name, platform, action: 'decrease' }
+        });
+      }
+      const saturatedCampaign = (analysis.campaigns || []).find(c => c.priority && c.priority.level === 'needs_attention');
+      if (saturatedCampaign) {
+        await _generateRecommendation({
+          userId: user.id, platform, campaignName: saturatedCampaign.name, type: 'audience_saturation',
+          problem: `"${saturatedCampaign.name}"'s CTR is well below the account average despite real impression volume â€” a sign the audience may be seeing the same creative too often.`,
+          confidence: _calcConfidence({ clicks: saturatedCampaign.clicks, conversions: saturatedCampaign.conversions, days: 7 }),
+          evidence: { ctr: saturatedCampaign.ctr, impressions: saturatedCampaign.impressions, days: 7 },
+          riskLevel: 'low', toolName: 'generate_headlines', toolParams: { seed: saturatedCampaign.name, count: 5 }
+        });
+      }
+      await _evaluateAutomationRules(user, platform, analysis.campaigns);
     }
-    const saturatedCampaign = (analysis.campaigns || []).find(c => c.priority && c.priority.level === 'needs_attention');
-    if (saturatedCampaign) {
-      await _generateRecommendation({
-        userId: user.id, platform, campaignName: saturatedCampaign.name, type: 'audience_saturation',
-        problem: `"${saturatedCampaign.name}"'s CTR is well below the account average despite real impression volume â€” a sign the audience may be seeing the same creative too often.`,
-        confidence: _calcConfidence({ clicks: saturatedCampaign.clicks, conversions: saturatedCampaign.conversions, days: 7 }),
-        evidence: { ctr: saturatedCampaign.ctr, impressions: saturatedCampaign.impressions, days: 7 },
-        riskLevel: 'low', toolName: 'generate_headlines', toolParams: { seed: saturatedCampaign.name, count: 5 }
-      });
-    }
-
-    await _evaluateAutomationRules(user, platform, analysis.campaigns);
     await _runLearningEngine(user, platform, analysis);
     return analysis;
   } catch (err) {
@@ -10062,11 +11073,32 @@ async function _runIntelligenceMonitoring() {
   for (const userId of userIds) {
     const user = { id: userId };
     const providers = byUser[userId];
+
+    // Autopilot only runs its own extra AI calls (recommendations, rule
+    // eval, task generation) for Creator/Professional users who have >=1
+    // enabled automation rule -- with no rules, Autopilot does nothing.
+    // Starter users, and paid users with zero rules, still get full
+    // Intelligence findings from _monitorPlatform below -- only the
+    // Autopilot-specific sub-steps are skipped.
+    let autopilotEligible = false;
+    try {
+      const { data: profile } = await supabaseAdmin.from('profiles')
+        .select('subscription_status').eq('id', userId).maybeSingle();
+      const plan = profile && profile.subscription_status;
+      if (plan === 'creator' || plan === 'professional') {
+        const { count } = await supabaseAdmin.from('automation_rules')
+          .select('id', { count: 'exact', head: true }).eq('user_id', userId).eq('enabled', true);
+        autopilotEligible = (count || 0) > 0;
+      }
+    } catch (err) {
+      console.warn(`[Monitoring] Autopilot eligibility check failed for ${userId}:`, err.message);
+    }
+
     const analyses = {};
-    if (providers.has('google_ads')) analyses.google = await _monitorPlatform(user, 'google');
-    if (providers.has('meta_ads'))   analyses.meta   = await _monitorPlatform(user, 'meta');
+    if (providers.has('google_ads')) analyses.google = await _monitorPlatform(user, 'google', { autopilotEligible });
+    if (providers.has('meta_ads'))   analyses.meta   = await _monitorPlatform(user, 'meta', { autopilotEligible });
     if (analyses.google && analyses.meta) await _runCrossPlatformLearning(user, analyses);
-    await _generateAutopilotTasks(user);
+    if (autopilotEligible) await _generateAutopilotTasks(user);
   }
   await _archiveStaleLearnings();
   console.log('[Monitoring] Run complete');
@@ -10078,41 +11110,69 @@ cron.schedule('0 */4 * * *', () => {
   _runIntelligenceMonitoring().catch(err => console.error('[Monitoring] Fatal:', err.message));
 }, { timezone: 'UTC' });
 
-// V9 (Epic 10) â€” Daily Operations. Reuses /api/business/reflection's exact
-// mechanism (see the daily_morning/daily_midday/daily_evening periods added
-// to that route) for every connected user, logging the result into
-// intelligence_events (type 'daily_brief') so it surfaces in notifications
-// and history instead of needing new storage.
-async function _runDailyBrief(period) {
+// -- Daily briefing -- ONE briefing per user's own local calendar day, not
+// three fixed-UTC-time briefings (the old daily_morning/midday/evening
+// cadence was wrong for every non-UTC user anyway). First visit of the
+// user's local day generates and caches it; every later visit that day
+// reuses the cache; the next local day regenerates. Also called on-demand
+// from /api/intelligence/home (see below) so a visit always gets today's
+// briefing without waiting on the pre-warm cron.
+function _localDateInTZ(tz) {
+  try {
+    return new Intl.DateTimeFormat('en-CA', { timeZone: tz, year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date());
+  } catch (err) {
+    return new Date().toISOString().slice(0, 10); // invalid/unknown tz -> UTC fallback
+  }
+}
+
+async function getOrGenerateDailyBriefing(user, browserTimezone) {
+  const tz = user.timezone || browserTimezone || 'UTC';
+  const localDate = _localDateInTZ(tz);
+
+  const { data: cached } = await supabaseAdmin.from('daily_briefing_cache')
+    .select('content').eq('user_id', user.id).eq('local_date', localDate).maybeSingle();
+  if (cached) return cached.content;
+
+  const learnings = await _fetchActiveLearnings(user.id, { limit: 30 });
+  if (!learnings.length) return null;
+  const learningLines = learnings.slice(0, 10).map(l => `${l.entity_type} "${l.entity_name}": ${l.pattern} (${l.confidence}%)`).join('\n');
+  const system = `You are a marketing strategist writing a one-paragraph daily brief. Ground every statement in the real data given; never invent numbers.`;
+  const raw = await _aimlText('autopilot-brief', system, `LEARNINGS:\n${learningLines}`, { max_tokens: 250 });
+  const content = { text: raw.trim().slice(0, 500), generatedAt: new Date().toISOString() };
+
+  await supabaseAdmin.from('daily_briefing_cache').upsert({
+    user_id: user.id, local_date: localDate, timezone_used: tz, content,
+  }, { onConflict: 'user_id,local_date' });
+
+  await supabaseAdmin.from('intelligence_events').insert({
+    user_id: user.id, type: 'daily_brief', title: 'Daily brief ready',
+    detail: content.text, severity: 'low', message: content.text.slice(0, 200)
+  });
+
+  return content;
+}
+
+// Pre-warms the cache for users whose local midnight has just passed, so
+// the first visitor of their day isn't waiting on a live AI call --
+// naturally no-ops (via the cache check above) for anyone already
+// generated for their current local date. Frequent (30min) but cheap: a
+// DB-only pass except for the handful of users actually crossing midnight.
+cron.schedule('*/30 * * * *', async () => {
   try {
     const { data: rows } = await supabaseAdmin.from('integrations').select('user_id').in('provider', ['google_ads', 'meta_ads']);
     const userIds = [...new Set((rows || []).map(r => r.user_id))];
     for (const userId of userIds) {
       try {
-        const days = 1;
-        const [learnings, platformIntel] = await Promise.all([
-          _fetchActiveLearnings(userId, { limit: 30 }),
-          _gatherPlatformIntelligence({ id: userId }, days)
-        ]);
-        if (!learnings.length) continue;
-        const learningLines = learnings.slice(0, 10).map(l => `${l.entity_type} "${l.entity_name}": ${l.pattern} (${l.confidence}%)`).join('\n');
-        const system = `You are a marketing strategist writing a one-paragraph ${period.replace('daily_', '')} brief. Ground every statement in the real data given; never invent numbers.`;
-        const raw = await _aimlText('autopilot-brief', system, `LEARNINGS:\n${learningLines}`, { max_tokens: 250 });
-        await supabaseAdmin.from('intelligence_events').insert({
-          user_id: userId, type: 'daily_brief', title: `${period.replace('daily_', '').replace(/^\w/, c => c.toUpperCase())} brief ready`,
-          detail: raw.trim().slice(0, 500), severity: 'low', message: raw.trim().slice(0, 200)
-        });
+        const { data: profile } = await supabaseAdmin.from('profiles').select('timezone').eq('id', userId).maybeSingle();
+        await getOrGenerateDailyBriefing({ id: userId, timezone: profile && profile.timezone });
       } catch (err) {
-        console.warn(`[Autopilot] daily brief failed for user ${userId}:`, err.message);
+        console.warn(`[DailyBrief] pre-warm failed for ${userId}:`, err.message);
       }
     }
   } catch (err) {
-    console.error('[Autopilot] _runDailyBrief fatal:', err.message);
+    console.error('[DailyBrief] pre-warm cron fatal:', err.message);
   }
-}
-cron.schedule('0 8 * * *',  () => _runDailyBrief('daily_morning').catch(err => console.error('[Autopilot] morning brief fatal:', err.message)), { timezone: 'UTC' });
-cron.schedule('0 13 * * *', () => _runDailyBrief('daily_midday').catch(err => console.error('[Autopilot] midday brief fatal:', err.message)), { timezone: 'UTC' });
-cron.schedule('0 18 * * *', () => _runDailyBrief('daily_evening').catch(err => console.error('[Autopilot] evening brief fatal:', err.message)), { timezone: 'UTC' });
+}, { timezone: 'UTC' });
 
 app.listen(PORT, async () => {
   console.log(`Server running on http://localhost:${PORT}`);
