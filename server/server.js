@@ -25,6 +25,7 @@ const toolRouter = require('./services/toolRouter');
 require('./tools/campaignTools'); // registers Tool Router entries as a side effect
 require('./tools/businessTools'); // V7 Phase 1 — registers remember_business_fact
 const creditManager = require('./services/creditManager'); // no client of its own -- initialized below, right after supabaseAdmin exists
+const campaignGoals = require('./services/campaignGoals'); // single source of truth for the 4 campaign goals across every platform
 
 console.log(
   "[Config] Stripe key suffix:",
@@ -4515,6 +4516,8 @@ function _buildCampaignBrandSection(bc) {
 // in parallel, without duplicating this prompt-building logic. Same
 // schemas, same rules, same behavior as the original inline version.
 async function _generateAdPackage({ user, product, goal, platform, brandCore, productImages }) {
+  goal = campaignGoals.normalizeGoal(goal);
+  const goalSection = `\n\n${campaignGoals.GOAL_CREATIVE_DIRECTION[goal]}`;
   const brandSection = _buildCampaignBrandSection(brandCore);
   const _bizCtx = user ? await _gatherBusinessContext(user.id).catch(() => null) : null;
   const businessSection = _bizCtx ? `\n\nBUSINESS KNOWLEDGE (real, stored data about this business — use it instead of generic copy; if competitor info is present, use it only for positioning, never copy competitor content):\n${_bizCtx.text}` : '';
@@ -4604,11 +4607,11 @@ Platform rules:
 ${platformRules}
 - All copy must be specific to the actual product — no generic placeholders
 - Performance scores are integers 0-100
-- conversionPotential: "High", "Medium", or "Low"${brandSection}${businessSection}${productImageNote}`;
+- conversionPotential: "High", "Medium", or "Low"${goalSection}${brandSection}${businessSection}${productImageNote}`;
 
   const userMsg = brandCore && brandCore.name
-    ? `Brand: ${brandCore.name}\nProduct/Service: ${product}\nGoal: ${goal || 'Sales'}\nPlatform: ${platform}`
-    : `Product/Service: ${product}\nGoal: ${goal || 'Sales'}\nPlatform: ${platform}`;
+    ? `Brand: ${brandCore.name}\nProduct/Service: ${product}\nGoal: ${goal}\nPlatform: ${platform}`
+    : `Product/Service: ${product}\nGoal: ${goal}\nPlatform: ${platform}`;
 
   const raw = await _aimlText('ads-copy', system, userMsg, { max_tokens: 8000 });
   const cleaned = raw.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/i, '').trim();
@@ -4619,6 +4622,14 @@ ${platformRules}
     throw new Error(`JSON parse failed: ${parseErr.message} | raw length: ${raw.length} | tail: ${raw.slice(-120)}`);
   }
   pkg.platform = platform; // ensure frontend renderer knows which platform
+  // Force the real, user-selected goal onto the package — the AI is only
+  // ever shown it as an example value inside the JSON schema, so relying
+  // on the model to faithfully echo it back would make the publish
+  // pipeline's objective/pixel logic dependent on AI output instead of
+  // the actual user choice. Every campaign must permanently know its own
+  // goal (per spec) — this line is what makes that a guarantee, not a hope.
+  if (!pkg.strategy) pkg.strategy = {};
+  pkg.strategy.goal = goal;
   _recordCreativeAsset(user && user.id, { kind: 'ad', platform, product_name: String(product).slice(0, 80), title: pkg.campaignName || product, content: pkg, source_route: '/api/ai/create-ad' });
   return pkg;
 }
@@ -4775,8 +4786,15 @@ app.post('/api/ai/chat', requireSubIfAuthed, async (req, res) => {
   // (not-yet-published) campaign package genuinely has no platform-assigned
   // id yet but still deserves to be "the current campaign" in context.
   const currentCampaign = ctx.currentCampaign && ctx.currentCampaign.campaignName ? ctx.currentCampaign : null;
+  // Goal-aware framing (campaignGoals.GOAL_KPIS): only available when the
+  // frontend actually knows the campaign's goal today (freshly generated/
+  // reviewed packages, via _renderAiReview) -- live ads-manager campaigns
+  // opened from admOpenCampPanel don't carry Oriven's stored goal yet, so
+  // this only fires when a real goal is present, never a guessed one.
+  const campaignGoalForChat = currentCampaign && campaignGoals.GOALS.includes(currentCampaign.goal) ? currentCampaign.goal : null;
   const campaignSection = currentCampaign
     ? `\n\nThe user currently has the campaign "${currentCampaign.campaignName}" (${currentCampaign.platform}) open. If they say "this campaign" or "it" without naming one, assume they mean this campaign.`
+      + (campaignGoalForChat ? ` This campaign's goal is ${campaignGoalForChat} — when discussing its performance, prioritize these KPIs: ${campaignGoals.GOAL_KPIS[campaignGoalForChat].join(', ')}. Don't treat unrelated metrics as equally important.` : '')
     : '';
 
   // Oriven 1.0 (Epic 2/3) â€” Global Context Engine: the score/grade/strengths
@@ -4926,6 +4944,9 @@ app.post('/api/publish/google', requireSubscription, async (req, res) => {
     const g = pkg.googleAds || {};
     const s = pkg.strategy  || {};
     const campaignName = pkg.campaignName || s.goal || 'Oriven Campaign';
+    const goal = campaignGoals.normalizeGoal(s.goal);
+    const googleGoalConfig = campaignGoals.GOOGLE_GOAL_CONFIG[goal];
+    console.log('[publish/google] goal:', goal, '| bidding:', googleGoalConfig.biddingField);
 
     async function _gadsMutate(resource, operations) {
       const url = 'https://googleads.googleapis.com/v24/customers/' + customerId + '/' + resource + ':mutate';
@@ -4952,13 +4973,20 @@ app.post('/api/publish/google', requireSubscription, async (req, res) => {
     const budgetResourceName = budgetRes.results[0].resourceName;
 
     // 2. Campaign (PAUSED - user activates after review)
+    // Bidding strategy is goal-aware (campaignGoals.GOOGLE_GOAL_CONFIG) --
+    // Sales/Leads maximize conversions, Traffic maximizes clicks (the prior
+    // unconditional default), Awareness targets impression share. Channel
+    // type stays SEARCH for all four goals: this pipeline only ever builds
+    // search ad groups/keywords/RSAs, so Awareness is differentiated by
+    // bidding + broader goal-aware keywords/copy rather than a Display
+    // channel switch this pipeline has no creative path for.
     const campaignRes = await _gadsMutate('campaigns', [{
       create: {
         name: campaignName,
         advertisingChannelType: 'SEARCH',
         status: 'PAUSED',
         campaignBudget: budgetResourceName,
-        targetSpend: {},
+        [googleGoalConfig.biddingField]: googleGoalConfig.biddingValue,
       }
     }]);
     const campaignResourceName = campaignRes.results[0].resourceName;
@@ -5062,8 +5090,14 @@ app.post('/api/publish/meta', requireSubscription, async (req, res) => {
       return d;
     }
 
-    const objectiveMap = { Sales: 'OUTCOME_SALES', Leads: 'OUTCOME_LEADS', Traffic: 'OUTCOME_TRAFFIC', Awareness: 'OUTCOME_AWARENESS' };
-    const objective = objectiveMap[s.goal] || 'OUTCOME_TRAFFIC';
+    // Goal-aware ad-set config, from the single shared source of truth
+    // (campaignGoals.META_GOAL_CONFIG) also used by AI generation and the
+    // other two platforms' publish routes -- see that module for why
+    // Sales/Leads need a pixel and Traffic/Awareness never do.
+    const goal = campaignGoals.normalizeGoal(s.goal);
+    const adSetConfig = campaignGoals.META_GOAL_CONFIG[goal];
+    const objective = adSetConfig.objective;
+    console.log('[publish/meta] goal:', goal, '| objective:', objective, '| optimization_goal:', adSetConfig.optimization_goal, '| needsPixel:', adSetConfig.needsPixel);
 
     // accountId from _getMetaAccess is already normalised to exactly one 'act_' prefix.
     console.log('[publish/meta] account:', accountId);
@@ -5075,27 +5109,34 @@ app.post('/api/publish/meta', requireSubscription, async (req, res) => {
       is_adset_budget_sharing_enabled: false,
     });
 
-    // 2. Ad set — fetch pixel attached to the account (required for OFFSITE_CONVERSIONS)
-    const pixelData = await _metaFetch('/' + accountId + '/adspixels', accessToken, { fields: 'id,name', limit: '10' });
-    console.log('[publish/meta] pixel lookup accountId:', accountId);
-    console.log('[publish/meta] pixel lookup raw response:', JSON.stringify(pixelData, null, 2));
-    console.log('[publish/meta] pixel lookup data array:', JSON.stringify(pixelData.data));
-    const pixelId = (pixelData.data && pixelData.data[0]) ? pixelData.data[0].id : null;
-    if (!pixelId) throw Object.assign(new Error('No Meta Pixel found for this ad account. Add a pixel in Meta Events Manager.'), { status: 400 });
-    console.log('[publish/meta] pixel_id:', pixelId);
+    // 2. Ad set — only look up / require a pixel when this goal's
+    // optimization goal actually needs one (see campaignGoals.META_GOAL_CONFIG).
+    let pixelId = null;
+    if (adSetConfig.needsPixel) {
+      const pixelData = await _metaFetch('/' + accountId + '/adspixels', accessToken, { fields: 'id,name', limit: '10' });
+      console.log('[publish/meta] pixel lookup accountId:', accountId);
+      console.log('[publish/meta] pixel lookup raw response:', JSON.stringify(pixelData, null, 2));
+      pixelId = (pixelData.data && pixelData.data[0]) ? pixelData.data[0].id : null;
+      if (!pixelId) {
+        throw Object.assign(new Error(`This campaign's "${s.goal || objective}" objective tracks conversions on your website, which requires a Meta Pixel. Add one in Meta Events Manager, or publish with a Traffic or Awareness objective instead — those don't need a pixel.`), { status: 400 });
+      }
+      console.log('[publish/meta] pixel_id:', pixelId);
+    }
 
     const adSetPayload = {
       name: campaignName + ' Ad Set',
       campaign_id: campaign.id,
       status: 'PAUSED',
       daily_budget: 1000,
-      billing_event: 'IMPRESSIONS',
-      optimization_goal: 'OFFSITE_CONVERSIONS',
+      billing_event: adSetConfig.billing_event,
+      optimization_goal: adSetConfig.optimization_goal,
       bid_strategy: 'LOWEST_COST_WITHOUT_CAP',
       is_adset_budget_sharing_enabled: false,
-      promoted_object: { pixel_id: pixelId, custom_event_type: 'PURCHASE' },
       targeting: { age_min: 18, age_max: 65, geo_locations: { countries: ['US'] } },
     };
+    if (adSetConfig.needsPixel) {
+      adSetPayload.promoted_object = { pixel_id: pixelId, custom_event_type: adSetConfig.customEventType };
+    }
     console.log('[META ADSET PAYLOAD]', JSON.stringify(adSetPayload, null, 2));
     const adSet = await _metaPost('/' + accountId + '/adsets', adSetPayload);
 
@@ -5123,7 +5164,13 @@ app.post('/api/publish/tiktok', requireSubscription, async (req, res) => {
     const tik = pkg.tiktokAds || {};
     const campaignName = pkg.campaignName || s.goal || 'Oriven TikTok Campaign';
 
-    const OBJECTIVE_MAP = {
+    // Objective resolution: the campaign's own goal (one of Oriven's 4
+    // universal goals, campaignGoals.TIKTOK_GOAL_CONFIG) is the primary
+    // source of truth. tik.objective is a legacy freeform field (older
+    // packages / future finer-grained overrides, e.g. 'video_views' or
+    // 'app_install', which aren't part of the 4-goal system) and is only
+    // consulted when it names something the goal mapping can't express.
+    const LEGACY_OBJECTIVE_MAP = {
       awareness:       'REACH',
       traffic:         'TRAFFIC',
       app_install:     'APP_INSTALL',
@@ -5133,8 +5180,11 @@ app.post('/api/publish/tiktok', requireSubscription, async (req, res) => {
       engagement:      'ENGAGEMENT',
       product_sales:   'PRODUCT_SALES'
     };
-    const rawObjective = (tik.objective || s.goal || 'traffic').toLowerCase().replace(/s+/g, '_');
-    const objective = OBJECTIVE_MAP[rawObjective] || 'TRAFFIC';
+    const goal = campaignGoals.normalizeGoal(s.goal);
+    const rawLegacyObjective = tik.objective ? String(tik.objective).toLowerCase().replace(/\s+/g, '_') : null;
+    const objective = (rawLegacyObjective && LEGACY_OBJECTIVE_MAP[rawLegacyObjective])
+      || campaignGoals.TIKTOK_GOAL_CONFIG[goal].objective_type;
+    console.log('[publish/tiktok] goal:', goal, '| resolved objective_type:', objective, rawLegacyObjective ? '(from legacy tik.objective)' : '(from goal mapping)');
 
     const rawBudget = tik.budget || s.dailyBudget || s.budget || 30;
     const budget = Math.max(10, parseFloat(String(rawBudget).replace(/[^0-9.]/g, '')) || 30);
@@ -7621,19 +7671,22 @@ async function _gadsQuery(accessToken, customerId, query, loginCustomerId) {
   const ctrl = new AbortController();
   const tid  = setTimeout(() => ctrl.abort(), TIMEOUT_MS);
 
-  const effectiveLoginId = loginCustomerId || customerId;
+  // Same rule as _gadsMutate: only send login-customer-id for a genuine
+  // MCC relationship (loginCustomerId !== customerId) -- a redundant,
+  // self-referential value is a known Google Ads API permission-rejection
+  // trigger on direct (non-MCC) accounts.
   const url     = 'https://googleads.googleapis.com/v24/customers/' + customerId + '/googleAds:search';
   const headers = {
     'Authorization':     'Bearer ' + accessToken,
     'developer-token':   GOOGLE_ADS_DEVELOPER_TOKEN,
     'Content-Type':      'application/json',
-    'login-customer-id': effectiveLoginId
   };
+  if (loginCustomerId && loginCustomerId !== customerId) headers['login-customer-id'] = loginCustomerId;
 
   const requestBody = JSON.stringify({ query });
   console.log('[GAQL] â–¶ POST', url);
   console.log('[GAQL]   customer_id (URL)   :', customerId);
-  console.log('[GAQL]   login-customer-id    :', effectiveLoginId);
+  console.log('[GAQL]   login-customer-id    :', headers['login-customer-id'] || '(omitted -- direct, non-MCC access)');
   console.log('[GAQL]   query               :', query.trim().replace(/\s+/g, ' '));
   console.log('[GAQL]   request body        :', requestBody);
 
@@ -7697,15 +7750,20 @@ async function _gadsQuery(accessToken, customerId, query, loginCustomerId) {
 // ── Module-level Google Ads mutate helper ────────────────────────────────────
 async function _gadsMutate(accessToken, customerId, resource, operations, loginCustomerId) {
   if (!GOOGLE_ADS_DEVELOPER_TOKEN) throw Object.assign(new Error('Google Ads developer token not configured'), { status: 500 });
-  const effectiveLoginId = loginCustomerId || customerId;
   const url = 'https://googleads.googleapis.com/v24/customers/' + customerId + '/' + resource + ':mutate';
   const headers = {
     'Authorization':     'Bearer ' + accessToken,
     'developer-token':   GOOGLE_ADS_DEVELOPER_TOKEN,
     'Content-Type':      'application/json',
-    'login-customer-id': effectiveLoginId
   };
-  console.log('[GAdsMutate] POST', resource, '| customer:', customerId, '| login:', effectiveLoginId);
+  // Only send login-customer-id when it genuinely differs from the target
+  // customer (a real MCC/manager relationship) -- sending it as a
+  // redundant, self-referential value on a direct (non-MCC) account is
+  // what was causing Resume/Pause to fail with a Google permissions
+  // rejection while Create (which already omits it in this situation)
+  // succeeded. Matches the working pattern from /api/publish/google.
+  if (loginCustomerId && loginCustomerId !== customerId) headers['login-customer-id'] = loginCustomerId;
+  console.log('[GAdsMutate] POST', resource, '| customer:', customerId, '| login:', headers['login-customer-id'] || '(omitted -- direct, non-MCC access)');
   const ctrl = new AbortController();
   const tid  = setTimeout(() => ctrl.abort(), 20000);
   let r, text;
