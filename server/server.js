@@ -5044,6 +5044,12 @@ app.post('/api/publish/google', requireSubscription, async (req, res) => {
 // Creates a paused Meta Ads campaign with ad set.
 // Receives: { pkg } where pkg is the full campaign package from /api/ai/create-ad
 app.post('/api/publish/meta', requireSubscription, async (req, res) => {
+  // Tracks what's actually been created on Meta's side so a failure partway
+  // through can roll everything back -- the publish operation must behave
+  // transaction-like and never leave an orphaned Campaign/Ad Set/Creative.
+  const created = { campaignId: null, adSetId: null, creativeId: null };
+  let accessToken, accountId;
+
   try {
     const user = await getUserFromToken(req);
     if (!user) return res.status(401).json({ ok: false, error: 'Unauthorized' });
@@ -5051,10 +5057,36 @@ app.post('/api/publish/meta', requireSubscription, async (req, res) => {
     const { pkg } = req.body || {};
     if (!pkg) return res.status(400).json({ ok: false, error: 'Campaign package required' });
 
-    const { accessToken, accountId } = await _getMetaAccess(user);
+    const metaAccess = await _getMetaAccess(user);
+    accessToken = metaAccess.accessToken;
+    accountId   = metaAccess.accountId;
+    const pageId = metaAccess.pageId;
+
+    // ── Hard prerequisite: a Facebook Page (STEP 1) ──────────────────────
+    // Without a page_id there is no valid object_story_spec, and therefore
+    // no way to ever create a real Ad -- refuse to start rather than create
+    // another incomplete Campaign/Ad Set pair.
+    if (!pageId) {
+      return res.status(400).json({ ok: false, error: 'Please connect a Facebook Page before publishing to Meta Ads.' });
+    }
 
     const s = pkg.strategy || {};
+    const m = pkg.metaAds  || {};
     const campaignName = pkg.campaignName || s.goal || 'Oriven Campaign';
+
+    // ── Hard prerequisite: a creative image (STEP 7) ─────────────────────
+    // Priority: an explicitly uploaded image first, then an AI-generated
+    // one from the review step's visualConcepts. Never publish a Meta ad
+    // with no image -- Meta itself won't accept a link_data creative
+    // without one for this ad format.
+    const visualConcepts = pkg.visualConcepts || pkg.concepts || [];
+    const imageUrl = m.imageUrl || m.uploadedImageUrl
+      || (visualConcepts.find(vc => vc && vc.generatedImageUrl) || {}).generatedImageUrl
+      || null;
+    if (!imageUrl) {
+      return res.status(400).json({ ok: false, error: 'Add an image before publishing to Meta Ads.' });
+    }
+
     const META_API = 'https://graph.facebook.com/v20.0';
 
     async function _metaPost(endpoint, body) {
@@ -5100,7 +5132,15 @@ app.post('/api/publish/meta', requireSubscription, async (req, res) => {
     console.log('[publish/meta] goal:', goal, '| objective:', objective, '| optimization_goal:', adSetConfig.optimization_goal, '| needsPixel:', adSetConfig.needsPixel);
 
     // accountId from _getMetaAccess is already normalised to exactly one 'act_' prefix.
-    console.log('[publish/meta] account:', accountId);
+    console.log('[publish/meta] account:', accountId, '| page:', pageId);
+
+    // Destination URL -- same fallback chain / placeholder pattern as
+    // /api/publish/google's finalUrls, for consistency across platforms.
+    const destinationUrl = (function() {
+      const u = (s.landingPageUrl || m.finalUrl || pkg.websiteUrl || s.websiteUrl || '').trim();
+      if (!u) { console.warn('[publish/meta] No destination URL in package — using placeholder'); return 'https://example.com'; }
+      return u;
+    })();
 
     // 1. Campaign
     const campaign = await _metaPost('/' + accountId + '/campaigns', {
@@ -5108,6 +5148,7 @@ app.post('/api/publish/meta', requireSubscription, async (req, res) => {
       budget_optimization_type: 'ADSET',
       is_adset_budget_sharing_enabled: false,
     });
+    created.campaignId = campaign.id;
 
     // 2. Ad set — only look up / require a pixel when this goal's
     // optimization goal actually needs one (see campaignGoals.META_GOAL_CONFIG).
@@ -5139,11 +5180,75 @@ app.post('/api/publish/meta', requireSubscription, async (req, res) => {
     }
     console.log('[META ADSET PAYLOAD]', JSON.stringify(adSetPayload, null, 2));
     const adSet = await _metaPost('/' + accountId + '/adsets', adSetPayload);
+    created.adSetId = adSet.id;
 
-    console.log('[publish/meta] created campaign:', campaign.id, 'adset:', adSet.id);
-    return res.json({ ok: true, campaignId: campaign.id, adSetId: adSet.id, platform: 'meta', status: 'paused' });
+    // 3. Ad Creative — built from the AI-generated pkg.metaAds copy (never
+    // ignored again), the selected Page, and the resolved image. This is
+    // the object the publish pipeline previously skipped entirely.
+    const ctaType = _metaCtaType(m.cta);
+    const linkData = {
+      link:    destinationUrl,
+      message: m.primaryText || m.description || campaignName,
+      name:    m.headline || campaignName,
+      picture: imageUrl,
+      call_to_action: { type: ctaType, value: { link: destinationUrl } },
+    };
+    if (m.description) linkData.description = m.description;
+
+    const creativePayload = {
+      name: campaignName + ' Creative',
+      object_story_spec: { page_id: pageId, link_data: linkData },
+    };
+    console.log('[META CREATIVE PAYLOAD]', JSON.stringify(creativePayload, null, 2));
+    const creative = await _metaPost('/' + accountId + '/adcreatives', creativePayload);
+    created.creativeId = creative.id;
+
+    // 4. Ad — ties the Ad Set to the Creative. Only once this succeeds does
+    // the object graph match a manually-created campaign (Campaign → Ad Set
+    // → Ad Creative → Ad), so only now is "published successfully" true.
+    const adPayload = {
+      name: campaignName + ' Ad',
+      adset_id: adSet.id,
+      creative: { creative_id: creative.id },
+      status: 'PAUSED',
+    };
+    console.log('[META AD PAYLOAD]', JSON.stringify(adPayload, null, 2));
+    const ad = await _metaPost('/' + accountId + '/ads', adPayload);
+
+    console.log('[publish/meta] created campaign:', campaign.id, '| adset:', adSet.id, '| creative:', creative.id, '| ad:', ad.id);
+    return res.json({
+      ok: true,
+      campaignId: campaign.id,
+      adSetId:    adSet.id,
+      creativeId: creative.id,
+      adId:       ad.id,
+      platform:   'meta',
+      status:     'paused',
+    });
   } catch (err) {
     console.error('[publish/meta] fatal:', err.message, '| code:', err.metaCode || '—', '| subcode:', err.metaSubcode || '—');
+
+    // ── Rollback (STEP 5) ────────────────────────────────────────────────
+    // Best-effort, reverse creation order. Each deletion is independently
+    // guarded so one failure doesn't stop the others from being attempted;
+    // any that can't be cleaned up are logged loudly rather than silently
+    // left as orphans.
+    if (accessToken && (created.creativeId || created.adSetId || created.campaignId)) {
+      console.warn('[publish/meta] Rolling back partially-created objects:', JSON.stringify(created));
+      if (created.creativeId) {
+        try { await _metaApiDelete('/' + created.creativeId, accessToken); console.warn('[publish/meta] Rollback: deleted creative', created.creativeId); }
+        catch (rbErr) { console.error('[publish/meta] Rollback FAILED for creative', created.creativeId, '—', rbErr.message); }
+      }
+      if (created.adSetId) {
+        try { await _metaApiDelete('/' + created.adSetId, accessToken); console.warn('[publish/meta] Rollback: deleted ad set', created.adSetId); }
+        catch (rbErr) { console.error('[publish/meta] Rollback FAILED for ad set', created.adSetId, '—', rbErr.message); }
+      }
+      if (created.campaignId) {
+        try { await _metaApiDelete('/' + created.campaignId, accessToken); console.warn('[publish/meta] Rollback: deleted campaign', created.campaignId); }
+        catch (rbErr) { console.error('[publish/meta] Rollback FAILED for campaign', created.campaignId, '—', rbErr.message); }
+      }
+    }
+
     return res.status(err.status || 500).json({ ok: false, error: err.message || 'Failed to publish to Meta Ads' });
   }
 });
@@ -6730,7 +6835,9 @@ app.delete('/api/tiktok/campaign/:id', async (req, res) => {
 //   ALTER TABLE integrations
 //     ADD COLUMN IF NOT EXISTS meta_user_name    TEXT,
 //     ADD COLUMN IF NOT EXISTS meta_user_id      TEXT,
-//     ADD COLUMN IF NOT EXISTS meta_ads_accounts JSONB DEFAULT '[]';
+//     ADD COLUMN IF NOT EXISTS meta_ads_accounts JSONB DEFAULT '[]',
+//     ADD COLUMN IF NOT EXISTS meta_pages        JSONB DEFAULT '[]',
+//     ADD COLUMN IF NOT EXISTS active_page       JSONB;
 // â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 
 const META_APP_ID     = process.env.META_APP_ID     || '';
@@ -6739,7 +6846,10 @@ const META_REDIRECT_URI = process.env.META_REDIRECT_URI
   || (process.env.RENDER
     ? 'https://oriven-backand-clean.onrender.com/auth/meta/callback'
     : 'http://localhost:5500/auth/meta/callback');
-const META_SCOPES  = 'ads_read,ads_management,business_management';
+// pages_show_list added so /me/accounts (the Pages a user can advertise
+// with) can be listed -- required for the Facebook Page selector, without
+// which Meta ad creatives can't be built (object_story_spec needs a page_id).
+const META_SCOPES  = 'ads_read,ads_management,business_management,pages_show_list';
 const META_API_VER = 'v21.0';
 const META_GRAPH   = 'https://graph.facebook.com/' + META_API_VER;
 
@@ -6795,7 +6905,12 @@ async function _metaFetch(path, accessToken, queryParams) {
 // ── Helper: POST to Meta Graph API (module-level) ────────────────────
 async function _metaApiPost(path, accessToken, params) {
   const body = new URLSearchParams({ access_token: accessToken });
-  if (params) Object.entries(params).forEach(([k, v]) => body.set(k, String(v)));
+  // Graph API expects complex (object/array) fields -- e.g. object_story_spec,
+  // call_to_action, creative -- as a JSON-encoded string within the
+  // form-urlencoded body; primitive values are unaffected (String(x) === same
+  // as before for strings/numbers, so existing PAUSED/ACTIVE/name/budget
+  // callers are untouched).
+  if (params) Object.entries(params).forEach(([k, v]) => body.set(k, (v !== null && typeof v === 'object') ? JSON.stringify(v) : String(v)));
   const url = META_GRAPH + path;
   let res, data;
   try {
@@ -6860,7 +6975,7 @@ async function _metaApiDelete(path, accessToken) {
 async function _getMetaAccess(user) {
   const { data: intg, error } = await supabaseAdmin
     .from('integrations')
-    .select('access_token, token_expiry, active_ad_account')
+    .select('access_token, token_expiry, active_ad_account, active_page')
     .eq('user_id', user.id)
     .eq('provider', 'meta_ads')
     .maybeSingle();
@@ -6883,7 +6998,15 @@ async function _getMetaAccess(user) {
   const accountId = 'act_' + bareId;
   console.log('[MetaAccess] stored:', rawId, '→ normalised:', accountId);
 
-  return { accessToken: intg.access_token, accountId, accountName: active.account_name || accountId };
+  const activePage = intg.active_page || null;
+
+  return {
+    accessToken: intg.access_token,
+    accountId,
+    accountName: active.account_name || accountId,
+    pageId:      activePage && activePage.page_id ? String(activePage.page_id) : null,
+    pageName:    activePage && activePage.page_name ? activePage.page_name : null,
+  };
 }
 
 // â”€â”€ Helper: fetch all accessible Meta ad accounts â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
@@ -6901,6 +7024,47 @@ async function _fetchMetaAdAccounts(accessToken) {
       timezone:     a.timezone_name || ''
     };
   });
+}
+
+// ── Helper: fetch all Facebook Pages the connected user can advertise with ──
+// A page_id is a hard requirement for building a Meta ad creative
+// (object_story_spec.page_id) -- without one the publish pipeline cannot
+// produce a real Ad, which is what left campaigns stuck as Campaign+AdSet
+// only ("Disabled" in Ads Manager). Mirrors _fetchMetaAdAccounts's shape.
+async function _fetchMetaPages(accessToken) {
+  const data = await _metaFetch('/me/accounts', accessToken, {
+    fields: 'id,name,category,tasks',
+    limit:  '100'
+  });
+  return (data.data || []).map(function(p) {
+    return {
+      page_id:   p.id,
+      page_name: p.name     || '',
+      category:  p.category || '',
+      tasks:     p.tasks    || []
+    };
+  });
+}
+
+// ── Helper: map Oriven's freeform AI-generated CTA text to one of Meta's
+// fixed call_to_action_type enum values. Falls back to LEARN_MORE (valid
+// for every objective this pipeline uses) when nothing matches. ──
+const _META_CTA_MAP = [
+  [/shop|buy|order|purchase/i,        'SHOP_NOW'],
+  [/sign\s*up|register|join/i,        'SIGN_UP'],
+  [/quote|estimate/i,                 'GET_QUOTE'],
+  [/contact|call|reach out|enquire|inquire/i, 'CONTACT_US'],
+  [/subscribe/i,                      'SUBSCRIBE'],
+  [/download/i,                       'DOWNLOAD'],
+  [/apply/i,                          'APPLY_NOW'],
+  [/book/i,                           'BOOK_TRAVEL'],
+];
+function _metaCtaType(ctaText) {
+  const text = String(ctaText || '');
+  for (const [re, type] of _META_CTA_MAP) {
+    if (re.test(text)) return type;
+  }
+  return 'LEARN_MORE';
 }
 
 // â”€â”€ Helper: map Oriven date range to Meta date_preset â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
@@ -7117,6 +7281,15 @@ app.get('/auth/meta/callback', async (req, res) => {
     console.warn('[Meta OAuth] Could not fetch ad accounts:', err.message);
   }
 
+  // â”€â”€ Step 4b: Fetch accessible Facebook Pages â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  let pages = [];
+  try {
+    pages = await _fetchMetaPages(accessToken);
+    console.log('[Meta OAuth] Fetched', pages.length, 'page(s)');
+  } catch (err) {
+    console.warn('[Meta OAuth] Could not fetch pages:', err.message);
+  }
+
   // â”€â”€ Step 5: Upsert into Supabase â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   const { error: dbError } = await supabaseAdmin
     .from('integrations')
@@ -7129,7 +7302,8 @@ app.get('/auth/meta/callback', async (req, res) => {
       refresh_token:     null,           // Meta long-lived tokens don't use refresh tokens
       token_expiry:      tokenExpiry,
       connected_at:      new Date().toISOString(),
-      meta_ads_accounts: adAccounts
+      meta_ads_accounts: adAccounts,
+      meta_pages:        pages
     }, { onConflict: 'user_id,provider' });
 
   if (dbError) {
@@ -7148,7 +7322,7 @@ app.get('/api/meta/status', async (req, res) => {
 
   const { data, error } = await supabaseAdmin
     .from('integrations')
-    .select('meta_user_name, meta_user_id, connected_at, token_expiry, meta_ads_accounts, active_ad_account')
+    .select('meta_user_name, meta_user_id, connected_at, token_expiry, meta_ads_accounts, active_ad_account, meta_pages, active_page')
     .eq('user_id', user.id)
     .eq('provider', 'meta_ads')
     .maybeSingle();
@@ -7165,7 +7339,9 @@ app.get('/api/meta/status', async (req, res) => {
     connected_at:      data.connected_at       || null,
     token_expiry:      data.token_expiry        || null,
     meta_ads_accounts: data.meta_ads_accounts  || [],
-    active_ad_account: data.active_ad_account   || null
+    active_ad_account: data.active_ad_account   || null,
+    meta_pages:        data.meta_pages         || [],
+    active_page:       data.active_page         || null
   });
 });
 
@@ -7265,6 +7441,72 @@ app.post('/api/meta/active-account', async (req, res) => {
 
     console.log('[Meta ActiveAccount] Set | user:', user.id, '| account:', account_id, account_name);
     res.json({ ok: true, active_ad_account });
+  } catch (err) {
+    res.status(500).json({ error: err.message || 'Internal server error' });
+  }
+});
+
+// GET /api/meta/pages â€” re-fetch accessible Facebook Pages from Facebook
+app.get('/api/meta/pages', async (req, res) => {
+  try {
+    const user = await getUserFromToken(req);
+    if (!user) return res.status(401).json({ error: 'Authentication required' });
+
+    const { data: intg, error: fetchErr } = await supabaseAdmin
+      .from('integrations')
+      .select('access_token, token_expiry')
+      .eq('user_id', user.id)
+      .eq('provider', 'meta_ads')
+      .maybeSingle();
+
+    if (fetchErr) return res.status(500).json({ error: 'Database error' });
+    if (!intg)    return res.status(404).json({ error: 'Meta Ads not connected' });
+    if (intg.token_expiry && new Date(intg.token_expiry) < new Date()) {
+      return res.status(401).json({ error: 'Meta token expired â€” reconnect Meta Ads' });
+    }
+
+    const pages = await _fetchMetaPages(intg.access_token);
+
+    await supabaseAdmin.from('integrations')
+      .update({ meta_pages: pages })
+      .eq('user_id', user.id)
+      .eq('provider', 'meta_ads');
+
+    res.json({ pages });
+  } catch (err) {
+    console.error('[meta/pages]', err.message);
+    res.status(err.status || 500).json({ error: err.message, meta_code: err.metaCode || null });
+  }
+});
+
+// POST /api/meta/active-page â€” set the active Facebook Page for a user
+// (required for building an Ad Creative's object_story_spec.page_id)
+app.post('/api/meta/active-page', async (req, res) => {
+  try {
+    const user = await getUserFromToken(req);
+    if (!user) return res.status(401).json({ error: 'Authentication required' });
+
+    const { page_id, page_name } = req.body || {};
+    if (!page_id) return res.status(400).json({ error: 'page_id is required' });
+
+    const active_page = {
+      page_id:   String(page_id),
+      page_name: String(page_name || '')
+    };
+
+    const { error } = await supabaseAdmin
+      .from('integrations')
+      .update({ active_page })
+      .eq('user_id', user.id)
+      .eq('provider', 'meta_ads');
+
+    if (error) {
+      console.error('[Meta ActivePage] DB error:', error.message);
+      return res.status(500).json({ error: 'Database error' });
+    }
+
+    console.log('[Meta ActivePage] Set | user:', user.id, '| page:', page_id, page_name);
+    res.json({ ok: true, active_page });
   } catch (err) {
     res.status(500).json({ error: err.message || 'Internal server error' });
   }
