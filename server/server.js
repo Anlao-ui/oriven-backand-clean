@@ -4928,6 +4928,16 @@ app.post('/api/ai/execute', requireSubIfAuthed, async (req, res) => {
 // Creates a paused Google Ads campaign with ad groups, keywords, and RSAs.
 // Receives: { pkg } where pkg is the full campaign package from /api/ai/create-ad
 app.post('/api/publish/google', requireSubscription, async (req, res) => {
+  // Tracks whether the Campaign has been created so a failure partway
+  // through (ad group / keywords / RSA) can roll it back instead of
+  // leaving an orphaned paused campaign behind -- mirrors the rollback
+  // already proven for /api/publish/meta. Google Ads' mutate API removes
+  // a campaign's children along with it, so rolling back the campaign
+  // resource alone is sufficient (same single-call pattern already used
+  // by the existing DELETE /api/google/campaign/:id route).
+  let createdCampaignResourceName = null;
+  let rbAccessToken, rbCustomerId, rbLoginCustomerId;
+
   try {
     const user = await getUserFromToken(req);
     if (!user) return res.status(401).json({ ok: false, error: 'Unauthorized' });
@@ -4936,6 +4946,7 @@ app.post('/api/publish/google', requireSubscription, async (req, res) => {
     if (!pkg) return res.status(400).json({ ok: false, error: 'Campaign package required' });
 
     const { accessToken, customerId, loginCustomerId } = await _getGadsAccess(user);
+    rbAccessToken = accessToken; rbCustomerId = customerId; rbLoginCustomerId = loginCustomerId;
 
     console.log('[Google Publish]');
     console.log('  user     :', user.id);
@@ -4991,6 +5002,7 @@ app.post('/api/publish/google', requireSubscription, async (req, res) => {
     }]);
     const campaignResourceName = campaignRes.results[0].resourceName;
     const campaignId = campaignResourceName.split('/').pop();
+    createdCampaignResourceName = campaignResourceName;
 
     // 3. Ad group
     const adGroupRes = await _gadsMutate('adGroups', [{
@@ -5035,6 +5047,32 @@ app.post('/api/publish/google', requireSubscription, async (req, res) => {
     return res.json({ ok: true, campaignId, campaignResourceName, platform: 'google', status: 'paused' });
   } catch (err) {
     console.error('[publish/google] error:', err.message);
+
+    // ── Rollback ─────────────────────────────────────────────────────────
+    // Best-effort: if the Campaign was already created before the failure
+    // (ad group / keywords / RSA step), remove it so a partial publish
+    // never leaves an orphaned paused campaign behind. A rollback failure
+    // is logged loudly but never masks the original error returned below.
+    if (createdCampaignResourceName && rbAccessToken) {
+      try {
+        const rbUrl = 'https://googleads.googleapis.com/v24/customers/' + rbCustomerId + '/campaigns:mutate';
+        const rbHeaders = {
+          'Authorization':   'Bearer ' + rbAccessToken,
+          'developer-token': process.env.GOOGLE_ADS_DEVELOPER_TOKEN || '',
+          'Content-Type':    'application/json',
+        };
+        if (rbLoginCustomerId && rbLoginCustomerId !== rbCustomerId) rbHeaders['login-customer-id'] = rbLoginCustomerId;
+        const rbRes = await fetch(rbUrl, {
+          method: 'POST', headers: rbHeaders,
+          body: JSON.stringify({ operations: [{ remove: createdCampaignResourceName }] })
+        });
+        if (rbRes.ok) console.warn('[publish/google] Rollback: removed campaign', createdCampaignResourceName);
+        else console.error('[publish/google] Rollback FAILED for campaign', createdCampaignResourceName, '— HTTP', rbRes.status, await rbRes.text());
+      } catch (rbErr) {
+        console.error('[publish/google] Rollback FAILED for campaign', createdCampaignResourceName, '—', rbErr.message);
+      }
+    }
+
     return res.status(err.status || 500).json({ ok: false, error: err.message || 'Failed to publish to Google Ads' });
   }
 });
