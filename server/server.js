@@ -5046,16 +5046,23 @@ app.post('/api/publish/google', requireSubscription, async (req, res) => {
 app.post('/api/publish/meta', requireSubscription, async (req, res) => {
   // Tracks what's actually been created on Meta's side so a failure partway
   // through can roll everything back -- the publish operation must behave
-  // transaction-like and never leave an orphaned Campaign/Ad Set/Creative.
-  const created = { campaignId: null, adSetId: null, creativeId: null };
+  // transaction-like and never leave an orphaned Campaign/Ad Set/Creative/Ad.
+  const created = { campaignId: null, adSetIds: [], creativeIds: [], adIds: [] };
   let accessToken, accountId;
 
   try {
     const user = await getUserFromToken(req);
     if (!user) return res.status(401).json({ ok: false, error: 'Unauthorized' });
 
-    const { pkg } = req.body || {};
+    const { pkg, structure } = req.body || {};
     if (!pkg) return res.status(400).json({ ok: false, error: 'Campaign package required' });
+
+    // Server-side clamp -- never trust the frontend's structure choice.
+    // Mirrors the 1/2/3/5 options the UI actually offers.
+    const rawStructure = structure || {};
+    const adSetCount = Math.max(1, Math.min(5, parseInt(rawStructure.adSets, 10) || 1));
+    const adsPerAdSetCount = Math.max(1, Math.min(5, parseInt(rawStructure.adsPerAdSet, 10) || 1));
+    console.log('[publish/meta] requested structure:', adSetCount, 'ad set(s) x', adsPerAdSetCount, 'ad(s) each =', (adSetCount * adsPerAdSetCount), 'total ads');
 
     const metaAccess = await _getMetaAccess(user);
     accessToken = metaAccess.accessToken;
@@ -5079,13 +5086,44 @@ app.post('/api/publish/meta', requireSubscription, async (req, res) => {
     // one from the review step's visualConcepts. Never publish a Meta ad
     // with no image -- Meta itself won't accept a link_data creative
     // without one for this ad format.
-    const visualConcepts = pkg.visualConcepts || pkg.concepts || [];
+    const visualConcepts = pkg.visualConcepts || [];
     const imageUrl = m.imageUrl || m.uploadedImageUrl
       || (visualConcepts.find(vc => vc && vc.generatedImageUrl) || {}).generatedImageUrl
       || null;
     if (!imageUrl) {
       return res.status(400).json({ ok: false, error: 'Add an image before publishing to Meta Ads.' });
     }
+
+    // ── Creative variants (STEP 4/9) ──────────────────────────────────────
+    // pkg.concepts (3 fixed AI-generated angles, each with its own adCopy)
+    // + pkg.visualConcepts (matched by conceptRef === angle, carrying that
+    // angle's own generated image once one exists) is what makes multiple
+    // Ads per Ad Set REAL distinct creatives instead of duplicates. Falls
+    // back to the single pkg.metaAds copy when no concepts exist (older
+    // packages / non-full-mode generation).
+    const concepts = Array.isArray(pkg.concepts) ? pkg.concepts : [];
+    const variants = [];
+    concepts.forEach(function(c) {
+      const copy = c.adCopy || {};
+      const vc = visualConcepts.find(function(v) { return v && v.conceptRef === c.angle; });
+      variants.push({
+        headline:    copy.headline    || m.headline    || campaignName,
+        primaryText: copy.primaryText || m.primaryText || m.description || campaignName,
+        description: copy.description || m.description || '',
+        cta:         c.cta || m.cta,
+        imageUrl:    (vc && vc.generatedImageUrl) || imageUrl,
+      });
+    });
+    if (!variants.length) {
+      variants.push({
+        headline:    m.headline    || campaignName,
+        primaryText: m.primaryText || m.description || campaignName,
+        description: m.description || '',
+        cta:         m.cta,
+        imageUrl:    imageUrl,
+      });
+    }
+    console.log('[publish/meta] creative variants available:', variants.length, variants.length < adsPerAdSetCount ? '(will cycle to fill ' + adsPerAdSetCount + ' ads/ad-set)' : '');
 
     const META_API = 'https://graph.facebook.com/v20.0';
 
@@ -5150,8 +5188,10 @@ app.post('/api/publish/meta', requireSubscription, async (req, res) => {
     });
     created.campaignId = campaign.id;
 
-    // 2. Ad set — only look up / require a pixel when this goal's
+    // 2. Ad set(s) — only look up / require a pixel when this goal's
     // optimization goal actually needs one (see campaignGoals.META_GOAL_CONFIG).
+    // Pixel is account-level, so this lookup happens once and is reused
+    // across every ad set below, not repeated per ad set.
     let pixelId = null;
     if (adSetConfig.needsPixel) {
       const pixelData = await _metaFetch('/' + accountId + '/adspixels', accessToken, { fields: 'id,name', limit: '10' });
@@ -5164,64 +5204,79 @@ app.post('/api/publish/meta', requireSubscription, async (req, res) => {
       console.log('[publish/meta] pixel_id:', pixelId);
     }
 
-    const adSetPayload = {
-      name: campaignName + ' Ad Set',
-      campaign_id: campaign.id,
-      status: 'PAUSED',
-      daily_budget: 1000,
-      billing_event: adSetConfig.billing_event,
-      optimization_goal: adSetConfig.optimization_goal,
-      bid_strategy: 'LOWEST_COST_WITHOUT_CAP',
-      is_adset_budget_sharing_enabled: false,
-      targeting: { age_min: 18, age_max: 65, geo_locations: { countries: ['US'] } },
-    };
-    if (adSetConfig.needsPixel) {
-      adSetPayload.promoted_object = { pixel_id: pixelId, custom_event_type: adSetConfig.customEventType };
+    // 3/4. For each requested Ad Set, create it, then create the requested
+    // number of Ads inside it -- each Ad gets its OWN Ad Creative, cycling
+    // through `variants` so the content is real AI-generated copy/imagery,
+    // not the same object duplicated. This is the actual object graph:
+    // Campaign -> Ad Set(s) -> Ad Creative(s) -> Ad(s).
+    const adSetsOut = [], creativesOut = [], adsOut = [];
+    let globalAdIndex = 0;
+
+    for (let i = 0; i < adSetCount; i++) {
+      const adSetPayload = {
+        name: campaignName + (adSetCount > 1 ? ' Ad Set ' + (i + 1) : ' Ad Set'),
+        campaign_id: campaign.id,
+        status: 'PAUSED',
+        daily_budget: 1000,
+        billing_event: adSetConfig.billing_event,
+        optimization_goal: adSetConfig.optimization_goal,
+        bid_strategy: 'LOWEST_COST_WITHOUT_CAP',
+        is_adset_budget_sharing_enabled: false,
+        targeting: { age_min: 18, age_max: 65, geo_locations: { countries: ['US'] } },
+      };
+      if (adSetConfig.needsPixel) {
+        adSetPayload.promoted_object = { pixel_id: pixelId, custom_event_type: adSetConfig.customEventType };
+      }
+      console.log('[META ADSET PAYLOAD]', JSON.stringify(adSetPayload, null, 2));
+      const adSet = await _metaPost('/' + accountId + '/adsets', adSetPayload);
+      created.adSetIds.push(adSet.id);
+      adSetsOut.push({ id: adSet.id, name: adSetPayload.name });
+
+      for (let j = 0; j < adsPerAdSetCount; j++) {
+        globalAdIndex++;
+        const variant = variants[j % variants.length];
+        const ctaType = _metaCtaType(variant.cta);
+        const linkData = {
+          link:    destinationUrl,
+          message: variant.primaryText,
+          name:    variant.headline,
+          picture: variant.imageUrl,
+          call_to_action: { type: ctaType, value: { link: destinationUrl } },
+        };
+        if (variant.description) linkData.description = variant.description;
+
+        const creativePayload = {
+          name: campaignName + ' Creative ' + globalAdIndex,
+          object_story_spec: { page_id: pageId, link_data: linkData },
+        };
+        console.log('[META CREATIVE PAYLOAD]', JSON.stringify(creativePayload, null, 2));
+        const creative = await _metaPost('/' + accountId + '/adcreatives', creativePayload);
+        created.creativeIds.push(creative.id);
+        creativesOut.push({ id: creative.id, adSetId: adSet.id });
+
+        const adPayload = {
+          name: campaignName + ' Ad ' + globalAdIndex,
+          adset_id: adSet.id,
+          creative: { creative_id: creative.id },
+          status: 'PAUSED',
+        };
+        console.log('[META AD PAYLOAD]', JSON.stringify(adPayload, null, 2));
+        const ad = await _metaPost('/' + accountId + '/ads', adPayload);
+        created.adIds.push(ad.id);
+        adsOut.push({ id: ad.id, adSetId: adSet.id, creativeId: creative.id });
+      }
     }
-    console.log('[META ADSET PAYLOAD]', JSON.stringify(adSetPayload, null, 2));
-    const adSet = await _metaPost('/' + accountId + '/adsets', adSetPayload);
-    created.adSetId = adSet.id;
 
-    // 3. Ad Creative — built from the AI-generated pkg.metaAds copy (never
-    // ignored again), the selected Page, and the resolved image. This is
-    // the object the publish pipeline previously skipped entirely.
-    const ctaType = _metaCtaType(m.cta);
-    const linkData = {
-      link:    destinationUrl,
-      message: m.primaryText || m.description || campaignName,
-      name:    m.headline || campaignName,
-      picture: imageUrl,
-      call_to_action: { type: ctaType, value: { link: destinationUrl } },
-    };
-    if (m.description) linkData.description = m.description;
-
-    const creativePayload = {
-      name: campaignName + ' Creative',
-      object_story_spec: { page_id: pageId, link_data: linkData },
-    };
-    console.log('[META CREATIVE PAYLOAD]', JSON.stringify(creativePayload, null, 2));
-    const creative = await _metaPost('/' + accountId + '/adcreatives', creativePayload);
-    created.creativeId = creative.id;
-
-    // 4. Ad — ties the Ad Set to the Creative. Only once this succeeds does
-    // the object graph match a manually-created campaign (Campaign → Ad Set
-    // → Ad Creative → Ad), so only now is "published successfully" true.
-    const adPayload = {
-      name: campaignName + ' Ad',
-      adset_id: adSet.id,
-      creative: { creative_id: creative.id },
-      status: 'PAUSED',
-    };
-    console.log('[META AD PAYLOAD]', JSON.stringify(adPayload, null, 2));
-    const ad = await _metaPost('/' + accountId + '/ads', adPayload);
-
-    console.log('[publish/meta] created campaign:', campaign.id, '| adset:', adSet.id, '| creative:', creative.id, '| ad:', ad.id);
+    // Only reached once every requested Ad Set, Creative and Ad exists --
+    // this is what "published successfully" is gated on (PHASE 12).
+    console.log('[publish/meta] created campaign:', campaign.id, '| ad sets:', adSetsOut.length, '| creatives:', creativesOut.length, '| ads:', adsOut.length);
     return res.json({
       ok: true,
       campaignId: campaign.id,
-      adSetId:    adSet.id,
-      creativeId: creative.id,
-      adId:       ad.id,
+      adSetId:    adSetsOut[0] ? adSetsOut[0].id : null, // back-compat single-value field
+      adSets:     adSetsOut,
+      creatives:  creativesOut,
+      ads:        adsOut,
       platform:   'meta',
       status:     'paused',
     });
@@ -5229,19 +5284,26 @@ app.post('/api/publish/meta', requireSubscription, async (req, res) => {
     console.error('[publish/meta] fatal:', err.message, '| code:', err.metaCode || '—', '| subcode:', err.metaSubcode || '—');
 
     // ── Rollback (STEP 5) ────────────────────────────────────────────────
-    // Best-effort, reverse creation order. Each deletion is independently
-    // guarded so one failure doesn't stop the others from being attempted;
-    // any that can't be cleaned up are logged loudly rather than silently
-    // left as orphans.
-    if (accessToken && (created.creativeId || created.adSetId || created.campaignId)) {
+    // Best-effort, reverse creation order (Ads -> Creatives -> Ad Sets ->
+    // Campaign) -- Ads are deleted first since a Creative still referenced
+    // by an Ad may not be deletable. Each deletion is independently guarded
+    // so one failure doesn't stop the others from being attempted; any that
+    // can't be cleaned up are logged loudly rather than silently left as
+    // orphans.
+    const hasPartial = created.adIds.length || created.creativeIds.length || created.adSetIds.length || created.campaignId;
+    if (accessToken && hasPartial) {
       console.warn('[publish/meta] Rolling back partially-created objects:', JSON.stringify(created));
-      if (created.creativeId) {
-        try { await _metaApiDelete('/' + created.creativeId, accessToken); console.warn('[publish/meta] Rollback: deleted creative', created.creativeId); }
-        catch (rbErr) { console.error('[publish/meta] Rollback FAILED for creative', created.creativeId, '—', rbErr.message); }
+      for (const id of created.adIds) {
+        try { await _metaApiDelete('/' + id, accessToken); console.warn('[publish/meta] Rollback: deleted ad', id); }
+        catch (rbErr) { console.error('[publish/meta] Rollback FAILED for ad', id, '—', rbErr.message); }
       }
-      if (created.adSetId) {
-        try { await _metaApiDelete('/' + created.adSetId, accessToken); console.warn('[publish/meta] Rollback: deleted ad set', created.adSetId); }
-        catch (rbErr) { console.error('[publish/meta] Rollback FAILED for ad set', created.adSetId, '—', rbErr.message); }
+      for (const id of created.creativeIds) {
+        try { await _metaApiDelete('/' + id, accessToken); console.warn('[publish/meta] Rollback: deleted creative', id); }
+        catch (rbErr) { console.error('[publish/meta] Rollback FAILED for creative', id, '—', rbErr.message); }
+      }
+      for (const id of created.adSetIds) {
+        try { await _metaApiDelete('/' + id, accessToken); console.warn('[publish/meta] Rollback: deleted ad set', id); }
+        catch (rbErr) { console.error('[publish/meta] Rollback FAILED for ad set', id, '—', rbErr.message); }
       }
       if (created.campaignId) {
         try { await _metaApiDelete('/' + created.campaignId, accessToken); console.warn('[publish/meta] Rollback: deleted campaign', created.campaignId); }
