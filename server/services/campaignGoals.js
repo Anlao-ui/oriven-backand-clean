@@ -76,16 +76,63 @@ const META_GOAL_CONFIG = {
   Awareness: { objective: 'OUTCOME_AWARENESS', optimization_goal: 'REACH',               billing_event: 'IMPRESSIONS', needsPixel: false, label: 'Awareness' },
 };
 
-// ── TikTok Ads — campaign-level objective_type per goal ──
-// TikTok's publish pipeline currently only creates the campaign shell
-// (no ad-group/ad step exists yet -- that's a separate, pre-existing gap,
-// not something this mapping can fix on its own), so this governs the
-// one objective-bearing call that exists today.
+// ── TikTok Ads — campaign objective_type + ad-group optimization_goal/
+// billing_event per goal. optimization_goal/billing_event govern the ad
+// group (added when the publish pipeline grew from a campaign-shell-only
+// call into a real Campaign→AdGroup→Ad graph) and must be a pairing
+// TikTok's API accepts for the paired objective_type above them. These
+// are TikTok's documented pairings for the 4 objectives this pipeline
+// uses, cross-checked against the open-source tiktok-business-api-sdk's
+// AdgroupCreateBody field list -- NOT live-verified against a real TikTok
+// account (no live TikTok Ads credentials were available in this
+// environment). If TikTok rejects a pairing, the publish route surfaces
+// TikTok's own error rather than silently retrying with a guess.
 const TIKTOK_GOAL_CONFIG = {
-  Sales:     { objective_type: 'CONVERSIONS',     label: 'Sales' },
-  Leads:     { objective_type: 'LEAD_GENERATION', label: 'Lead Generation' },
-  Traffic:   { objective_type: 'TRAFFIC',         label: 'Traffic' },
-  Awareness: { objective_type: 'REACH',           label: 'Reach / Awareness' },
+  Sales:     { objective_type: 'CONVERSIONS',     optimization_goal: 'CONVERT',         billing_event: 'OCPM', label: 'Sales' },
+  Leads:     { objective_type: 'LEAD_GENERATION', optimization_goal: 'LEAD_GENERATION', billing_event: 'OCPM', label: 'Lead Generation' },
+  Traffic:   { objective_type: 'TRAFFIC',         optimization_goal: 'CLICK',           billing_event: 'CPC',  label: 'Traffic' },
+  Awareness: { objective_type: 'REACH',           optimization_goal: 'REACH',           billing_event: 'CPM',  label: 'Reach / Awareness' },
+};
+
+// ── TikTok Ads — map Oriven's freeform AI-generated CTA text to one of
+// TikTok's call_to_action enum values. Mirrors server.js's _META_CTA_MAP/
+// _metaCtaType pattern exactly. TikTok's own enum could not be
+// independently confirmed against a live endpoint this session (the
+// business-api.tiktok.com docs portal is client-rendered and returned no
+// field content to automated fetches) -- built from TikTok's publicly
+// documented Ads Manager CTA button list. Falls back to LEARN_MORE.
+const TIKTOK_CTA_MAP = [
+  [/shop|buy|order|purchase/i,                'SHOP_NOW'],
+  [/sign\s*up|register|join/i,                'SIGN_UP'],
+  [/quote|estimate/i,                         'GET_QUOTE'],
+  [/contact|call|reach out|enquire|inquire/i, 'CONTACT_US'],
+  [/subscribe/i,                              'SUBSCRIBE'],
+  [/download/i,                               'DOWNLOAD_NOW'],
+  [/apply/i,                                  'APPLY_NOW'],
+  [/book/i,                                   'BOOK_NOW'],
+  [/watch/i,                                  'WATCH_NOW'],
+  [/play/i,                                   'PLAY_GAME'],
+];
+function tiktokCtaType(ctaText) {
+  const text = String(ctaText || '');
+  for (const [re, type] of TIKTOK_CTA_MAP) {
+    if (re.test(text)) return type;
+  }
+  return 'LEARN_MORE';
+}
+
+// ── Google Ads — Demand Gen campaign bidding per goal ──
+// Demand Gen (advertisingChannelType DEMAND_GEN) supports a narrower set
+// of bidding strategies than Search -- it has no target-spend/maximize-
+// clicks or target-impression-share strategy, so unlike Search's per-goal
+// split (GOOGLE_GOAL_CONFIG above), all four goals converge on Maximize
+// Conversions here; goals are differentiated by copy/targeting rather
+// than bidding strategy for this channel type.
+const GOOGLE_DEMANDGEN_GOAL_CONFIG = {
+  Sales:     { biddingField: 'maximizeConversions', biddingValue: {}, label: 'Demand Gen — Sales' },
+  Leads:     { biddingField: 'maximizeConversions', biddingValue: {}, label: 'Demand Gen — Leads' },
+  Traffic:   { biddingField: 'maximizeConversions', biddingValue: {}, label: 'Demand Gen — Traffic' },
+  Awareness: { biddingField: 'maximizeConversions', biddingValue: {}, label: 'Demand Gen — Awareness' },
 };
 
 // ── Intelligence — which KPIs actually matter for each goal, so a
@@ -118,8 +165,11 @@ module.exports = {
   GOAL_UI,
   GOAL_CREATIVE_DIRECTION,
   GOOGLE_GOAL_CONFIG,
+  GOOGLE_DEMANDGEN_GOAL_CONFIG,
   META_GOAL_CONFIG,
   TIKTOK_GOAL_CONFIG,
+  TIKTOK_CTA_MAP,
+  tiktokCtaType,
   GOAL_KPIS,
   GOAL_AUTOPILOT_HINTS,
 };

@@ -4973,6 +4973,151 @@ app.post('/api/publish/google', requireSubscription, async (req, res) => {
       return d;
     }
 
+    // ── Campaign-type dispatch ──────────────────────────────────────────
+    // pkg.googleAds.campaignType drives which publisher logic runs.
+    // SEARCH (default, for packages created before this field existed) is
+    // the unchanged, untouched pipeline below. Some types are genuinely
+    // blocked today by a real missing dependency Oriven doesn't have --
+    // these fail clearly with the specific reason rather than creating a
+    // broken partial object graph or fabricating unsupported functionality:
+    //   SHOPPING          — needs a linked Google Merchant Center account +
+    //                        product feed; no Merchant Center OAuth scope
+    //                        or integration exists anywhere in Oriven.
+    //   PERFORMANCE_MAX   — Google requires a minimum asset set including a
+    //                        LOGO asset plus separate SQUARE_MARKETING_IMAGE
+    //                        and MARKETING_IMAGE assets (distinct aspect
+    //                        ratios); Oriven's business profile has no logo
+    //                        field and generates one untyped image per
+    //                        visual concept, not aspect-ratio-differentiated
+    //                        variants -- the minimum can't be met honestly.
+    //   VIDEO (YouTube)   — Video/TrueView campaigns reference an asset
+    //                        that must already exist as a real YouTube
+    //                        video (a youtubeVideo asset pointing at a
+    //                        YouTube video ID); Oriven's AI-generated video
+    //                        is never uploaded to YouTube (no YouTube Data
+    //                        API integration exists), and no video URL is
+    //                        even persisted into the campaign package today
+    //                        (see app.html's video-asset persistence fix).
+    //   MAPS (Local)      — needs a verified Google Business Profile
+    //                        location feed; Oriven collects no business
+    //                        location data anywhere today.
+    const campaignType = g.campaignType || 'SEARCH';
+    console.log('[publish/google] campaignType:', campaignType);
+
+    const GOOGLE_BLOCKED_CAMPAIGN_TYPES = {
+      SHOPPING: 'Google Shopping requires a linked Google Merchant Center account and product feed — Oriven does not have a Merchant Center integration yet. Publish this campaign as Search or Demand Gen instead.',
+      PERFORMANCE_MAX: 'Performance Max requires a Logo asset plus separate square and landscape Marketing Image assets — Oriven\'s generated creative today produces a single untyped image with no logo, so the minimum asset requirements can\'t be met. Publish as Search or Demand Gen instead.',
+      VIDEO: 'YouTube Video campaigns require the video to already be uploaded to a YouTube channel — Oriven generates video creative but has no YouTube upload integration, so there is no real YouTube video ID to reference. Publish as Search or Demand Gen instead.',
+      MAPS: 'Local/Maps campaigns require a verified Google Business Profile location feed — Oriven does not collect or store business location data anywhere today. Publish as Search or Demand Gen instead.',
+    };
+    if (GOOGLE_BLOCKED_CAMPAIGN_TYPES[campaignType]) {
+      return res.status(400).json({ ok: false, error: GOOGLE_BLOCKED_CAMPAIGN_TYPES[campaignType], blocked: true, campaignType });
+    }
+
+    if (campaignType === 'DEMAND_GEN') {
+      // Demand Gen (advertisingChannelType DEMAND_GEN, ad type
+      // demandGenMultiAssetAd) is a genuinely different, simpler object
+      // graph than Search's keyword/RSA flow -- no keywords, one image-
+      // based multi-asset ad per ad group. Achievable with assets Oriven
+      // actually has (headlines/descriptions/one generated image/business
+      // name) without any new OAuth scope or external account, unlike
+      // Shopping/PMax/Video above. Field names for demandGenMultiAssetAd
+      // (headlines/descriptions/businessName/marketingImages) come from
+      // Google's documented Performance Max / Demand Gen asset-group
+      // sample flow; the exact minimum asset-slot requirement (marketing
+      // vs. square marketing image) could not be independently re-verified
+      // against a live account this session -- if Google rejects the
+      // submitted image's aspect ratio for the marketingImages slot, that
+      // real validation error is returned to the user rather than masked.
+      const demandGenGoalConfig = campaignGoals.GOOGLE_DEMANDGEN_GOAL_CONFIG[goal];
+
+      const { data: bizProfile } = await supabaseAdmin.from('business_profile').select('company_name').eq('user_id', user.id).maybeSingle();
+      const businessName = (bizProfile && bizProfile.company_name) ? String(bizProfile.company_name).slice(0, 25) : null;
+      if (!businessName) {
+        return res.status(400).json({ ok: false, error: 'Add a Company Name in your Business Profile before publishing a Demand Gen campaign — Google requires a business name for this ad format.' });
+      }
+
+      const dgVisualConcepts = pkg.visualConcepts || [];
+      const dgImageUrl = g.imageUrl || (dgVisualConcepts.find(vc => vc && vc.generatedImageUrl) || {}).generatedImageUrl || null;
+      if (!dgImageUrl) {
+        return res.status(400).json({ ok: false, error: 'Add an image before publishing a Demand Gen campaign.' });
+      }
+
+      const dgHeadlines = (g.headlines || []).slice(0, 5).map(h => ({ text: String(h).slice(0, 40) }));
+      const dgDescriptions = (g.descriptions || []).slice(0, 5).map(d => ({ text: String(d).slice(0, 90) }));
+      if (!dgHeadlines.length || !dgDescriptions.length) {
+        return res.status(400).json({ ok: false, error: 'At least one headline and one description are required to publish a Demand Gen campaign.' });
+      }
+
+      const dgFinalUrl = (function() {
+        const u = (s.landingPageUrl || g.finalUrl || pkg.websiteUrl || s.websiteUrl || '').trim();
+        return u || 'https://example.com';
+      })();
+
+      // 1. Campaign budget
+      const dgBudgetRes = await _gadsMutate('campaignBudgets', [{
+        create: { name: campaignName + ' Budget', amountMicros: (function(){
+          var budgetRec = s.budgetRecommendation;
+          var amt = (typeof budgetRec === 'object' && budgetRec ? (budgetRec.amount || budgetRec.daily || 10) : (Number(budgetRec) || 10));
+          return String(Math.round(amt * 1e6));
+        })(), deliveryMethod: 'STANDARD' }
+      }]);
+      const dgBudgetResourceName = dgBudgetRes.results[0].resourceName;
+
+      // 2. Campaign (DEMAND_GEN, PAUSED)
+      const dgCampaignRes = await _gadsMutate('campaigns', [{
+        create: {
+          name: campaignName,
+          advertisingChannelType: 'DEMAND_GEN',
+          status: 'PAUSED',
+          campaignBudget: dgBudgetResourceName,
+          [demandGenGoalConfig.biddingField]: demandGenGoalConfig.biddingValue,
+        }
+      }]);
+      const dgCampaignResourceName = dgCampaignRes.results[0].resourceName;
+      const dgCampaignId = dgCampaignResourceName.split('/').pop();
+      createdCampaignResourceName = dgCampaignResourceName; // reuses this route's existing campaign-level rollback in the catch block below
+
+      // 3. Ad group
+      const dgAdGroupRes = await _gadsMutate('adGroups', [{
+        create: { name: campaignName + ' Ad Group', campaign: dgCampaignResourceName, status: 'ENABLED' }
+      }]);
+      const dgAdGroupResourceName = dgAdGroupRes.results[0].resourceName;
+
+      // 4. Upload the creative image as a Google Ads IMAGE asset -- Google
+      // Ads' assets:mutate takes raw image bytes (base64), not a hosted
+      // URL, unlike Meta's link_data.picture.
+      const dgImgFetchRes = await fetch(dgImageUrl);
+      if (!dgImgFetchRes.ok) throw new Error('Could not fetch the generated creative image for upload to Google Ads');
+      const dgImgB64 = Buffer.from(await dgImgFetchRes.arrayBuffer()).toString('base64');
+      const dgAssetRes = await _gadsMutate('assets', [{
+        create: { type: 'IMAGE', name: campaignName + ' Image', imageAsset: { data: dgImgB64 } }
+      }]);
+      const dgImageAssetResourceName = dgAssetRes.results[0].resourceName;
+
+      // 5. Multi-asset ad
+      await _gadsMutate('adGroupAds', [{
+        create: {
+          adGroup: dgAdGroupResourceName,
+          status: 'ENABLED',
+          ad: {
+            demandGenMultiAssetAd: {
+              headlines: dgHeadlines,
+              descriptions: dgDescriptions,
+              businessName,
+              marketingImages: [{ asset: dgImageAssetResourceName }],
+            },
+            finalUrls: [dgFinalUrl],
+          }
+        }
+      }]);
+
+      console.log('[publish/google] Demand Gen campaign created:', dgCampaignId, 'for user', user.id);
+      return res.json({ ok: true, campaignId: dgCampaignId, campaignResourceName: dgCampaignResourceName, platform: 'google', campaignType: 'DEMAND_GEN', status: 'paused' });
+    }
+
+    // ── SEARCH (default) — unchanged from the pre-existing pipeline ─────
+
     // 1. Campaign budget
     const budgetRes = await _gadsMutate('campaignBudgets', [{
       create: { name: campaignName + ' Budget', amountMicros: (function(){
@@ -5355,7 +5500,24 @@ app.post('/api/publish/meta', requireSubscription, async (req, res) => {
 
 // -- Campaign Publishing -- TikTok Ads ----------------------------------------
 // POST /api/publish/tiktok
+// Builds the full Campaign → AdGroup → Ad object graph (previously this
+// route only ever created the Campaign shell -- see campaignGoals.js's
+// former comment on TIKTOK_GOAL_CONFIG for that history). Requires a
+// linked TikTok account Identity (active_identity, set via
+// /api/tiktok/active-identity) and a real creative image; refuses to
+// create a shell-only campaign rather than silently repeating the old
+// incomplete behaviour. Every step's exact request/response field names
+// come from TikTok's open-source tiktok-business-api-sdk schema docs
+// (identity/get, file/image/ad/upload, adgroup/create, ad/create) rather
+// than being guessed -- call_to_action enum values and the
+// optimization_goal/billing_event pairings could not be independently
+// re-confirmed against a live TikTok account this session (no TikTok Ads
+// credentials were available anywhere in this environment); if TikTok
+// rejects a field, that error is surfaced to the user rather than masked.
 app.post('/api/publish/tiktok', requireSubscription, async (req, res) => {
+  const created = { campaignId: null, adGroupId: null, adId: null };
+  let rbAccessToken, rbAdvertiserId;
+
   try {
     const user = await getUserFromToken(req);
     if (!user) return res.status(401).json({ ok: false, error: 'Unauthorized' });
@@ -5363,11 +5525,39 @@ app.post('/api/publish/tiktok', requireSubscription, async (req, res) => {
     const { pkg } = req.body || {};
     if (!pkg) return res.status(400).json({ ok: false, error: 'Campaign package required' });
 
-    const { accessToken, advertiserId } = await _getTikTokAccess(user);
+    const { accessToken, advertiserId, identityId, identityType, identityName } = await _getTikTokAccess(user);
+    rbAccessToken = accessToken; rbAdvertiserId = advertiserId;
+
+    // ── Hard prerequisite: a TikTok account Identity ──────────────────────
+    // Required by /ad/create/ since TikTok's Custom Identity phase-out
+    // (see _fetchTikTokIdentities). Refuse to start rather than create
+    // another Campaign-only shell.
+    if (!identityId || !identityType) {
+      return res.status(400).json({ ok: false, error: 'Select a TikTok account Identity before publishing — go to Integrations → TikTok Ads and choose which linked TikTok account your ads will run under.' });
+    }
 
     const s   = pkg.strategy  || {};
     const tik = pkg.tiktokAds || {};
     const campaignName = pkg.campaignName || s.goal || 'Oriven TikTok Campaign';
+
+    // ── Hard prerequisite: a creative image ────────────────────────────────
+    // No video is ever persisted into a campaign package today (the AI
+    // video-generation flow renders a <video> into a throwaway preview card
+    // and never writes the URL back into pkg) -- image-only, same
+    // AI-generated-image source Meta's publish pipeline already uses.
+    const visualConcepts = pkg.visualConcepts || [];
+    const imageUrl = tik.imageUrl
+      || (visualConcepts.find(vc => vc && vc.generatedImageUrl) || {}).generatedImageUrl
+      || null;
+    if (!imageUrl) {
+      return res.status(400).json({ ok: false, error: 'Add an image before publishing to TikTok Ads.' });
+    }
+
+    const destinationUrl = (function() {
+      const u = (s.landingPageUrl || tik.finalUrl || pkg.websiteUrl || s.websiteUrl || '').trim();
+      if (!u) { console.warn('[publish/tiktok] No destination URL in package — using placeholder'); return 'https://example.com'; }
+      return u;
+    })();
 
     // Objective resolution: the campaign's own goal (one of Oriven's 4
     // universal goals, campaignGoals.TIKTOK_GOAL_CONFIG) is the primary
@@ -5386,10 +5576,11 @@ app.post('/api/publish/tiktok', requireSubscription, async (req, res) => {
       product_sales:   'PRODUCT_SALES'
     };
     const goal = campaignGoals.normalizeGoal(s.goal);
+    const goalConfig = campaignGoals.TIKTOK_GOAL_CONFIG[goal];
     const rawLegacyObjective = tik.objective ? String(tik.objective).toLowerCase().replace(/\s+/g, '_') : null;
-    const objective = (rawLegacyObjective && LEGACY_OBJECTIVE_MAP[rawLegacyObjective])
-      || campaignGoals.TIKTOK_GOAL_CONFIG[goal].objective_type;
+    const objective = (rawLegacyObjective && LEGACY_OBJECTIVE_MAP[rawLegacyObjective]) || goalConfig.objective_type;
     console.log('[publish/tiktok] goal:', goal, '| resolved objective_type:', objective, rawLegacyObjective ? '(from legacy tik.objective)' : '(from goal mapping)');
+    console.log('[publish/tiktok] identity:', identityId, '(' + identityType + ')');
 
     const rawBudget = tik.budget || s.dailyBudget || s.budget || 30;
     const budget = Math.max(10, parseFloat(String(rawBudget).replace(/[^0-9.]/g, '')) || 30);
@@ -5397,6 +5588,7 @@ app.post('/api/publish/tiktok', requireSubscription, async (req, res) => {
     console.log('[publish/tiktok] advertiser:', advertiserId);
     console.log('[publish/tiktok] name:', campaignName, '| objective:', objective, '| budget:', budget);
 
+    // 1. Campaign
     const campaignData = await _tiktokPost('/campaign/create/', accessToken, {
       advertiser_id:      advertiserId,
       campaign_name:      campaignName,
@@ -5406,14 +5598,130 @@ app.post('/api/publish/tiktok', requireSubscription, async (req, res) => {
       operation_status:   'DISABLE',
       special_industries: []
     });
-
     const campaignId = campaignData && campaignData.campaign_id;
     if (!campaignId) throw new Error('TikTok did not return a campaign_id');
-
+    created.campaignId = campaignId;
     console.log('[publish/tiktok] Created campaign:', campaignId);
-    return res.json({ ok: true, campaignId: String(campaignId), platform: 'tiktok', status: 'paused' });
+
+    // 2. Upload the creative image by URL (TikTok fetches it server-side --
+    // no local file handling needed, mirrors upload_type: 'UPLOAD_BY_URL'
+    // documented on the file/image/ad/upload endpoint).
+    const uploadData = await _tiktokPost('/file/image/ad/upload/', accessToken, {
+      advertiser_id: advertiserId,
+      upload_type:   'UPLOAD_BY_URL',
+      image_url:     imageUrl,
+    });
+    const imgResult = Array.isArray(uploadData) ? uploadData[0] : uploadData;
+    const imageId = imgResult && imgResult.image_id;
+    if (!imageId) throw new Error('TikTok did not return an image_id for the uploaded creative image');
+    console.log('[publish/tiktok] Uploaded image:', imageId);
+
+    // 3. Ad Group -- structure stays 1 ad group (no multi-ad-group control
+    // is offered): pkg.tiktokAds is a single flat creative object with no
+    // per-ad-group content-variation source, the same reasoning Google
+    // Search's publish route uses for not offering multiple ad groups.
+    const scheduleStart = new Date(Date.now() + 5 * 60000).toISOString().slice(0, 19).replace('T', ' ');
+    const adGroupPayload = {
+      advertiser_id:        advertiserId,
+      campaign_id:          String(campaignId),
+      adgroup_name:         campaignName + ' Ad Group',
+      placement_type:       'PLACEMENT_TYPE_AUTOMATIC',
+      optimization_goal:    goalConfig.optimization_goal,
+      billing_event:        goalConfig.billing_event,
+      budget_mode:          'BUDGET_MODE_DAY',
+      budget:               budget,
+      schedule_type:        'SCHEDULE_FROM_NOW',
+      schedule_start_time:  scheduleStart,
+      pacing:                'PACING_MODE_SMOOTH',
+      operation_status:      'DISABLE',
+      identity_id:           identityId,
+      identity_type:         identityType,
+    };
+    // BC_AUTH_TT identities are only reachable through a TikTok Business
+    // Center auth flow Oriven doesn't implement yet (see
+    // _fetchTikTokIdentities) -- if one is ever selected anyway (e.g. a
+    // stale stored selection from before this constraint existed), fail
+    // clearly rather than silently omitting a field TikTok requires for it.
+    if (identityType === 'BC_AUTH_TT') {
+      throw Object.assign(new Error('This TikTok Identity requires Business Center authorization, which Oriven does not support yet — choose a different linked TikTok account Identity in Integrations.'), { status: 400 });
+    }
+    // NOTE: pkg.tiktokAds.targetAudience is freeform AI-generated text
+    // (e.g. "Gen Z and young millennials interested in fitness"), not
+    // structured age/gender/location data -- Oriven's schema has no
+    // structured targeting fields to map it from, so age_groups/gender/
+    // location_ids are deliberately left unset (TikTok applies its own
+    // broad defaults) rather than fabricating a structured interpretation
+    // of free text. This is a known, disclosed limitation, not an oversight.
+    const adGroupData = await _tiktokPost('/adgroup/create/', accessToken, adGroupPayload);
+    const adGroupId = adGroupData && adGroupData.adgroup_id;
+    if (!adGroupId) throw new Error('TikTok did not return an adgroup_id');
+    created.adGroupId = adGroupId;
+    console.log('[publish/tiktok] Created ad group:', adGroupId);
+
+    // 4. Ad
+    const headline = tik.hook || tik.opening3Seconds || campaignName;
+    const adText = (tik.script ? String(tik.script).replace(/\[[^\]]*\]/g, '').replace(/\s+/g, ' ').trim().slice(0, 100) : '') || String(headline).slice(0, 100);
+    const ctaType = campaignGoals.tiktokCtaType(tik.cta);
+    const adPayload = {
+      advertiser_id: advertiserId,
+      adgroup_id:    String(adGroupId),
+      creatives: [{
+        ad_name:          campaignName + ' Ad',
+        ad_format:        'SINGLE_IMAGE',
+        ad_text:          adText,
+        call_to_action:   ctaType,
+        image_ids:        [imageId],
+        landing_page_url: destinationUrl,
+        display_name:     identityName || campaignName,
+        identity_id:       identityId,
+        identity_type:     identityType,
+        operation_status:  'DISABLE',
+      }]
+    };
+    console.log('[publish/tiktok] cta text:', tik.cta, '→', ctaType);
+    const adData = await _tiktokPost('/ad/create/', accessToken, adPayload);
+    const adIds = (adData && adData.ad_ids) || [];
+    created.adId = adIds[0] || null;
+    if (!created.adId) throw new Error('TikTok did not return an ad_id');
+    console.log('[publish/tiktok] Created ad:', created.adId);
+
+    return res.json({
+      ok: true,
+      campaignId: String(campaignId),
+      adGroupId:  String(adGroupId),
+      adId:       String(created.adId),
+      platform:   'tiktok',
+      status:     'paused'
+    });
   } catch (err) {
     console.error('[publish/tiktok] fatal:', err.message, '| tiktok_code:', err.tikTokCode || '--');
+
+    // ── Rollback ─────────────────────────────────────────────────────────
+    // Best-effort, most-specific-first (Ad → AdGroup → Campaign), same
+    // pattern as /api/publish/meta's created.{adIds,adSetIds,campaignId}
+    // rollback. A rollback failure is logged loudly but never masks the
+    // original error returned below.
+    if (rbAccessToken && rbAdvertiserId) {
+      if (created.adId) {
+        try {
+          await _tiktokPost('/ad/status/update/', rbAccessToken, { advertiser_id: rbAdvertiserId, ad_ids: [created.adId], operation_status: 'DELETE' });
+          console.warn('[publish/tiktok] Rollback: deleted ad', created.adId);
+        } catch (rbErr) { console.error('[publish/tiktok] Rollback FAILED for ad', created.adId, '—', rbErr.message); }
+      }
+      if (created.adGroupId) {
+        try {
+          await _tiktokPost('/adgroup/status/update/', rbAccessToken, { advertiser_id: rbAdvertiserId, adgroup_ids: [created.adGroupId], operation_status: 'DELETE' });
+          console.warn('[publish/tiktok] Rollback: deleted ad group', created.adGroupId);
+        } catch (rbErr) { console.error('[publish/tiktok] Rollback FAILED for ad group', created.adGroupId, '—', rbErr.message); }
+      }
+      if (created.campaignId) {
+        try {
+          await _tiktokPost('/campaign/status/update/', rbAccessToken, { advertiser_id: rbAdvertiserId, campaign_ids: [created.campaignId], operation_status: 'DELETE' });
+          console.warn('[publish/tiktok] Rollback: deleted campaign', created.campaignId);
+        } catch (rbErr) { console.error('[publish/tiktok] Rollback FAILED for campaign', created.campaignId, '—', rbErr.message); }
+      }
+    }
+
     return res.status(err.status || 500).json({ ok: false, error: err.message || 'Failed to publish TikTok campaign', tiktok_code: err.tikTokCode || null });
   }
 });
@@ -6092,7 +6400,15 @@ app.get('/api/google-ads/campaigns', async (req, res) => {
 // (run once in the SQL editor before using this integration):
 //   ALTER TABLE integrations
 //     ADD COLUMN IF NOT EXISTS tiktok_display_name TEXT,
-//     ADD COLUMN IF NOT EXISTS tiktok_ads_accounts JSONB DEFAULT '[]';
+//     ADD COLUMN IF NOT EXISTS tiktok_ads_accounts JSONB DEFAULT '[]',
+//     ADD COLUMN IF NOT EXISTS active_identity      JSONB;
+// active_identity stores the TikTok account Identity {identity_id,
+// identity_type, display_name} ads are published under -- required by
+// TikTok's /ad/create/ since TikTok began phasing out Custom Identity
+// (CUSTOMIZED_USER) in favor of linked-account identities starting Jan
+// 2026 (see _fetchTikTokIdentities below). Not set until the user picks
+// one via the Integrations UI (or one is auto-selected when exactly one
+// exists on the advertiser account).
 
 const TIKTOK_APP_ID     = process.env.TIKTOK_APP_ID     || '';
 const TIKTOK_APP_SECRET = process.env.TIKTOK_APP_SECRET || '';
@@ -6175,7 +6491,7 @@ async function _tiktokPost(path, accessToken, body) {
 async function _getTikTokAccess(user) {
   const { data: intg, error } = await supabaseAdmin
     .from('integrations')
-    .select('access_token, token_expiry, active_ad_account')
+    .select('access_token, token_expiry, active_ad_account, active_identity')
     .eq('user_id', user.id)
     .eq('provider', 'tiktok_ads')
     .maybeSingle();
@@ -6189,11 +6505,42 @@ async function _getTikTokAccess(user) {
   if (!active || !active.account_id) {
     const e = new Error('No active TikTok Ads account selected — go to Integrations and choose an account.'); e.status = 400; throw e;
   }
+  const activeIdentity = intg.active_identity || null;
   return {
     accessToken:  intg.access_token,
     advertiserId: String(active.account_id),
-    accountName:  active.account_name || active.account_id
+    accountName:  active.account_name || active.account_id,
+    identityId:   activeIdentity && activeIdentity.identity_id   ? String(activeIdentity.identity_id) : null,
+    identityType: activeIdentity && activeIdentity.identity_type ? activeIdentity.identity_type        : null,
+    identityName: activeIdentity && activeIdentity.display_name  ? activeIdentity.display_name         : null,
   };
+}
+
+// ── Helper: list the TikTok account Identities available to an advertiser.
+// TikTok began phasing out Custom Identity (identity_type CUSTOMIZED_USER,
+// an ad-only display name/avatar with no real linked TikTok account) in
+// January 2026 -- new campaigns increasingly require a real linked TikTok
+// account identity instead. This deliberately does NOT call
+// /identity/create/ (which creates a CUSTOMIZED_USER identity): that path
+// is being deprecated in the exact window this was built, so Oriven only
+// surfaces identities TikTok already reports as available (AUTH_CODE /
+// TT_USER / BC_AUTH_TT -- real linked-account identities), and asks the
+// user to link a TikTok account in TikTok Ads Manager if none exist,
+// rather than building against a capability TikTok itself is removing.
+async function _fetchTikTokIdentities(accessToken, advertiserId) {
+  const data = await _tiktokFetch('/identity/get/', accessToken, {
+    advertiser_id: advertiserId,
+    page: 1,
+    page_size: 50
+  });
+  return ((data && data.identity_list) || []).map(function(idn) {
+    return {
+      identity_id:   String(idn.identity_id),
+      identity_type: idn.identity_type,
+      display_name:  idn.display_name || idn.identity_id,
+      profile_image: idn.profile_image || null,
+    };
+  });
 }
 
 // ── Helper: fetch advertiser list from TikTok ────────────────────────────
@@ -6828,6 +7175,52 @@ app.post('/api/tiktok/active-account', async (req, res) => {
     return res.status(500).json({ error: 'Could not update active account' });
   }
   res.json({ ok: true, active_ad_account });
+});
+
+// GET /api/tiktok/identities -- list TikTok account Identities available on
+// the active advertiser account, for the Identity picker (required before
+// publishing -- see _fetchTikTokIdentities for why Custom Identity creation
+// isn't offered here).
+app.get('/api/tiktok/identities', async (req, res) => {
+  try {
+    const user = await getUserFromToken(req);
+    if (!user) return res.status(401).json({ error: 'Authentication required' });
+
+    const { accessToken, advertiserId, identityId } = await _getTikTokAccess(user);
+    const identities = await _fetchTikTokIdentities(accessToken, advertiserId);
+    res.json({ identities, active_identity_id: identityId || null });
+  } catch (err) {
+    console.error('[tiktok/identities]', err.message);
+    res.status(err.status || 500).json({ error: err.message, tiktok_code: err.tikTokCode || null });
+  }
+});
+
+// POST /api/tiktok/active-identity -- set the TikTok account Identity ads
+// are published under for this user.
+app.post('/api/tiktok/active-identity', async (req, res) => {
+  const user = await getUserFromToken(req);
+  if (!user) return res.status(401).json({ error: 'Authentication required' });
+
+  const { identity_id, identity_type, display_name } = req.body || {};
+  if (!identity_id || !identity_type) return res.status(400).json({ error: 'identity_id and identity_type are required' });
+
+  const active_identity = {
+    identity_id:   String(identity_id),
+    identity_type: String(identity_type),
+    display_name:  String(display_name || identity_id),
+  };
+
+  const { error } = await supabaseAdmin
+    .from('integrations')
+    .update({ active_identity })
+    .eq('user_id', user.id)
+    .eq('provider', 'tiktok_ads');
+
+  if (error) {
+    console.error('[TikTok ActiveIdentity] DB error:', error.message);
+    return res.status(500).json({ error: 'Could not update active identity — has the active_identity column been added to integrations? See migration comment above TIKTOK ADS INTEGRATION.' });
+  }
+  res.json({ ok: true, active_identity });
 });
 
 // GET /api/tiktok/campaigns -- campaign list with status and budget
