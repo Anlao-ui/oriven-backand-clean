@@ -60,6 +60,22 @@ const GOOGLE_GOAL_CONFIG = {
   Awareness: { biddingField: 'targetImpressionShare', biddingValue: { location: 'ANYWHERE_ON_PAGE', locationFractionMicros: 300000 }, label: 'Brand Awareness / Reach' },
 };
 
+// ── Google Ads — Performance Max campaign bidding per goal ──
+// Same reasoning as GOOGLE_DEMANDGEN_GOAL_CONFIG above: PMax has no
+// target-spend/maximize-clicks/target-impression-share strategy either,
+// so all four goals converge on Maximize Conversions. Like Search and
+// Demand Gen before it, this does not require a pre-existing Conversion
+// Action to CREATE the campaign (Maximize Conversions can run without
+// one, it just won't optimize meaningfully until conversions exist) --
+// consistent with the precedent already shipped for those two types,
+// not a new gap introduced here.
+const GOOGLE_PMAX_GOAL_CONFIG = {
+  Sales:     { biddingField: 'maximizeConversions', biddingValue: {}, label: 'Performance Max — Sales' },
+  Leads:     { biddingField: 'maximizeConversions', biddingValue: {}, label: 'Performance Max — Leads' },
+  Traffic:   { biddingField: 'maximizeConversions', biddingValue: {}, label: 'Performance Max — Traffic' },
+  Awareness: { biddingField: 'maximizeConversions', biddingValue: {}, label: 'Performance Max — Awareness' },
+};
+
 // ── Meta Ads — ad-set optimization per goal ──
 // A Meta Pixel is only genuinely required by Meta's API for
 // OFFSITE_CONVERSIONS optimization (tracking a conversion on the
@@ -74,6 +90,30 @@ const META_GOAL_CONFIG = {
   Leads:     { objective: 'OUTCOME_LEADS',     optimization_goal: 'OFFSITE_CONVERSIONS', billing_event: 'IMPRESSIONS', needsPixel: true,  customEventType: 'LEAD',     label: 'Website Leads' },
   Traffic:   { objective: 'OUTCOME_TRAFFIC',   optimization_goal: 'LINK_CLICKS',         billing_event: 'IMPRESSIONS', needsPixel: false, label: 'Traffic' },
   Awareness: { objective: 'OUTCOME_AWARENESS', optimization_goal: 'REACH',               billing_event: 'IMPRESSIONS', needsPixel: false, label: 'Awareness' },
+  // Final Polish — platform-specific objectives (Part 13/14): Meta's real,
+  // current ODAX objective set has 6 objectives, not 4. These two are
+  // additional selectable values (via pkg.metaAds.objective, the same
+  // override-field pattern TikTok already used) layered on TOP of the
+  // universal 4-goal system above, not replacing it -- Oriven's AI
+  // generation/KPI/Autopilot logic (campaignGoals.GOALS) still only knows
+  // Sales/Leads/Traffic/Awareness, so these two map their AI-facing
+  // "closest universal goal" via aiGoal below for that purpose.
+  Engagement:   { objective: 'OUTCOME_ENGAGEMENT',   optimization_goal: 'POST_ENGAGEMENT', billing_event: 'IMPRESSIONS', needsPixel: false, label: 'Engagement', aiGoal: 'Traffic' },
+  AppPromotion: { objective: 'OUTCOME_APP_PROMOTION', optimization_goal: 'APP_INSTALLS',   billing_event: 'IMPRESSIONS', needsPixel: false, needsApp: true, label: 'App Promotion', aiGoal: 'Traffic' },
+};
+
+// ── Meta Ads — maps a human-readable objective label (as chosen in the
+// Launch UI) to the META_GOAL_CONFIG key that actually drives publish.
+// Mirrors TikTok's already-proven pkg.tiktokAds.objective override pattern
+// (see server.js's LEGACY_OBJECTIVE_MAP) rather than inventing a second
+// mechanism -- pkg.metaAds.objective is read first, falls back to the
+// universal 4-goal mapping when unset (older packages / AI-generated
+// default). Current, real ODAX objectives per Meta's Marketing API
+// (legacy objectives like LINK_CLICKS/POST_ENGAGEMENT/APP_INSTALLS are
+// rejected by the API for new campaigns as of 2024+; not used here).
+const META_OBJECTIVE_MAP = {
+  awareness: 'Awareness', traffic: 'Traffic', engagement: 'Engagement',
+  leads: 'Leads', app_promotion: 'AppPromotion', sales: 'Sales',
 };
 
 // ── TikTok Ads — campaign objective_type + ad-group optimization_goal/
@@ -92,6 +132,28 @@ const TIKTOK_GOAL_CONFIG = {
   Leads:     { objective_type: 'LEAD_GENERATION', optimization_goal: 'LEAD_GENERATION', billing_event: 'OCPM', label: 'Lead Generation' },
   Traffic:   { objective_type: 'TRAFFIC',         optimization_goal: 'CLICK',           billing_event: 'CPC',  label: 'Traffic' },
   Awareness: { objective_type: 'REACH',           optimization_goal: 'REACH',           billing_event: 'CPM',  label: 'Reach / Awareness' },
+};
+
+// ── TikTok Ads — platform-specific objectives beyond the universal 4
+// (Part 15/16): TikTok's real, current objective set also includes Video
+// Views and App Promotion as distinct top-level objectives, each with
+// their OWN optimization_goal/billing_event pairing at the ad-group level
+// -- previously the publish route resolved objective_type for these via
+// LEGACY_OBJECTIVE_MAP but still paired them with whatever universal
+// goal's optimization_goal/billing_event happened to be selected, which
+// is very likely an invalid combination on TikTok's side (e.g. a Video
+// Views campaign paired with REACH/CPM meant for Awareness). This map
+// supplies the full, matching triple so campaign and ad group agree.
+// Community Interaction (follows/profile visits) is deliberately NOT
+// included here: TikTok's current API objective_type enum for it could
+// not be confirmed against a live account or authoritative source this
+// session (the docs portal is JS-rendered, not fetchable headlessly) --
+// exposing it with a guessed enum risks a guaranteed-to-fail publish
+// call, so the Launch UI marks it "requires additional verification"
+// instead of offering it as a real, publishable option.
+const TIKTOK_EXTENDED_OBJECTIVES = {
+  VideoViews:   { objective_type: 'VIDEO_VIEWS',   optimization_goal: 'VIDEO_VIEW',      billing_event: 'CPV',  label: 'Video Views', aiGoal: 'Awareness' },
+  AppPromotion: { objective_type: 'APP_PROMOTION', optimization_goal: 'IN_APP_EVENT',    billing_event: 'OCPM', label: 'App Promotion', aiGoal: 'Traffic', needsApp: true },
 };
 
 // ── TikTok Ads — map Oriven's freeform AI-generated CTA text to one of
@@ -158,6 +220,45 @@ const GOAL_AUTOPILOT_HINTS = {
   Leads:     { trigger_metric: 'cpa',  trigger_operator: '>', suggestedValue: 50, action_type: 'pause_campaign',  hint: 'Pause campaigns with high cost per lead.' }, // trigger_metric constrained to AUTOPILOT_RULE_METRICS (no native cpl entry today) — cpa used as the closest available proxy
 };
 
+// ── Platform-specific objective mapping functions (Part 17) — one per
+// platform, each aware of that platform's own real objective model,
+// instead of one universal getCampaignGoals() returning the same 4-item
+// list for every platform. Each accepts the universal `goal` (always
+// present, drives AI generation/KPIs/Autopilot) plus an optional
+// `platformObjective` human label (what the user actually picked in the
+// platform-specific Launch step, e.g. "Engagement" or "Video Views") --
+// when given and recognized, it takes priority over the universal goal
+// for the platform config actually used at publish time.
+function _slug(s) { return String(s || '').trim().toLowerCase().replace(/\s+/g, '_'); }
+
+function getMetaObjective(goal, platformObjective) {
+  const key = platformObjective && META_OBJECTIVE_MAP[_slug(platformObjective)];
+  return META_GOAL_CONFIG[key || normalizeGoal(goal)];
+}
+
+function getTikTokObjective(goal, platformObjective) {
+  const slug = _slug(platformObjective);
+  if (slug === 'video_views') return TIKTOK_EXTENDED_OBJECTIVES.VideoViews;
+  if (slug === 'app_promotion' || slug === 'app_install') return TIKTOK_EXTENDED_OBJECTIVES.AppPromotion;
+  return TIKTOK_GOAL_CONFIG[normalizeGoal(goal)];
+}
+
+// Real Google campaign types recommended per goal (Part 10/11) -- only
+// types this pipeline can genuinely publish today (SEARCH, DEMAND_GEN,
+// PERFORMANCE_MAX; see server.js's GOOGLE_BLOCKED_CAMPAIGN_TYPES for
+// SHOPPING/VIDEO/MAPS, which stay excluded from "recommended" everywhere
+// since they cannot currently be published regardless of goal). First
+// entry is the suggested default for that goal.
+const GOOGLE_GOAL_CAMPAIGN_TYPES = {
+  Sales:     ['PERFORMANCE_MAX', 'SEARCH', 'DEMAND_GEN'],
+  Leads:     ['SEARCH', 'PERFORMANCE_MAX', 'DEMAND_GEN'],
+  Traffic:   ['SEARCH', 'DEMAND_GEN'],
+  Awareness: ['DEMAND_GEN', 'SEARCH'],
+};
+function getGoogleCampaignOptions(goal) {
+  return GOOGLE_GOAL_CAMPAIGN_TYPES[normalizeGoal(goal)] || GOOGLE_GOAL_CAMPAIGN_TYPES.Sales;
+}
+
 module.exports = {
   GOALS,
   DEFAULT_GOAL,
@@ -166,8 +267,15 @@ module.exports = {
   GOAL_CREATIVE_DIRECTION,
   GOOGLE_GOAL_CONFIG,
   GOOGLE_DEMANDGEN_GOAL_CONFIG,
+  GOOGLE_PMAX_GOAL_CONFIG,
+  GOOGLE_GOAL_CAMPAIGN_TYPES,
+  getGoogleCampaignOptions,
   META_GOAL_CONFIG,
+  META_OBJECTIVE_MAP,
+  getMetaObjective,
   TIKTOK_GOAL_CONFIG,
+  TIKTOK_EXTENDED_OBJECTIVES,
+  getTikTokObjective,
   TIKTOK_CTA_MAP,
   tiktokCtaType,
   GOAL_KPIS,

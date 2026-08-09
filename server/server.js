@@ -4515,9 +4515,22 @@ function _buildCampaignBrandSection(bc) {
 // /api/creative/campaign-suite route (below) can call it once per platform
 // in parallel, without duplicating this prompt-building logic. Same
 // schemas, same rules, same behavior as the original inline version.
-async function _generateAdPackage({ user, product, goal, platform, brandCore, productImages }) {
+async function _generateAdPackage({ user, product, goal, platform, brandCore, productImages, platformObjective, campaignType }) {
   goal = campaignGoals.normalizeGoal(goal);
   const goalSection = `\n\n${campaignGoals.GOAL_CREATIVE_DIRECTION[goal]}`;
+  // Final Polish (Part 19) — the platform-specific objective/campaign type
+  // picked in Launch (beyond the universal 4-goal system) steers copy tone
+  // too, not just the publish-time API mapping: an "Engagement" Meta
+  // campaign wants different CTA language than a generic "Traffic" one,
+  // and a Performance Max campaign needs a business-name-appropriate,
+  // asset-diverse tone Search copy doesn't.
+  let objectiveSection = '';
+  if (platformObjective) {
+    objectiveSection = `\n\nPLATFORM OBJECTIVE: This is specifically a "${platformObjective}" campaign on ${platform === 'meta' ? 'Meta Ads' : platform === 'tiktok' ? 'TikTok Ads' : 'Google Ads'} (a real, platform-specific objective, more specific than the general "${goal}" goal above). Adapt CTA language, hook, and creative direction to genuinely fit "${platformObjective}", not just "${goal}".`;
+  }
+  if (platform === 'google' && campaignType && campaignType !== 'SEARCH') {
+    objectiveSection += `\n\nGOOGLE CAMPAIGN TYPE: This is a ${campaignType.replace(/_/g,' ')} campaign, not Search. ${campaignType === 'PERFORMANCE_MAX' ? 'Write a distinct LONG_HEADLINE-appropriate fuller line in the first description, since Performance Max reuses description copy for its long headline slot.' : campaignType === 'DEMAND_GEN' ? 'Write feed-native, visual-first copy suited to Discover/Gmail/YouTube placements, not search-intent keyword copy.' : ''}`;
+  }
   const brandSection = _buildCampaignBrandSection(brandCore);
   const _bizCtx = user ? await _gatherBusinessContext(user.id).catch(() => null) : null;
   const businessSection = _bizCtx ? `\n\nBUSINESS KNOWLEDGE (real, stored data about this business — use it instead of generic copy; if competitor info is present, use it only for positioning, never copy competitor content):\n${_bizCtx.text}` : '';
@@ -4607,7 +4620,7 @@ Platform rules:
 ${platformRules}
 - All copy must be specific to the actual product — no generic placeholders
 - Performance scores are integers 0-100
-- conversionPotential: "High", "Medium", or "Low"${goalSection}${brandSection}${businessSection}${productImageNote}`;
+- conversionPotential: "High", "Medium", or "Low"${goalSection}${objectiveSection}${brandSection}${businessSection}${productImageNote}`;
 
   const userMsg = brandCore && brandCore.name
     ? `Brand: ${brandCore.name}\nProduct/Service: ${product}\nGoal: ${goal}\nPlatform: ${platform}`
@@ -4630,6 +4643,21 @@ ${platformRules}
   // goal (per spec) — this line is what makes that a guarantee, not a hope.
   if (!pkg.strategy) pkg.strategy = {};
   pkg.strategy.goal = goal;
+  // Same guarantee as pkg.strategy.goal above, extended to the
+  // platform-specific objective/campaign type (Part 19/22): the AI only
+  // ever sees these as prompt context, never as an authoritative field to
+  // echo back, so the actual user selection is force-written onto the
+  // package here -- this is what makes "what the user selected" equal
+  // "what Oriven sends" all the way to the publish payload, not just an
+  // AI-generated approximation of it.
+  if (platformObjective) {
+    if (platform === 'meta') { pkg.metaAds = pkg.metaAds || {}; pkg.metaAds.objective = platformObjective; }
+    else if (platform === 'tiktok') { pkg.tiktokAds = pkg.tiktokAds || {}; pkg.tiktokAds.objective = platformObjective; }
+  }
+  if (platform === 'google' && campaignType) {
+    pkg.googleAds = pkg.googleAds || {};
+    pkg.googleAds.campaignType = campaignType;
+  }
   _recordCreativeAsset(user && user.id, { kind: 'ad', platform, product_name: String(product).slice(0, 80), title: pkg.campaignName || product, content: pkg, source_route: '/api/ai/create-ad' });
   return pkg;
 }
@@ -4637,7 +4665,7 @@ ${platformRules}
 app.post('/api/ai/create-ad', requireSubOrOnboardingGen, async (req, res) => {
   console.log('[create-ad] ← route handler entered');
   console.log('[create-ad] req.body keys:', Object.keys(req.body || {}));
-  const { product, goal, platforms, mode, brandCore, productImages } = req.body;
+  const { product, goal, platforms, mode, brandCore, productImages, platformObjective, campaignType } = req.body;
   console.log('[create-ad] product:', (product || '').slice(0, 60), '| mode:', mode, '| platform:', req.body.platform, '| platforms:', platforms);
   if (!product) {
     console.log('[create-ad] 400 — product missing');
@@ -4713,7 +4741,7 @@ Reply ONLY with valid JSON array (no markdown, no extra text):
   // logic, now shared with /api/creative/campaign-suite.
   console.log('[create-ad] → mode=full branch — delegating to _generateAdPackage for platform:', platform);
   try {
-    const pkg = await _generateAdPackage({ user: req.user, product, goal, platform, brandCore, productImages });
+    const pkg = await _generateAdPackage({ user: req.user, product, goal, platform, brandCore, productImages, platformObjective, campaignType });
     console.log(`[create-ad] Package ready — keys: ${Object.keys(pkg).join(', ')} | visualConcepts: ${(pkg.visualConcepts||[]).length}`);
     _consumeOnboardingFreeGen(req);
     if (reservation) creditManager.finalizeCreditLog(reservation, 'campaign_generation', { provider: 'aiml', success: true, route: req.path }).catch(() => {});
@@ -4973,6 +5001,38 @@ app.post('/api/publish/google', requireSubscription, async (req, res) => {
       return d;
     }
 
+    // Combined batch mutate (customers/{id}/googleAds:mutate) -- unlike
+    // _gadsMutate above (one resource type per call, `results[]`), this
+    // hits the single cross-resource-type endpoint that accepts operations
+    // for DIFFERENT resource types in one atomic request, each keyed by
+    // "{resource}Operation" (campaignBudgetOperation, campaignOperation,
+    // assetOperation, assetGroupOperation, assetGroupAssetOperation), where
+    // later operations can reference earlier ones by temporary negative
+    // resource names (e.g. 'customers/123/campaignBudgets/-1'). Required
+    // for Performance Max: Google's own documented guidance is that
+    // Campaign + AssetGroup + Assets + AssetGroupAssets must be created
+    // together in one Mutate request "so they all complete successfully or
+    // fail entirely, leaving no orphaned entities" -- which also means this
+    // call is atomic by Google's own design, unlike the sequential
+    // multi-call flows Search/Demand Gen use (no partial-failure state is
+    // possible to roll back; either everything below exists or nothing does).
+    // Response shape is `mutateOperationResponses[]` (NOT `results[]` like
+    // _gadsMutate), one entry per operation in the same order, each keyed
+    // by the matching "{resource}Result" field.
+    async function _gadsBatchMutate(mutateOperations) {
+      const url = 'https://googleads.googleapis.com/v24/customers/' + customerId + '/googleAds:mutate';
+      const headers = {
+        'Authorization':   'Bearer ' + accessToken,
+        'developer-token': process.env.GOOGLE_ADS_DEVELOPER_TOKEN || '',
+        'Content-Type':    'application/json',
+      };
+      if (loginCustomerId && loginCustomerId !== customerId) headers['login-customer-id'] = loginCustomerId;
+      const r = await fetch(url, { method: 'POST', headers, body: JSON.stringify({ mutateOperations }) });
+      const d = await r.json();
+      if (!r.ok) throw Object.assign(new Error(JSON.stringify(d.error || d)), { status: r.status });
+      return d;
+    }
+
     // ── Campaign-type dispatch ──────────────────────────────────────────
     // pkg.googleAds.campaignType drives which publisher logic runs.
     // SEARCH (default, for packages created before this field existed) is
@@ -4983,13 +5043,6 @@ app.post('/api/publish/google', requireSubscription, async (req, res) => {
     //   SHOPPING          — needs a linked Google Merchant Center account +
     //                        product feed; no Merchant Center OAuth scope
     //                        or integration exists anywhere in Oriven.
-    //   PERFORMANCE_MAX   — Google requires a minimum asset set including a
-    //                        LOGO asset plus separate SQUARE_MARKETING_IMAGE
-    //                        and MARKETING_IMAGE assets (distinct aspect
-    //                        ratios); Oriven's business profile has no logo
-    //                        field and generates one untyped image per
-    //                        visual concept, not aspect-ratio-differentiated
-    //                        variants -- the minimum can't be met honestly.
     //   VIDEO (YouTube)   — Video/TrueView campaigns reference an asset
     //                        that must already exist as a real YouTube
     //                        video (a youtubeVideo asset pointing at a
@@ -5006,7 +5059,6 @@ app.post('/api/publish/google', requireSubscription, async (req, res) => {
 
     const GOOGLE_BLOCKED_CAMPAIGN_TYPES = {
       SHOPPING: 'Google Shopping requires a linked Google Merchant Center account and product feed — Oriven does not have a Merchant Center integration yet. Publish this campaign as Search or Demand Gen instead.',
-      PERFORMANCE_MAX: 'Performance Max requires a Logo asset plus separate square and landscape Marketing Image assets — Oriven\'s generated creative today produces a single untyped image with no logo, so the minimum asset requirements can\'t be met. Publish as Search or Demand Gen instead.',
       VIDEO: 'YouTube Video campaigns require the video to already be uploaded to a YouTube channel — Oriven generates video creative but has no YouTube upload integration, so there is no real YouTube video ID to reference. Publish as Search or Demand Gen instead.',
       MAPS: 'Local/Maps campaigns require a verified Google Business Profile location feed — Oriven does not collect or store business location data anywhere today. Publish as Search or Demand Gen instead.',
     };
@@ -5113,7 +5165,193 @@ app.post('/api/publish/google', requireSubscription, async (req, res) => {
       }]);
 
       console.log('[publish/google] Demand Gen campaign created:', dgCampaignId, 'for user', user.id);
+      _logCampaignEvent(user, { platform: 'google', campaignName, title: `Published "${campaignName}" to Google Ads (Demand Gen)`, detail: 'Campaign created, paused, ready for review.', severity: 'low' });
       return res.json({ ok: true, campaignId: dgCampaignId, campaignResourceName: dgCampaignResourceName, platform: 'google', campaignType: 'DEMAND_GEN', status: 'paused' });
+    }
+
+    if (campaignType === 'PERFORMANCE_MAX') {
+      // Performance Max is NOT Campaign → AdGroup → Ad -- it's Campaign →
+      // AssetGroup → Assets → AssetGroupAsset relationships, built here as
+      // ONE atomic _gadsBatchMutate call per Google's own documented
+      // best practice (see _gadsBatchMutate above). Every asset used below
+      // is real: headlines/descriptions/business name/final URL from the
+      // existing package and business profile (same sources Search/Demand
+      // Gen already use), a square marketing image reused from the
+      // existing AI-generated visual concept, a landscape marketing image
+      // generated fresh at the correct aspect ratio (never a stretched
+      // copy of the square one), and a logo read from
+      // business_profile.logo_url -- a real URL the business owner
+      // provided or generated via /api/generate-logo, never a marketing
+      // image relabeled as a logo. If any of these is missing, this
+      // returns a specific, actionable 400 rather than sending Google Ads
+      // a request that's guaranteed to fail the asset-group minimums.
+      const pmaxGoalConfig = campaignGoals.GOOGLE_PMAX_GOAL_CONFIG[goal];
+
+      const { data: pmBizProfile } = await supabaseAdmin.from('business_profile').select('company_name, logo_url').eq('user_id', user.id).maybeSingle();
+      const pmBusinessName = (pmBizProfile && pmBizProfile.company_name) ? String(pmBizProfile.company_name).slice(0, 25) : null;
+      const pmLogoUrl = (pmBizProfile && pmBizProfile.logo_url) ? pmBizProfile.logo_url : null;
+      if (!pmBusinessName) {
+        return res.status(400).json({ ok: false, error: 'Add a Company Name in your Business Profile before publishing a Performance Max campaign.' });
+      }
+      if (!pmLogoUrl) {
+        return res.status(400).json({ ok: false, error: 'Add a Logo in your Business Profile before publishing a Performance Max campaign — Performance Max requires a real logo asset.' });
+      }
+
+      const pmVisualConcepts = pkg.visualConcepts || [];
+      const pmSquareImageUrl = g.imageUrl || (pmVisualConcepts.find(vc => vc && vc.generatedImageUrl) || {}).generatedImageUrl || null;
+      if (!pmSquareImageUrl) {
+        return res.status(400).json({ ok: false, error: 'Add an image before publishing a Performance Max campaign.' });
+      }
+      // Landscape marketing image: a genuinely different, wider-aspect
+      // generation -- never the square image stretched. Generated on the
+      // Edit stage via /api/generate-image at size 1792x1024 (16:9, the
+      // closest AIML-supported ratio to Google's recommended 1.91:1 for
+      // MARKETING_IMAGE) and stored in pkg.googleAds.pmaxLandscapeImageUrl,
+      // the one PMax-specific field this package adds (Part 12: only added
+      // because nothing existing already serves this purpose).
+      const pmLandscapeImageUrl = g.pmaxLandscapeImageUrl || null;
+      if (!pmLandscapeImageUrl) {
+        return res.status(400).json({ ok: false, error: 'Generate a landscape marketing image before publishing a Performance Max campaign (Search\'s square image alone is not a valid PMax marketing image).' });
+      }
+
+      const pmHeadlines = (g.headlines || []).slice(0, 5).map(h => String(h).slice(0, 30)).filter(Boolean);
+      const pmDescriptions = (g.descriptions || []).slice(0, 5).map(d => String(d).slice(0, 90)).filter(Boolean);
+      if (pmHeadlines.length < 3) {
+        return res.status(400).json({ ok: false, error: 'At least 3 headlines are required to publish a Performance Max campaign.' });
+      }
+      if (pmDescriptions.length < 2) {
+        return res.status(400).json({ ok: false, error: 'At least 2 descriptions are required to publish a Performance Max campaign.' });
+      }
+      // Long headline (up to 90 chars, distinct from the ≤30-char regular
+      // headlines): derived from real existing copy, not invented text --
+      // an explicit pkg.googleAds.longHeadline override if the user ever
+      // sets one, otherwise the fullest existing description (already real
+      // AI-generated marketing copy in the package, just reused in the
+      // slot Google requires it for) truncated to Google's limit.
+      const pmLongHeadline = String(g.longHeadline || pmDescriptions[0] || pmHeadlines[0] || campaignName).slice(0, 90);
+
+      const pmFinalUrl = (function() {
+        const u = (s.landingPageUrl || g.finalUrl || pkg.websiteUrl || s.websiteUrl || '').trim();
+        return u || 'https://example.com';
+      })();
+
+      // Fetch + base64-encode all three images up front -- Google Ads
+      // assets:mutate takes raw bytes, not hosted URLs (same as Demand
+      // Gen's image upload above).
+      async function _pmFetchB64(url, label) {
+        const r = await fetch(url);
+        if (!r.ok) throw new Error('Could not fetch the ' + label + ' image for upload to Google Ads');
+        return Buffer.from(await r.arrayBuffer()).toString('base64');
+      }
+      const [pmSquareB64, pmLandscapeB64, pmLogoB64] = await Promise.all([
+        _pmFetchB64(pmSquareImageUrl, 'square marketing'),
+        _pmFetchB64(pmLandscapeImageUrl, 'landscape marketing'),
+        _pmFetchB64(pmLogoUrl, 'logo'),
+      ]);
+
+      const cid = customerId;
+      const rn = {
+        budget:    'customers/' + cid + '/campaignBudgets/-1',
+        campaign:  'customers/' + cid + '/campaigns/-2',
+        assetGroup:'customers/' + cid + '/assetGroups/-3',
+      };
+      let nextAssetTmpId = 10;
+      const ops = [];
+
+      ops.push({ campaignBudgetOperation: { create: {
+        resourceName: rn.budget, name: campaignName + ' Budget',
+        amountMicros: (function(){
+          var budgetRec = s.budgetRecommendation;
+          var amt = (typeof budgetRec === 'object' && budgetRec ? (budgetRec.amount || budgetRec.daily || 10) : (Number(budgetRec) || 10));
+          return String(Math.round(amt * 1e6));
+        })(),
+        deliveryMethod: 'STANDARD',
+      } } });
+
+      ops.push({ campaignOperation: { create: {
+        resourceName: rn.campaign, name: campaignName,
+        advertisingChannelType: 'PERFORMANCE_MAX', status: 'PAUSED',
+        campaignBudget: rn.budget,
+        [pmaxGoalConfig.biddingField]: pmaxGoalConfig.biddingValue,
+      } } });
+
+      ops.push({ assetGroupOperation: { create: {
+        resourceName: rn.assetGroup, name: campaignName + ' Asset Group',
+        campaign: rn.campaign, finalUrls: [pmFinalUrl], status: 'ENABLED',
+      } } });
+
+      // Text assets: headlines, long headline, descriptions, business name.
+      function _pmAddTextAsset(text, fieldType) {
+        const assetRn = 'customers/' + cid + '/assets/-' + (nextAssetTmpId++);
+        ops.push({ assetOperation: { create: { resourceName: assetRn, textAsset: { text } } } });
+        ops.push({ assetGroupAssetOperation: { create: { assetGroup: rn.assetGroup, asset: assetRn, fieldType } } });
+      }
+      pmHeadlines.forEach(h => _pmAddTextAsset(h, 'HEADLINE'));
+      _pmAddTextAsset(pmLongHeadline, 'LONG_HEADLINE');
+      pmDescriptions.forEach(d => _pmAddTextAsset(d, 'DESCRIPTION'));
+      _pmAddTextAsset(pmBusinessName, 'BUSINESS_NAME');
+
+      // Image assets: square + landscape marketing images, logo.
+      function _pmAddImageAsset(b64, name, fieldType) {
+        const assetRn = 'customers/' + cid + '/assets/-' + (nextAssetTmpId++);
+        ops.push({ assetOperation: { create: { resourceName: assetRn, name, imageAsset: { data: b64 } } } });
+        ops.push({ assetGroupAssetOperation: { create: { assetGroup: rn.assetGroup, asset: assetRn, fieldType } } });
+      }
+      _pmAddImageAsset(pmSquareB64,    campaignName + ' Square Image',    'SQUARE_MARKETING_IMAGE');
+      _pmAddImageAsset(pmLandscapeB64, campaignName + ' Marketing Image', 'MARKETING_IMAGE');
+      _pmAddImageAsset(pmLogoB64,      campaignName + ' Logo',            'LOGO');
+
+      console.log('[publish/google] Performance Max batch mutate:', ops.length, 'operations');
+      const pmRes = await _gadsBatchMutate(ops);
+      const pmResponses = pmRes.mutateOperationResponses || [];
+
+      function _pmFindResult(key) {
+        const found = pmResponses.find(r => r && r[key]);
+        return found ? found[key].resourceName : null;
+      }
+      const pmCampaignResourceName = _pmFindResult('campaignResult') || rn.campaign;
+      const pmAssetGroupResourceName = _pmFindResult('assetGroupResult') || rn.assetGroup;
+      const pmCampaignId = pmCampaignResourceName.split('/').pop();
+      const pmAssetGroupId = pmAssetGroupResourceName.split('/').pop();
+      const pmAssetResourceNames = pmResponses.filter(r => r && r.assetResult).map(r => r.assetResult.resourceName);
+      createdCampaignResourceName = pmCampaignResourceName; // batch is atomic (see _gadsBatchMutate) -- reaching here means everything above was created together; reuses this route's existing campaign-level rollback only as a defensive fallback
+
+      // ── Read-back verification (best-effort, non-fatal) ──────────────
+      // The strongest acceptance test per the spec: query the just-created
+      // campaign + asset group + assets back from Google Ads and confirm
+      // they're really there with the right type/URLs, rather than trusting
+      // HTTP 200 alone. A failure here does NOT fail the publish (the
+      // batch mutate already succeeded) -- it's attached to the response
+      // as `verification` so the caller/report can see whether it ran.
+      let pmVerification = null;
+      try {
+        const verifyResult = await _gadsQuery(accessToken, customerId,
+          `SELECT campaign.id, campaign.name, campaign.advertising_channel_type, campaign.status, ` +
+          `asset_group.id, asset_group.name, asset_group.final_urls ` +
+          `FROM asset_group WHERE campaign.id = ${pmCampaignId}`,
+          loginCustomerId);
+        const row = (verifyResult && verifyResult[0]) || null;
+        pmVerification = row ? {
+          verified: true,
+          campaignType: row.campaign && row.campaign.advertisingChannelType,
+          campaignStatus: row.campaign && row.campaign.status,
+          assetGroupName: row.assetGroup && row.assetGroup.name,
+          finalUrls: row.assetGroup && row.assetGroup.finalUrls,
+        } : { verified: false, reason: 'No asset_group row returned yet — Google Ads indexing can lag briefly after creation.' };
+      } catch (verifyErr) {
+        pmVerification = { verified: false, reason: verifyErr.message };
+      }
+      console.log('[publish/google] Performance Max read-back verification:', JSON.stringify(pmVerification));
+
+      console.log('[publish/google] Performance Max campaign created:', pmCampaignId, 'asset group:', pmAssetGroupId, 'for user', user.id);
+      _logCampaignEvent(user, { platform: 'google', campaignName, title: `Published "${campaignName}" to Google Ads (Performance Max)`, detail: 'Campaign and Asset Group created, paused, ready for review.', severity: 'low' });
+      return res.json({
+        ok: true, campaignId: pmCampaignId, campaignResourceName: pmCampaignResourceName,
+        assetGroupId: pmAssetGroupId, assetGroupResourceName: pmAssetGroupResourceName,
+        assetIds: pmAssetResourceNames.map(function(resName) { return resName.split('/').pop(); }),
+        platform: 'google', campaignType: 'PERFORMANCE_MAX', status: 'paused',
+        verification: pmVerification,
+      });
     }
 
     // ── SEARCH (default) — unchanged from the pre-existing pipeline ─────
@@ -5189,9 +5427,11 @@ app.post('/api/publish/google', requireSubscription, async (req, res) => {
     }
 
     console.log('[publish/google] Campaign created:', campaignId, 'for user', user.id);
+    _logCampaignEvent(user, { platform: 'google', campaignName, title: `Published "${campaignName}" to Google Ads (Search)`, detail: 'Campaign created, paused, ready for review.', severity: 'low' });
     return res.json({ ok: true, campaignId, campaignResourceName, platform: 'google', status: 'paused' });
   } catch (err) {
     console.error('[publish/google] error:', err.message);
+    _logCampaignEvent(typeof user !== 'undefined' ? user : null, { platform: 'google', title: 'Google Ads publish failed', detail: err.message, severity: 'high' });
 
     // ── Rollback ─────────────────────────────────────────────────────────
     // Best-effort: if the Campaign was already created before the failure
@@ -5347,10 +5587,16 @@ app.post('/api/publish/meta', requireSubscription, async (req, res) => {
     // (campaignGoals.META_GOAL_CONFIG) also used by AI generation and the
     // other two platforms' publish routes -- see that module for why
     // Sales/Leads need a pixel and Traffic/Awareness never do.
+    // m.objective (Final Polish, Part 13/14): an explicit platform-specific
+    // objective picked in the Launch flow (e.g. "Engagement", "App
+    // Promotion") -- real, current Meta ODAX objectives beyond the
+    // universal 4-goal set, resolved via campaignGoals.getMetaObjective
+    // (mirrors TikTok's tik.objective override, same pattern, one shared
+    // resolver per platform rather than scattered objective strings).
     const goal = campaignGoals.normalizeGoal(s.goal);
-    const adSetConfig = campaignGoals.META_GOAL_CONFIG[goal];
+    const adSetConfig = campaignGoals.getMetaObjective(s.goal, m.objective);
     const objective = adSetConfig.objective;
-    console.log('[publish/meta] goal:', goal, '| objective:', objective, '| optimization_goal:', adSetConfig.optimization_goal, '| needsPixel:', adSetConfig.needsPixel);
+    console.log('[publish/meta] goal:', goal, '| platformObjective:', m.objective || '(none)', '| resolved objective:', objective, '| optimization_goal:', adSetConfig.optimization_goal, '| needsPixel:', adSetConfig.needsPixel);
 
     // accountId from _getMetaAccess is already normalised to exactly one 'act_' prefix.
     console.log('[publish/meta] account:', accountId, '| page:', pageId);
@@ -5453,6 +5699,7 @@ app.post('/api/publish/meta', requireSubscription, async (req, res) => {
     // Only reached once every requested Ad Set, Creative and Ad exists --
     // this is what "published successfully" is gated on (PHASE 12).
     console.log('[publish/meta] created campaign:', campaign.id, '| ad sets:', adSetsOut.length, '| creatives:', creativesOut.length, '| ads:', adsOut.length);
+    _logCampaignEvent(user, { platform: 'meta', campaignName, title: `Published "${campaignName}" to Meta Ads`, detail: `${adSetsOut.length} ad set(s), ${adsOut.length} ad(s) created, paused, ready for review.`, severity: 'low' });
     return res.json({
       ok: true,
       campaignId: campaign.id,
@@ -5465,6 +5712,7 @@ app.post('/api/publish/meta', requireSubscription, async (req, res) => {
     });
   } catch (err) {
     console.error('[publish/meta] fatal:', err.message, '| code:', err.metaCode || '—', '| subcode:', err.metaSubcode || '—');
+    _logCampaignEvent(typeof user !== 'undefined' ? user : null, { platform: 'meta', title: 'Meta Ads publish failed', detail: err.message, severity: 'high' });
 
     // ── Rollback (STEP 5) ────────────────────────────────────────────────
     // Best-effort, reverse creation order (Ads -> Creatives -> Ad Sets ->
@@ -5559,27 +5807,34 @@ app.post('/api/publish/tiktok', requireSubscription, async (req, res) => {
       return u;
     })();
 
-    // Objective resolution: the campaign's own goal (one of Oriven's 4
-    // universal goals, campaignGoals.TIKTOK_GOAL_CONFIG) is the primary
-    // source of truth. tik.objective is a legacy freeform field (older
-    // packages / future finer-grained overrides, e.g. 'video_views' or
-    // 'app_install', which aren't part of the 4-goal system) and is only
-    // consulted when it names something the goal mapping can't express.
+    // Objective resolution (Final Polish, Part 15/16): tik.objective is now
+    // a first-class platform-objective override, not just a legacy escape
+    // hatch -- campaignGoals.getTikTokObjective returns the FULL config
+    // (objective_type + optimization_goal + billing_event together) for
+    // TikTok's two additional real objectives (Video Views, App Promotion)
+    // so the ad group's pairing actually matches the campaign's objective
+    // instead of inheriting whatever the universal goal's pairing happens
+    // to be (previously only objective_type was overridden, which could
+    // pair e.g. a Video Views campaign with an Awareness-goal ad group).
+    // Older freeform values not in that extended set (awareness/traffic/
+    // engagement/conversions/product_sales/app_install) still resolve
+    // objective_type via this legacy map, unchanged from before.
     const LEGACY_OBJECTIVE_MAP = {
       awareness:       'REACH',
       traffic:         'TRAFFIC',
       app_install:     'APP_INSTALL',
-      video_views:     'VIDEO_VIEWS',
       lead_generation: 'LEAD_GENERATION',
       conversions:     'CONVERSIONS',
       engagement:      'ENGAGEMENT',
       product_sales:   'PRODUCT_SALES'
     };
     const goal = campaignGoals.normalizeGoal(s.goal);
-    const goalConfig = campaignGoals.TIKTOK_GOAL_CONFIG[goal];
     const rawLegacyObjective = tik.objective ? String(tik.objective).toLowerCase().replace(/\s+/g, '_') : null;
-    const objective = (rawLegacyObjective && LEGACY_OBJECTIVE_MAP[rawLegacyObjective]) || goalConfig.objective_type;
-    console.log('[publish/tiktok] goal:', goal, '| resolved objective_type:', objective, rawLegacyObjective ? '(from legacy tik.objective)' : '(from goal mapping)');
+    const extendedConfig = campaignGoals.getTikTokObjective(s.goal, tik.objective);
+    const isExtended = rawLegacyObjective === 'video_views' || rawLegacyObjective === 'app_promotion';
+    const goalConfig = isExtended ? extendedConfig : campaignGoals.TIKTOK_GOAL_CONFIG[goal];
+    const objective = isExtended ? extendedConfig.objective_type : ((rawLegacyObjective && LEGACY_OBJECTIVE_MAP[rawLegacyObjective]) || goalConfig.objective_type);
+    console.log('[publish/tiktok] goal:', goal, '| platformObjective:', tik.objective || '(none)', '| resolved objective_type:', objective, '| optimization_goal:', goalConfig.optimization_goal, '| billing_event:', goalConfig.billing_event);
     console.log('[publish/tiktok] identity:', identityId, '(' + identityType + ')');
 
     const rawBudget = tik.budget || s.dailyBudget || s.budget || 30;
@@ -5684,6 +5939,7 @@ app.post('/api/publish/tiktok', requireSubscription, async (req, res) => {
     created.adId = adIds[0] || null;
     if (!created.adId) throw new Error('TikTok did not return an ad_id');
     console.log('[publish/tiktok] Created ad:', created.adId);
+    _logCampaignEvent(user, { platform: 'tiktok', campaignName, title: `Published "${campaignName}" to TikTok Ads`, detail: 'Campaign, Ad Group and Ad created, paused, ready for review.', severity: 'low' });
 
     return res.json({
       ok: true,
@@ -5695,6 +5951,7 @@ app.post('/api/publish/tiktok', requireSubscription, async (req, res) => {
     });
   } catch (err) {
     console.error('[publish/tiktok] fatal:', err.message, '| tiktok_code:', err.tikTokCode || '--');
+    _logCampaignEvent(typeof user !== 'undefined' ? user : null, { platform: 'tiktok', title: 'TikTok Ads publish failed', detail: err.message, severity: 'high' });
 
     // ── Rollback ─────────────────────────────────────────────────────────
     // Best-effort, most-specific-first (Ad → AdGroup → Campaign), same
@@ -10012,8 +10269,32 @@ app.get('/api/intelligence/kpi-series', requireSubIfAuthed, async (req, res) => 
 // used by three different frontend presentations (Live Feed, Notifications,
 // Intelligence Timeline) so there's exactly one source of truth for
 // "things Oriven detected or did" rather than three parallel systems.
+// This is also the canonical Notification model (Oriven 1.0 Final Polish):
+// the bell/panel read this same table rather than a separate notification
+// store -- `read`/`read_at` were added below for that purpose (needs:
+// ALTER TABLE intelligence_events ADD COLUMN IF NOT EXISTS read boolean
+// NOT NULL DEFAULT false, ADD COLUMN IF NOT EXISTS read_at timestamptz;).
 const _eventLog = require('./services/eventLog');
 const _logIntelligenceEvent = _eventLog.logEvent;
+
+// Campaign lifecycle notifications (publish success/failure) -- reuses the
+// same intelligence_events table/write path, type:'campaign_action' (the
+// value automation-triggered events already use), so these show up in the
+// same notification bell without a second system. Fire-and-forget: a
+// logging failure must never affect the actual publish response.
+function _logCampaignEvent(user, opts) {
+  if (!user || !user.id) return;
+  _logIntelligenceEvent({
+    user_id: user.id,
+    platform: opts.platform || null,
+    campaign_name: opts.campaignName || null,
+    type: 'campaign_action',
+    title: opts.title,
+    detail: opts.detail || null,
+    severity: opts.severity || 'low',
+    message: opts.title,
+  }).catch(function(){});
+}
 
 app.get('/api/intelligence/events', requireSubIfAuthed, async (req, res) => {
   try {
@@ -10032,6 +10313,8 @@ app.get('/api/intelligence/events', requireSubIfAuthed, async (req, res) => {
     if (req.query.type) query = query.eq('type', req.query.type);
     if (req.query.dismissed === 'false') query = query.eq('dismissed', false);
     if (req.query.dismissed === 'true') query = query.eq('dismissed', true);
+    if (req.query.read === 'false') query = query.eq('read', false);
+    if (req.query.read === 'true') query = query.eq('read', true);
 
     const { data, error } = await query;
     if (error) throw error;
@@ -10057,6 +10340,47 @@ app.patch('/api/intelligence/events/:id/dismiss', requireSubIfAuthed, async (req
   } catch (err) {
     console.error('[intelligence/events/dismiss]', err.message);
     res.status(500).json({ error: 'Could not dismiss that.' });
+  }
+});
+
+// PATCH /api/intelligence/events/:id/read -- marks a single notification
+// read (distinct from dismissed: read just clears the "new" emphasis,
+// dismissed removes it from the list entirely). Added for the Notification
+// system rewrite -- previously only `dismissed` existed, so there was no
+// way to represent "seen but still relevant" separately from "gone".
+app.patch('/api/intelligence/events/:id/read', requireSubIfAuthed, async (req, res) => {
+  try {
+    if (!req.user) return res.status(401).json({ error: 'Authentication required' });
+    const { data, error } = await supabaseAdmin.from('intelligence_events')
+      .update({ read: true, read_at: new Date().toISOString() })
+      .eq('id', req.params.id)
+      .eq('user_id', req.user.id)
+      .select('id')
+      .maybeSingle();
+    if (error) throw error;
+    if (!data) return res.status(404).json({ error: 'Not found' });
+    res.json({ ok: true });
+  } catch (err) {
+    console.error('[intelligence/events/read]', err.message);
+    res.status(500).json({ error: 'Could not mark that read.' });
+  }
+});
+
+// PATCH /api/intelligence/events/read-all -- bulk mark-all-read, used by
+// the notification panel's "Mark all read" affordance.
+app.patch('/api/intelligence/events/read-all', requireSubIfAuthed, async (req, res) => {
+  try {
+    if (!req.user) return res.status(401).json({ error: 'Authentication required' });
+    const { error } = await supabaseAdmin.from('intelligence_events')
+      .update({ read: true, read_at: new Date().toISOString() })
+      .eq('user_id', req.user.id)
+      .eq('read', false)
+      .eq('dismissed', false);
+    if (error) throw error;
+    res.json({ ok: true });
+  } catch (err) {
+    console.error('[intelligence/events/read-all]', err.message);
+    res.status(500).json({ error: 'Could not mark all read.' });
   }
 });
 
@@ -10381,6 +10705,34 @@ app.get('/api/business/profile', async (req, res) => {
   }
 });
 
+// PUT /api/business/profile/logo -- targeted logo_url update, used by the
+// Google Performance Max Edit stage. Deliberately a targeted `.update()`
+// (not the full-row upsert PUT /api/business/profile above uses) so
+// setting a logo from the PMax editor can never accidentally null out
+// company_name/website/description/etc -- those fields aren't loaded into
+// that screen's state, so replaying them all back would be unsafe.
+app.put('/api/business/profile/logo', async (req, res) => {
+  try {
+    const user = await getUserFromToken(req);
+    if (!user) return res.status(401).json({ error: 'Authentication required' });
+    const logoUrl = (typeof req.body.logo_url === 'string') ? req.body.logo_url.trim() : '';
+    if (!logoUrl) return res.status(400).json({ error: 'logo_url is required' });
+
+    const { data: existing } = await supabaseAdmin.from('business_profile').select('user_id').eq('user_id', user.id).maybeSingle();
+    let data, error;
+    if (existing) {
+      ({ data, error } = await supabaseAdmin.from('business_profile').update({ logo_url: logoUrl, updated_at: new Date().toISOString() }).eq('user_id', user.id).select().maybeSingle());
+    } else {
+      ({ data, error } = await supabaseAdmin.from('business_profile').insert({ user_id: user.id, logo_url: logoUrl, updated_at: new Date().toISOString() }).select().maybeSingle());
+    }
+    if (error) throw error;
+    res.json({ ok: true, logo_url: (data && data.logo_url) || logoUrl });
+  } catch (err) {
+    console.error('[business/profile/logo PUT]', err.message);
+    res.status(500).json({ error: 'Could not save your logo — has the logo_url column been added to business_profile? See migration comment above PUT /api/business/profile.' });
+  }
+});
+
 app.put('/api/business/profile', async (req, res) => {
   try {
     const user = await getUserFromToken(req);
@@ -10398,11 +10750,26 @@ app.put('/api/business/profile', async (req, res) => {
       // so the rest of the profile still saves on databases that don't have
       // it yet (needs: ALTER TABLE business_profile ADD COLUMN brand_voice text[];).
       brand_voice: Array.isArray(b.brand_voice) ? b.brand_voice : null,
+      // Google Performance Max logo requirement — a real logo URL the user
+      // provides or generates (via /api/generate-logo), NOT a marketing
+      // image mislabeled as one. Same opportunistic-column pattern as
+      // brand_voice above (needs: ALTER TABLE business_profile ADD COLUMN
+      // logo_url text;). This is the one canonical business-level logo
+      // field -- the Brand Brain modal's own "Logo" input (S.brandCore.logo)
+      // was found to have no working save path (saveBrandCoreDB is called
+      // but never defined anywhere in this codebase) and is not read from
+      // anywhere server-side, so it is not a real, persisted source and is
+      // deliberately not reused here.
+      logo_url: (typeof b.logo_url === 'string' && b.logo_url.trim()) ? b.logo_url.trim() : null,
       updated_at: new Date().toISOString()
     };
     let { data, error } = await supabaseAdmin.from('business_profile').upsert(row, { onConflict: 'user_id' }).select().maybeSingle();
     if (error && /brand_voice/.test(error.message || '')) {
       delete row.brand_voice;
+      ({ data, error } = await supabaseAdmin.from('business_profile').upsert(row, { onConflict: 'user_id' }).select().maybeSingle());
+    }
+    if (error && /logo_url/.test(error.message || '')) {
+      delete row.logo_url;
       ({ data, error } = await supabaseAdmin.from('business_profile').upsert(row, { onConflict: 'user_id' }).select().maybeSingle());
     }
     if (error) throw error;

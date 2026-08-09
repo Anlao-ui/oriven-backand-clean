@@ -6449,10 +6449,7 @@ button.lp-cta-btn { cursor:pointer; border:none; }
 .au-nav-logo img { width: 28px; height: 28px; object-fit: contain; }
 .au-page { flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; padding: 80px 24px 48px; }
 .au-card { width: 100%; max-width: 420px; background: #111111; border: 1px solid rgba(255,255,255,.08); border-radius: 20px; padding: 36px 32px; box-shadow: 0 24px 80px rgba(0,0,0,.5); }
-.au-brand { display: flex; align-items: center; gap: 9px; margin-bottom: 28px; }
-.au-brand img { width: 26px; height: 26px; object-fit: contain; }
-.au-brand-txt { font-size: 14px; font-weight: 700; color: rgba(240,240,240,.6); letter-spacing: -.2px; }
-.au-title { font-family: 'Instrument Serif', serif; font-size: 26px; color: #F0F0F0; letter-spacing: -.7px; font-weight: 400; margin-bottom: 6px; line-height: 1.1; }
+.au-title { font-family: 'Geist', system-ui, -apple-system, sans-serif; font-size: 26px; color: #F0F0F0; letter-spacing: -.7px; font-weight: 600; margin-bottom: 6px; line-height: 1.1; }
 .au-sub { font-size: 13px; color: rgba(240,240,240,.38); margin-bottom: 28px; line-height: 1.5; }
 .au-field { display: flex; flex-direction: column; gap: 5px; margin-bottom: 12px; }
 .au-label { font-size: 11px; font-weight: 700; letter-spacing: .04em; color: rgba(240,240,240,.45); text-transform: uppercase; }
