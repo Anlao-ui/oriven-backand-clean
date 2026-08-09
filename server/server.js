@@ -4515,7 +4515,7 @@ function _buildCampaignBrandSection(bc) {
 // /api/creative/campaign-suite route (below) can call it once per platform
 // in parallel, without duplicating this prompt-building logic. Same
 // schemas, same rules, same behavior as the original inline version.
-async function _generateAdPackage({ user, product, goal, platform, brandCore, productImages, platformObjective, campaignType }) {
+async function _generateAdPackage({ user, product, goal, platform, brandCore, productImages, platformObjective, campaignType, metaStructure, campaignStructure }) {
   goal = campaignGoals.normalizeGoal(goal);
   const goalSection = `\n\n${campaignGoals.GOAL_CREATIVE_DIRECTION[goal]}`;
   // Final Polish (Part 19) — the platform-specific objective/campaign type
@@ -4530,6 +4530,28 @@ async function _generateAdPackage({ user, product, goal, platform, brandCore, pr
   }
   if (platform === 'google' && campaignType && campaignType !== 'SEARCH') {
     objectiveSection += `\n\nGOOGLE CAMPAIGN TYPE: This is a ${campaignType.replace(/_/g,' ')} campaign, not Search. ${campaignType === 'PERFORMANCE_MAX' ? 'Write a distinct LONG_HEADLINE-appropriate fuller line in the first description, since Performance Max reuses description copy for its long headline slot.' : campaignType === 'DEMAND_GEN' ? 'Write feed-native, visual-first copy suited to Discover/Gmail/YouTube placements, not search-intent keyword copy.' : ''}`;
+  }
+  // Informational only -- does NOT ask for more/fewer concepts. The fixed
+  // 3-concept schema below stays fixed regardless of structure; /api/publish/meta
+  // already cycles concepts honestly across however many Ad Sets/Ads the user
+  // requested (never fabricates unique creatives to match the count), so the
+  // AI just needs to know that reuse is coming, not produce it itself.
+  if (platform === 'meta' && metaStructure && (metaStructure.adSets > 1 || metaStructure.adsPerAdSet > 1)) {
+    const totalAds = Math.max(1, Math.min(5, parseInt(metaStructure.adSets, 10) || 1)) * Math.max(1, Math.min(5, parseInt(metaStructure.adsPerAdSet, 10) || 1));
+    objectiveSection += `\n\nCAMPAIGN STRUCTURE: This campaign will publish as ${metaStructure.adSets} Ad Set(s) × ${metaStructure.adsPerAdSet} Ad(s) per Ad Set (${totalAds} ads total). Oriven reuses your generated concepts across ads as needed — do not attempt to generate ${totalAds} fully unique concepts.`;
+  }
+  // TikTok: same informational note, Ad Group terminology (real backend
+  // support — Campaign Structure Engine). Google: only meaningful for
+  // Search today (Demand Gen/PMax have a fixed single-ad-group/asset-group
+  // shape regardless of this control, so the note is skipped for them even
+  // if a stale campaignStructure value is present).
+  if (platform === 'tiktok' && campaignStructure && (campaignStructure.groups > 1 || campaignStructure.adsPerGroup > 1)) {
+    const totalAds = Math.max(1, Math.min(5, parseInt(campaignStructure.groups, 10) || 1)) * Math.max(1, Math.min(5, parseInt(campaignStructure.adsPerGroup, 10) || 1));
+    objectiveSection += `\n\nCAMPAIGN STRUCTURE: This campaign will publish as ${campaignStructure.groups} Ad Group(s) × ${campaignStructure.adsPerGroup} Ad(s) per Ad Group (${totalAds} ads total). Oriven reuses your generated concepts across ads as needed — do not attempt to generate ${totalAds} fully unique concepts.`;
+  }
+  if (platform === 'google' && (!campaignType || campaignType === 'SEARCH') && campaignStructure && (campaignStructure.groups > 1 || campaignStructure.adsPerGroup > 1)) {
+    const totalAds = Math.max(1, Math.min(5, parseInt(campaignStructure.groups, 10) || 1)) * Math.max(1, Math.min(5, parseInt(campaignStructure.adsPerGroup, 10) || 1));
+    objectiveSection += `\n\nCAMPAIGN STRUCTURE: This campaign will publish as ${campaignStructure.groups} Ad Group(s) × ${campaignStructure.adsPerGroup} Responsive Search Ad(s) per Ad Group (${totalAds} ads total). Oriven rotates your generated headlines/descriptions across ads as needed — you do not need to write ${totalAds} fully unique sets of headlines.`;
   }
   const brandSection = _buildCampaignBrandSection(brandCore);
   const _bizCtx = user ? await _gatherBusinessContext(user.id).catch(() => null) : null;
@@ -4658,6 +4680,32 @@ ${platformRules}
     pkg.googleAds = pkg.googleAds || {};
     pkg.googleAds.campaignType = campaignType;
   }
+  if (platform === 'meta' && metaStructure) {
+    pkg.metaStructure = {
+      adSets: Math.max(1, Math.min(5, parseInt(metaStructure.adSets, 10) || 1)),
+      adsPerAdSet: Math.max(1, Math.min(5, parseInt(metaStructure.adsPerAdSet, 10) || 1)),
+    };
+  }
+  // Normalized structure (Campaign Structure Engine, Part 10/22) — the same
+  // guarantee as pkg.metaStructure above, for the two platforms whose
+  // publish routes now read pkg.campaignStructure directly. Only force-
+  // written where the campaign type actually supports it: TikTok always,
+  // Google only for Search (Demand Gen/PMax have a fixed real shape no
+  // user-facing control should imply is configurable).
+  if (platform === 'tiktok' && campaignStructure) {
+    pkg.campaignStructure = {
+      campaigns: 1,
+      groups: Math.max(1, Math.min(5, parseInt(campaignStructure.groups, 10) || 1)),
+      adsPerGroup: Math.max(1, Math.min(5, parseInt(campaignStructure.adsPerGroup, 10) || 1)),
+    };
+  }
+  if (platform === 'google' && (!campaignType || campaignType === 'SEARCH') && campaignStructure) {
+    pkg.campaignStructure = {
+      campaigns: 1,
+      groups: Math.max(1, Math.min(5, parseInt(campaignStructure.groups, 10) || 1)),
+      adsPerGroup: Math.max(1, Math.min(5, parseInt(campaignStructure.adsPerGroup, 10) || 1)),
+    };
+  }
   _recordCreativeAsset(user && user.id, { kind: 'ad', platform, product_name: String(product).slice(0, 80), title: pkg.campaignName || product, content: pkg, source_route: '/api/ai/create-ad' });
   return pkg;
 }
@@ -4665,7 +4713,7 @@ ${platformRules}
 app.post('/api/ai/create-ad', requireSubOrOnboardingGen, async (req, res) => {
   console.log('[create-ad] ← route handler entered');
   console.log('[create-ad] req.body keys:', Object.keys(req.body || {}));
-  const { product, goal, platforms, mode, brandCore, productImages, platformObjective, campaignType } = req.body;
+  const { product, goal, platforms, mode, brandCore, productImages, platformObjective, campaignType, metaStructure, campaignStructure } = req.body;
   console.log('[create-ad] product:', (product || '').slice(0, 60), '| mode:', mode, '| platform:', req.body.platform, '| platforms:', platforms);
   if (!product) {
     console.log('[create-ad] 400 — product missing');
@@ -4741,7 +4789,7 @@ Reply ONLY with valid JSON array (no markdown, no extra text):
   // logic, now shared with /api/creative/campaign-suite.
   console.log('[create-ad] → mode=full branch — delegating to _generateAdPackage for platform:', platform);
   try {
-    const pkg = await _generateAdPackage({ user: req.user, product, goal, platform, brandCore, productImages, platformObjective, campaignType });
+    const pkg = await _generateAdPackage({ user: req.user, product, goal, platform, brandCore, productImages, platformObjective, campaignType, metaStructure, campaignStructure });
     console.log(`[create-ad] Package ready — keys: ${Object.keys(pkg).join(', ')} | visualConcepts: ${(pkg.visualConcepts||[]).length}`);
     _consumeOnboardingFreeGen(req);
     if (reservation) creditManager.finalizeCreditLog(reservation, 'campaign_generation', { provider: 'aiml', success: true, route: req.path }).catch(() => {});
@@ -4950,6 +4998,26 @@ app.post('/api/ai/execute', requireSubIfAuthed, async (req, res) => {
   if (!result.ok) return res.status(result.status || 500).json({ error: result.error });
   res.json({ message: result.message });
 });
+
+// ── Normalized campaign structure (Campaign Structure Engine) ─────────────
+// pkg.campaignStructure = {campaigns:1, groups, adsPerGroup} is the ONE
+// normalized model Launch writes for every platform going forward. Meta's
+// own publish route is untouched and keeps reading pkg.metaStructure
+// directly (Part 11 — don't rewrite working Meta publishing); Launch keeps
+// both fields in sync for Meta campaigns. Google/TikTok read only this
+// normalized field. Back-compat: a campaign saved before this field existed
+// only has pkg.metaStructure — fall back to it rather than silently
+// treating an old saved structure as 1×1.
+function _normalizeCampaignStructure(pkg) {
+  var raw = pkg.campaignStructure
+    || (pkg.metaStructure ? { groups: pkg.metaStructure.adSets, adsPerGroup: pkg.metaStructure.adsPerAdSet } : null)
+    || { groups: 1, adsPerGroup: 1 };
+  return {
+    campaigns: 1,
+    groups: Math.max(1, Math.min(5, parseInt(raw.groups, 10) || 1)),
+    adsPerGroup: Math.max(1, Math.min(5, parseInt(raw.adsPerGroup, 10) || 1)),
+  };
+}
 
 // -- Campaign Publishing -- Google Ads -------------------------------------
 // POST /api/publish/google
@@ -5354,7 +5422,40 @@ app.post('/api/publish/google', requireSubscription, async (req, res) => {
       });
     }
 
-    // ── SEARCH (default) — unchanged from the pre-existing pipeline ─────
+    // ── SEARCH (default) — now genuinely supports N Ad Groups × M RSAs ──
+    // (Campaign Structure Engine, Part 12-14). Google's RSA format already
+    // takes MANY headlines/descriptions per single ad and auto-rotates
+    // combinations -- that's Google's own creative-diversity mechanism, so
+    // there is no separate per-ad "concept" pool the way Meta has. Instead,
+    // each RSA within/across groups draws a deterministic rotating WINDOW
+    // from the one real headline/description pool the AI generated, so
+    // ad_2 is a genuinely different combination from ad_1, not a byte-for-
+    // byte duplicate -- honest reuse of real copy, never fabricated text.
+
+    const struct = _normalizeCampaignStructure(pkg);
+    const allHeadlines    = (g.headlines    || []).map(h => String(h).slice(0, 30)).filter(Boolean);
+    const allDescriptions = (g.descriptions || []).map(d => String(d).slice(0, 90)).filter(Boolean);
+    const allKeywords     = (g.keywords     || []).filter(Boolean);
+    if (allHeadlines.length < 3 || allDescriptions.length < 2) {
+      return res.status(400).json({ ok: false, error: 'At least 3 headlines and 2 descriptions are required to publish a Search campaign.' });
+    }
+    const finalUrl = (function() {
+      var u = (s.landingPageUrl || g.finalUrl || pkg.websiteUrl || s.websiteUrl || '').trim();
+      if (!u) { console.warn('[publish/google] No finalUrl in package — using placeholder'); return 'https://example.com'; }
+      return u;
+    })();
+
+    // Rotating window helper: ad index `i` (0-based, unique across the whole
+    // campaign) gets a same-size subset starting at a different offset each
+    // time, wrapping around the shared pool -- deterministic, no randomness.
+    function _rotatedWindow(pool, size, i) {
+      size = Math.min(size, pool.length);
+      if (pool.length <= size) return pool.slice();
+      var offset = (i * size) % pool.length;
+      var out = [];
+      for (var k = 0; k < size; k++) out.push(pool[(offset + k) % pool.length]);
+      return out;
+    }
 
     // 1. Campaign budget
     const budgetRes = await _gadsMutate('campaignBudgets', [{
@@ -5387,48 +5488,57 @@ app.post('/api/publish/google', requireSubscription, async (req, res) => {
     const campaignId = campaignResourceName.split('/').pop();
     createdCampaignResourceName = campaignResourceName;
 
-    // 3. Ad group
-    const adGroupRes = await _gadsMutate('adGroups', [{
-      create: {
-        name: (g.adGroups && g.adGroups[0] && g.adGroups[0].name) || (campaignName + ' Ad Group'),
-        campaign: campaignResourceName,
-        status: 'ENABLED',
-        type: 'SEARCH_STANDARD',
-      }
-    }]);
-    const adGroupResourceName = adGroupRes.results[0].resourceName;
-
-    // 4. Keywords (first 20)
-    const keywords = (g.keywords || []).slice(0, 20);
-    if (keywords.length) {
-      await _gadsMutate('adGroupCriteria', keywords.map(kw => ({
-        create: { adGroup: adGroupResourceName, text: kw, matchType: 'BROAD', status: 'ENABLED' }
-      })));
-    }
-
-    // 5. Responsive Search Ad
-    const headlines     = (g.headlines    || []).slice(0, 15).map(h => ({ text: String(h).slice(0, 30) }));
-    const descriptions  = (g.descriptions || []).slice(0,  4).map(d => ({ text: String(d).slice(0, 90) }));
-    if (headlines.length >= 3 && descriptions.length >= 2) {
-      await _gadsMutate('adGroupAds', [{
-        create: {
-          adGroup: adGroupResourceName,
-          status: 'ENABLED',
-          ad: {
-            responsiveSearchAd: { headlines, descriptions },
-            finalUrls: [(function(){
-              var u = (s.landingPageUrl || g.finalUrl || pkg.websiteUrl || s.websiteUrl || '').trim();
-              if (!u) { console.warn('[publish/google] No finalUrl in package — using placeholder'); u = 'https://example.com'; }
-              return u;
-            })()],
-          }
-        }
+    // 3. N Ad Groups, each with its own keyword slice + M RSAs
+    const createdAdGroups = [];
+    const createdAds = [];
+    let globalAdIndex = 0;
+    for (let gi = 0; gi < struct.groups; gi++) {
+      const groupLabel = struct.groups > 1 ? (campaignName + ' Ad Group ' + (gi + 1)) : ((g.adGroups && g.adGroups[0] && g.adGroups[0].name) || (campaignName + ' Ad Group'));
+      const adGroupRes = await _gadsMutate('adGroups', [{
+        create: { name: groupLabel, campaign: campaignResourceName, status: 'ENABLED', type: 'SEARCH_STANDARD' }
       }]);
+      const adGroupResourceName = adGroupRes.results[0].resourceName;
+      createdAdGroups.push({ resourceName: adGroupResourceName, id: adGroupResourceName.split('/').pop(), name: groupLabel });
+
+      // Keywords (Part 14): every group gets the full real keyword list
+      // unless there are enough to meaningfully split into distinct,
+      // non-trivial per-group slices (>=3 keywords/group) -- the AI only
+      // ever generates one flat, ungrouped keyword list, so splitting it
+      // when there's too little to split honestly would just be arbitrary,
+      // not more relevant. Reuse across groups is explicitly allowed by
+      // spec when there isn't enough to distribute.
+      const groupKeywords = (struct.groups > 1 && allKeywords.length >= struct.groups * 3)
+        ? allKeywords.slice(Math.floor(gi * allKeywords.length / struct.groups), Math.floor((gi + 1) * allKeywords.length / struct.groups))
+        : allKeywords.slice(0, 20);
+      if (groupKeywords.length) {
+        await _gadsMutate('adGroupCriteria', groupKeywords.slice(0, 20).map(kw => ({
+          create: { adGroup: adGroupResourceName, text: kw, matchType: 'BROAD', status: 'ENABLED' }
+        })));
+      }
+
+      // M Responsive Search Ads per group, each a rotated window of the
+      // shared headline/description pool.
+      for (let ai = 0; ai < struct.adsPerGroup; ai++) {
+        const rsaHeadlines    = _rotatedWindow(allHeadlines, 15, globalAdIndex).map(h => ({ text: h }));
+        const rsaDescriptions = _rotatedWindow(allDescriptions, 4, globalAdIndex).map(d => ({ text: d }));
+        const rsaRes = await _gadsMutate('adGroupAds', [{
+          create: {
+            adGroup: adGroupResourceName,
+            status: 'ENABLED',
+            ad: { responsiveSearchAd: { headlines: rsaHeadlines, descriptions: rsaDescriptions }, finalUrls: [finalUrl] }
+          }
+        }]);
+        createdAds.push({ resourceName: rsaRes.results[0].resourceName, adGroupId: adGroupResourceName.split('/').pop() });
+        globalAdIndex++;
+      }
     }
 
-    console.log('[publish/google] Campaign created:', campaignId, 'for user', user.id);
-    _logCampaignEvent(user, { platform: 'google', campaignName, title: `Published "${campaignName}" to Google Ads (Search)`, detail: 'Campaign created, paused, ready for review.', severity: 'low' });
-    return res.json({ ok: true, campaignId, campaignResourceName, platform: 'google', status: 'paused' });
+    console.log('[publish/google] Campaign created:', campaignId, '| ad groups:', createdAdGroups.length, '| ads:', createdAds.length, 'for user', user.id);
+    _logCampaignEvent(user, { platform: 'google', campaignName, title: `Published "${campaignName}" to Google Ads (Search)`, detail: `Campaign created, paused, ready for review (${createdAdGroups.length} ad group${createdAdGroups.length!==1?'s':''}, ${createdAds.length} ad${createdAds.length!==1?'s':''}).`, severity: 'low' });
+    return res.json({
+      ok: true, campaignId, campaignResourceName, platform: 'google', status: 'paused',
+      adGroups: createdAdGroups, ads: createdAds,
+    });
   } catch (err) {
     console.error('[publish/google] error:', err.message);
     _logCampaignEvent(typeof user !== 'undefined' ? user : null, { platform: 'google', title: 'Google Ads publish failed', detail: err.message, severity: 'high' });
@@ -5763,7 +5873,7 @@ app.post('/api/publish/meta', requireSubscription, async (req, res) => {
 // credentials were available anywhere in this environment); if TikTok
 // rejects a field, that error is surfaced to the user rather than masked.
 app.post('/api/publish/tiktok', requireSubscription, async (req, res) => {
-  const created = { campaignId: null, adGroupId: null, adId: null };
+  const created = { campaignId: null, adGroupIds: [], adIds: [] };
   let rbAccessToken, rbAdvertiserId;
 
   try {
@@ -5858,40 +5968,27 @@ app.post('/api/publish/tiktok', requireSubscription, async (req, res) => {
     created.campaignId = campaignId;
     console.log('[publish/tiktok] Created campaign:', campaignId);
 
-    // 2. Upload the creative image by URL (TikTok fetches it server-side --
-    // no local file handling needed, mirrors upload_type: 'UPLOAD_BY_URL'
-    // documented on the file/image/ad/upload endpoint).
-    const uploadData = await _tiktokPost('/file/image/ad/upload/', accessToken, {
-      advertiser_id: advertiserId,
-      upload_type:   'UPLOAD_BY_URL',
-      image_url:     imageUrl,
-    });
-    const imgResult = Array.isArray(uploadData) ? uploadData[0] : uploadData;
-    const imageId = imgResult && imgResult.image_id;
-    if (!imageId) throw new Error('TikTok did not return an image_id for the uploaded creative image');
-    console.log('[publish/tiktok] Uploaded image:', imageId);
+    // 2. Upload all real creative images by URL up front (Campaign
+    // Structure Engine, Part 16/18) -- every AI-generated visual concept
+    // that actually has a real image, not just the first one, so multiple
+    // ads can each get a genuinely different real image rather than all
+    // reusing image #1. TikTok fetches each by URL server-side (mirrors
+    // upload_type: 'UPLOAD_BY_URL' on file/image/ad/upload).
+    const realImageUrls = Array.from(new Set(
+      [imageUrl].concat(visualConcepts.filter(vc => vc && vc.generatedImageUrl).map(vc => vc.generatedImageUrl))
+    ));
+    const imageIds = [];
+    for (const url of realImageUrls) {
+      const uploadData = await _tiktokPost('/file/image/ad/upload/', accessToken, {
+        advertiser_id: advertiserId, upload_type: 'UPLOAD_BY_URL', image_url: url,
+      });
+      const imgResult = Array.isArray(uploadData) ? uploadData[0] : uploadData;
+      const imgId = imgResult && imgResult.image_id;
+      if (imgId) imageIds.push(imgId);
+    }
+    if (!imageIds.length) throw new Error('TikTok did not return an image_id for the uploaded creative image');
+    console.log('[publish/tiktok] Uploaded', imageIds.length, 'image(s)');
 
-    // 3. Ad Group -- structure stays 1 ad group (no multi-ad-group control
-    // is offered): pkg.tiktokAds is a single flat creative object with no
-    // per-ad-group content-variation source, the same reasoning Google
-    // Search's publish route uses for not offering multiple ad groups.
-    const scheduleStart = new Date(Date.now() + 5 * 60000).toISOString().slice(0, 19).replace('T', ' ');
-    const adGroupPayload = {
-      advertiser_id:        advertiserId,
-      campaign_id:          String(campaignId),
-      adgroup_name:         campaignName + ' Ad Group',
-      placement_type:       'PLACEMENT_TYPE_AUTOMATIC',
-      optimization_goal:    goalConfig.optimization_goal,
-      billing_event:        goalConfig.billing_event,
-      budget_mode:          'BUDGET_MODE_DAY',
-      budget:               budget,
-      schedule_type:        'SCHEDULE_FROM_NOW',
-      schedule_start_time:  scheduleStart,
-      pacing:                'PACING_MODE_SMOOTH',
-      operation_status:      'DISABLE',
-      identity_id:           identityId,
-      identity_type:         identityType,
-    };
     // BC_AUTH_TT identities are only reachable through a TikTok Business
     // Center auth flow Oriven doesn't implement yet (see
     // _fetchTikTokIdentities) -- if one is ever selected anyway (e.g. a
@@ -5900,52 +5997,97 @@ app.post('/api/publish/tiktok', requireSubscription, async (req, res) => {
     if (identityType === 'BC_AUTH_TT') {
       throw Object.assign(new Error('This TikTok Identity requires Business Center authorization, which Oriven does not support yet — choose a different linked TikTok account Identity in Integrations.'), { status: 400 });
     }
-    // NOTE: pkg.tiktokAds.targetAudience is freeform AI-generated text
-    // (e.g. "Gen Z and young millennials interested in fitness"), not
-    // structured age/gender/location data -- Oriven's schema has no
-    // structured targeting fields to map it from, so age_groups/gender/
-    // location_ids are deliberately left unset (TikTok applies its own
-    // broad defaults) rather than fabricating a structured interpretation
-    // of free text. This is a known, disclosed limitation, not an oversight.
-    const adGroupData = await _tiktokPost('/adgroup/create/', accessToken, adGroupPayload);
-    const adGroupId = adGroupData && adGroupData.adgroup_id;
-    if (!adGroupId) throw new Error('TikTok did not return an adgroup_id');
-    created.adGroupId = adGroupId;
-    console.log('[publish/tiktok] Created ad group:', adGroupId);
 
-    // 4. Ad
-    const headline = tik.hook || tik.opening3Seconds || campaignName;
-    const adText = (tik.script ? String(tik.script).replace(/\[[^\]]*\]/g, '').replace(/\s+/g, ' ').trim().slice(0, 100) : '') || String(headline).slice(0, 100);
-    const ctaType = campaignGoals.tiktokCtaType(tik.cta);
-    const adPayload = {
-      advertiser_id: advertiserId,
-      adgroup_id:    String(adGroupId),
-      creatives: [{
-        ad_name:          campaignName + ' Ad',
-        ad_format:        'SINGLE_IMAGE',
-        ad_text:          adText,
-        call_to_action:   ctaType,
-        image_ids:        [imageId],
-        landing_page_url: destinationUrl,
-        display_name:     identityName || campaignName,
-        identity_id:       identityId,
-        identity_type:     identityType,
-        operation_status:  'DISABLE',
-      }]
-    };
-    console.log('[publish/tiktok] cta text:', tik.cta, '→', ctaType);
-    const adData = await _tiktokPost('/ad/create/', accessToken, adPayload);
-    const adIds = (adData && adData.ad_ids) || [];
-    created.adId = adIds[0] || null;
-    if (!created.adId) throw new Error('TikTok did not return an ad_id');
-    console.log('[publish/tiktok] Created ad:', created.adId);
-    _logCampaignEvent(user, { platform: 'tiktok', campaignName, title: `Published "${campaignName}" to TikTok Ads`, detail: 'Campaign, Ad Group and Ad created, paused, ready for review.', severity: 'low' });
+    // 3. N Ad Groups, each with M Ads (Campaign Structure Engine, Part 16).
+    // Every Ad Group and every Ad uses the SAME required Identity (Part 17
+    // -- already validated non-null above). Real per-ad variation comes
+    // from pkg.concepts (the same 3 AI-generated concepts Meta cycles
+    // through) for hook/script/CTA text, and the uploaded real image pool
+    // above for creative images -- cycled deterministically (i % pool
+    // length), never fabricated. Packages generated before pkg.concepts
+    // existed fall back to the single flat tik.hook/script/cta fields.
+    const struct = _normalizeCampaignStructure(pkg);
+    const concepts = Array.isArray(pkg.concepts) && pkg.concepts.length ? pkg.concepts : null;
+    function _adCreative(i) {
+      const c = concepts ? concepts[i % concepts.length] : null;
+      const hook = (c && (c.hook || (c.adCopy && c.adCopy.headline))) || tik.hook || tik.opening3Seconds || campaignName;
+      const scriptSrc = (c && c.adCopy && c.adCopy.primaryText) || tik.script || '';
+      const cta = (c && c.cta) || tik.cta;
+      const adText = (scriptSrc ? String(scriptSrc).replace(/\[[^\]]*\]/g, '').replace(/\s+/g, ' ').trim().slice(0, 100) : '') || String(hook).slice(0, 100);
+      return { adText, ctaType: campaignGoals.tiktokCtaType(cta), imageId: imageIds[i % imageIds.length] };
+    }
+
+    const scheduleStart = new Date(Date.now() + 5 * 60000).toISOString().slice(0, 19).replace('T', ' ');
+    const createdAdGroups = [];
+    const createdAds = [];
+    let globalAdIndex = 0;
+    for (let gi = 0; gi < struct.groups; gi++) {
+      const groupLabel = struct.groups > 1 ? (campaignName + ' Ad Group ' + (gi + 1)) : (campaignName + ' Ad Group');
+      const adGroupPayload = {
+        advertiser_id:        advertiserId,
+        campaign_id:          String(campaignId),
+        adgroup_name:         groupLabel,
+        placement_type:       'PLACEMENT_TYPE_AUTOMATIC',
+        optimization_goal:    goalConfig.optimization_goal,
+        billing_event:        goalConfig.billing_event,
+        budget_mode:          'BUDGET_MODE_DAY',
+        budget:               budget,
+        schedule_type:        'SCHEDULE_FROM_NOW',
+        schedule_start_time:  scheduleStart,
+        pacing:                'PACING_MODE_SMOOTH',
+        operation_status:      'DISABLE',
+        identity_id:           identityId,
+        identity_type:         identityType,
+      };
+      // NOTE: pkg.tiktokAds.targetAudience is freeform AI-generated text
+      // (e.g. "Gen Z and young millennials interested in fitness"), not
+      // structured age/gender/location data -- Oriven's schema has no
+      // structured targeting fields to map it from, so age_groups/gender/
+      // location_ids are deliberately left unset (TikTok applies its own
+      // broad defaults) rather than fabricating a structured interpretation
+      // of free text. This is a known, disclosed limitation, not an oversight.
+      const adGroupData = await _tiktokPost('/adgroup/create/', accessToken, adGroupPayload);
+      const adGroupId = adGroupData && adGroupData.adgroup_id;
+      if (!adGroupId) throw new Error('TikTok did not return an adgroup_id');
+      created.adGroupIds.push(adGroupId);
+      createdAdGroups.push({ id: adGroupId, name: groupLabel });
+      console.log('[publish/tiktok] Created ad group:', adGroupId);
+
+      for (let ai = 0; ai < struct.adsPerGroup; ai++) {
+        const cr = _adCreative(globalAdIndex);
+        const adPayload = {
+          advertiser_id: advertiserId,
+          adgroup_id:    String(adGroupId),
+          creatives: [{
+            ad_name:          groupLabel + ' Ad ' + (ai + 1),
+            ad_format:        'SINGLE_IMAGE',
+            ad_text:          cr.adText,
+            call_to_action:   cr.ctaType,
+            image_ids:        [cr.imageId],
+            landing_page_url: destinationUrl,
+            display_name:     identityName || campaignName,
+            identity_id:       identityId,
+            identity_type:     identityType,
+            operation_status:  'DISABLE',
+          }]
+        };
+        const adData = await _tiktokPost('/ad/create/', accessToken, adPayload);
+        const newAdIds = (adData && adData.ad_ids) || [];
+        const newAdId = newAdIds[0] || null;
+        if (!newAdId) throw new Error('TikTok did not return an ad_id');
+        created.adIds.push(newAdId);
+        createdAds.push({ id: newAdId, adGroupId });
+        globalAdIndex++;
+      }
+    }
+    console.log('[publish/tiktok] Created', createdAdGroups.length, 'ad group(s),', createdAds.length, 'ad(s)');
+    _logCampaignEvent(user, { platform: 'tiktok', campaignName, title: `Published "${campaignName}" to TikTok Ads`, detail: `Campaign created, paused, ready for review (${createdAdGroups.length} ad group${createdAdGroups.length!==1?'s':''}, ${createdAds.length} ad${createdAds.length!==1?'s':''}).`, severity: 'low' });
 
     return res.json({
       ok: true,
       campaignId: String(campaignId),
-      adGroupId:  String(adGroupId),
-      adId:       String(created.adId),
+      adGroups:   createdAdGroups,
+      ads:        createdAds,
       platform:   'tiktok',
       status:     'paused'
     });
@@ -5954,22 +6096,23 @@ app.post('/api/publish/tiktok', requireSubscription, async (req, res) => {
     _logCampaignEvent(typeof user !== 'undefined' ? user : null, { platform: 'tiktok', title: 'TikTok Ads publish failed', detail: err.message, severity: 'high' });
 
     // ── Rollback ─────────────────────────────────────────────────────────
-    // Best-effort, most-specific-first (Ad → AdGroup → Campaign), same
+    // Best-effort, most-specific-first (Ads → Ad Groups → Campaign), same
     // pattern as /api/publish/meta's created.{adIds,adSetIds,campaignId}
-    // rollback. A rollback failure is logged loudly but never masks the
-    // original error returned below.
+    // rollback, extended to however many were actually created before the
+    // failure (Campaign Structure Engine, Part 19). A rollback failure is
+    // logged loudly but never masks the original error returned below.
     if (rbAccessToken && rbAdvertiserId) {
-      if (created.adId) {
+      if (created.adIds.length) {
         try {
-          await _tiktokPost('/ad/status/update/', rbAccessToken, { advertiser_id: rbAdvertiserId, ad_ids: [created.adId], operation_status: 'DELETE' });
-          console.warn('[publish/tiktok] Rollback: deleted ad', created.adId);
-        } catch (rbErr) { console.error('[publish/tiktok] Rollback FAILED for ad', created.adId, '—', rbErr.message); }
+          await _tiktokPost('/ad/status/update/', rbAccessToken, { advertiser_id: rbAdvertiserId, ad_ids: created.adIds, operation_status: 'DELETE' });
+          console.warn('[publish/tiktok] Rollback: deleted', created.adIds.length, 'ad(s)', created.adIds);
+        } catch (rbErr) { console.error('[publish/tiktok] Rollback FAILED for ads', created.adIds, '—', rbErr.message); }
       }
-      if (created.adGroupId) {
+      if (created.adGroupIds.length) {
         try {
-          await _tiktokPost('/adgroup/status/update/', rbAccessToken, { advertiser_id: rbAdvertiserId, adgroup_ids: [created.adGroupId], operation_status: 'DELETE' });
-          console.warn('[publish/tiktok] Rollback: deleted ad group', created.adGroupId);
-        } catch (rbErr) { console.error('[publish/tiktok] Rollback FAILED for ad group', created.adGroupId, '—', rbErr.message); }
+          await _tiktokPost('/adgroup/status/update/', rbAccessToken, { advertiser_id: rbAdvertiserId, adgroup_ids: created.adGroupIds, operation_status: 'DELETE' });
+          console.warn('[publish/tiktok] Rollback: deleted', created.adGroupIds.length, 'ad group(s)', created.adGroupIds);
+        } catch (rbErr) { console.error('[publish/tiktok] Rollback FAILED for ad groups', created.adGroupIds, '—', rbErr.message); }
       }
       if (created.campaignId) {
         try {
