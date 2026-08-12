@@ -10561,7 +10561,7 @@ async function _gatherPlatformIntelligence(user, days) {
           _gadsFetchTotals(accessToken, customerId, loginCustomerId, windows.previous.since, windows.previous.until),
           getOrRefreshAnalysis(user, 'google', range)
         ]);
-        platforms.google = { delta: _computeDelta(current, previous), score: analysis.score, findings: analysis.findings, recommendations: analysis.recommendations, campaigns: analysis.campaigns, creatives: analysis.creatives };
+        platforms.google = { delta: _computeDelta(current, previous), score: analysis.score, findings: analysis.findings, recommendations: analysis.recommendations, campaigns: analysis.campaigns, creatives: analysis.creatives, strengths: analysis.strengths };
       } catch (err) {
         console.warn('[intelligence] Google load failed:', err.message);
         platforms.google = { error: true };
@@ -10577,7 +10577,7 @@ async function _gatherPlatformIntelligence(user, days) {
           _metaFetchTotals(accessToken, accountId, windows.previous.since, windows.previous.until),
           getOrRefreshAnalysis(user, 'meta', range)
         ]);
-        platforms.meta = { delta: _computeDelta(current, previous), score: analysis.score, findings: analysis.findings, recommendations: analysis.recommendations, campaigns: analysis.campaigns, creatives: analysis.creatives };
+        platforms.meta = { delta: _computeDelta(current, previous), score: analysis.score, findings: analysis.findings, recommendations: analysis.recommendations, campaigns: analysis.campaigns, creatives: analysis.creatives, strengths: analysis.strengths };
       } catch (err) {
         console.warn('[intelligence] Meta load failed:', err.message);
         platforms.meta = { error: true };

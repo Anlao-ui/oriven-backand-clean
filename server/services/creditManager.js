@@ -136,12 +136,34 @@ async function getCreditStatus(userId) {
   const plan = (data && data.subscription_status) || 'free';
   const allowance = PLAN_ALLOWANCES[plan] || 0;
   const balance = data ? data.credits_balance : 0;
+
+  // Lifetime usage — credit_transactions is the only authoritative source
+  // (append-only ledger, never derived from a UI counter). Summing
+  // credits_cost across every charged:true row is the real total ever
+  // spent, independent of the current billing cycle or balance resets.
+  // A query failure here must not break the rest of the status payload —
+  // the caller gets `lifetimeUsed: null` and the frontend shows a loading/
+  // unavailable state rather than a fabricated number (Part 11).
+  let lifetimeUsed = null;
+  try {
+    const { data: lifetimeRows, error: lifetimeErr } = await supabaseAdmin
+      .from('credit_transactions')
+      .select('credits_cost')
+      .eq('user_id', userId)
+      .eq('charged', true);
+    if (lifetimeErr) throw lifetimeErr;
+    lifetimeUsed = (lifetimeRows || []).reduce((sum, row) => sum + (row.credits_cost || 0), 0);
+  } catch (err) {
+    console.warn('[creditManager] Failed to compute lifetime usage:', err.message);
+  }
+
   return {
     balance,
     monthlyAllowance: allowance,
     usedThisMonth: Math.max(0, allowance - balance),
     resetDate: data ? data.credits_cycle_end : null,
     plan,
+    lifetimeUsed,
   };
 }
 

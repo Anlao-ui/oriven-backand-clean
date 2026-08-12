@@ -6457,6 +6457,14 @@ button.lp-cta-btn { cursor:pointer; border:none; }
 .au-input:focus { border-color: rgba(183,255,42,.4); background: rgba(255,255,255,.07); }
 .au-input::placeholder { color: rgba(240,240,240,.2); }
 .au-input.au-err { border-color: rgba(239,68,68,.45) !important; }
+/* Edge/IE's native password-reveal icon (::-ms-reveal) renders dark by
+   default and is nearly invisible against this dark input background --
+   there's no custom show/hide toggle built in this app to restyle
+   directly, this is the browser's own UA-rendered control, only reachable
+   via this non-standard pseudo-element. filter is the only way to
+   recolor it (color/fill aren't honored here); invert flips it to a
+   crisp white without touching the input's own background/border/size. */
+.au-input::-ms-reveal { filter: invert(100%); }
 .au-error { font-size: 12.5px; color: #EF4444; margin-bottom: 14px; display: none; line-height: 1.55; padding: 10px 13px; background: rgba(239,68,68,.08); border-radius: 8px; border: 1px solid rgba(239,68,68,.18); }
 .au-btn { width: 100%; padding: 13px; background: #B7FF2A; color: #000; font-size: 14px; font-weight: 700; border-radius: 40px; border: none; cursor: pointer; margin-top: 10px; font-family: inherit; transition: background .15s, transform .15s, box-shadow .15s; letter-spacing: -.1px; }
 .au-btn:hover:not(:disabled) { background: #c8ff4d; transform: translateY(-1px); box-shadow: 0 6px 20px rgba(183,255,42,.22); }
