@@ -47,6 +47,24 @@ const FEATURE_COSTS = {
 const PLAN_ALLOWANCES = { starter: 500, creator: 3000, professional: 12000 };
 const PLAN_TEAM_SEATS  = { starter: 1,   creator: 1,    professional: 10   };
 
+// ── Autopilot monthly execution allowance — separate from AI Credits.
+// Intelligence never had its own cap (it's metered per-operation via
+// FEATURE_COSTS.ai_analysis, 5cr, already enforced) so it needs no entry
+// here. Autopilot is different: one rule firing a `suggest_only`/
+// `require_approval` action calls _generateRecommendation (a real AI call,
+// charge:false — background AI is never billed per the existing credit
+// architecture), so an unlimited rule count could otherwise generate
+// unbounded real AI cost with zero credit-balance signal to the user.
+// Starter has no Autopilot at all (existing autopilotEligible gate).
+// Creator: capped, not unlimited -- ~200/mo is roughly 6-7 active rules
+// firing at the existing "at most once/day/rule" ceiling (server.js
+// _evaluateAutomationRules), which comfortably covers real usage while
+// keeping Creator's worst-case background AI cost a small fraction of the
+// plan's price. Professional: Infinity -- no separate monthly cap, per
+// the plan's "Unlimited" positioning (the underlying per-operation credit
+// economy still applies wherever a route already charges credits).
+const PLAN_AUTOPILOT_LIMITS = { starter: 0, creator: 200, professional: Infinity };
+
 class InsufficientCreditsError extends Error {
   constructor(cost, balance) {
     super(`Insufficient credits: need ${cost}, have ${balance == null ? '?' : balance}`);
@@ -125,6 +143,56 @@ async function finalizeCreditLog(reservation, featureKey, info) {
 
 // Reads the real, backend-authoritative credit status for a user — backs
 // GET /api/credits/status, consumed by usage.js and settings.js.
+// Provisions (or re-provisions) a user's credit cycle for a plan. This is
+// the ONE place credits_balance/credits_cycle_start/credits_cycle_end get
+// written from -- called from every place subscription_status can become
+// or remain a paid plan: the Stripe webhooks (checkout completed, invoice
+// paid, subscription updated) AND the DB-only fallback paths in
+// /api/schedule-plan-change that change subscription_status without a
+// real Stripe event to anchor to (server.js). That second category was
+// the actual root cause of a plan showing "creator" with credits_balance:0,
+// credits_cycle_end:null -- subscription_status was written directly with
+// no code path that ever provisioned a cycle for it.
+//
+// Idempotent by construction: skips the write if credits_cycle_end already
+// equals the target cycle end, so a duplicate delivery of the same Stripe
+// webhook event (Stripe's documented at-least-once delivery) or a second
+// call for the same billing period never grants credits twice.
+async function provisionCreditsForCycle(userId, plan, cycleStartISO, cycleEndISO, source) {
+  _assertInitialized();
+  const allowance = PLAN_ALLOWANCES[plan];
+  if (allowance == null) return { provisioned: false, reason: 'no allowance for plan ' + plan };
+
+  const { data: profile, error: readErr } = await supabaseAdmin
+    .from('profiles').select('credits_cycle_end').eq('id', userId).maybeSingle();
+  if (readErr) throw readErr;
+
+  if (profile && profile.credits_cycle_end && cycleEndISO &&
+      new Date(profile.credits_cycle_end).getTime() === new Date(cycleEndISO).getTime()) {
+    return { provisioned: false, reason: 'already provisioned for this cycle' };
+  }
+
+  const { error } = await supabaseAdmin.from('profiles').update({
+    credits_balance: allowance,
+    credits_cycle_start: cycleStartISO,
+    credits_cycle_end: cycleEndISO,
+    credits_last_reset_source: source,
+  }).eq('id', userId);
+  if (error) throw error;
+  console.log(`[creditManager] Provisioned ${allowance} credits for user ${userId} (plan: ${plan}, source: ${source})`);
+  return { provisioned: true, allowance };
+}
+
+// A placeholder 30-day cycle, used only when there's no real Stripe period
+// to anchor to (the DB-only fallback paths, and the one-time repair
+// below). Matches the exact convention checkout.session.completed already
+// used for the same "corrected by the next real invoice" reasoning.
+function _placeholderCycle() {
+  const start = new Date();
+  const end = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000);
+  return { startISO: start.toISOString(), endISO: end.toISOString() };
+}
+
 async function getCreditStatus(userId) {
   _assertInitialized();
   const { data, error } = await supabaseAdmin
@@ -133,9 +201,32 @@ async function getCreditStatus(userId) {
     .eq('id', userId)
     .maybeSingle();
   if (error) throw error;
-  const plan = (data && data.subscription_status) || 'free';
-  const allowance = PLAN_ALLOWANCES[plan] || 0;
-  const balance = data ? data.credits_balance : 0;
+  let plan = (data && data.subscription_status) || 'free';
+  let allowance = PLAN_ALLOWANCES[plan] || 0;
+  let balance = data ? data.credits_balance : 0;
+  let resetDate = data ? data.credits_cycle_end : null;
+
+  // One-time repair: a paid plan with no cycle_end at all means this
+  // account's subscription_status was written by a code path that never
+  // provisioned a credit cycle (the bug this function exists to fix).
+  // This does NOT re-run on every load/status-check -- once provisioned,
+  // credits_cycle_end is no longer null, so this branch is never reached
+  // again for this account. Never fires for free/unpaid accounts (no
+  // allowance to provision), and never touches an already-provisioned
+  // balance regardless of its value (a real 0 after real spending is not
+  // this condition -- only a genuinely never-provisioned NULL cycle is).
+  if (data && !data.credits_cycle_end && allowance > 0) {
+    try {
+      const cyc = _placeholderCycle();
+      const result = await provisionCreditsForCycle(userId, plan, cyc.startISO, cyc.endISO, 'repair');
+      if (result.provisioned) {
+        balance = result.allowance;
+        resetDate = cyc.endISO;
+      }
+    } catch (err) {
+      console.warn('[creditManager] One-time cycle repair failed for', userId, ':', err.message);
+    }
+  }
 
   // Lifetime usage — credit_transactions is the only authoritative source
   // (append-only ledger, never derived from a UI counter). Summing
@@ -157,14 +248,98 @@ async function getCreditStatus(userId) {
     console.warn('[creditManager] Failed to compute lifetime usage:', err.message);
   }
 
+  // Autopilot usage — separate allowance from AI Credits (see
+  // PLAN_AUTOPILOT_LIMITS above for why). Read-only here; the actual
+  // increment happens in checkAndIncrementAutopilotUsage, called from the
+  // automation engine itself (server.js _evaluateAutomationRules), not
+  // from this status read.
+  const autopilotLimit = PLAN_AUTOPILOT_LIMITS[plan];
+  let autopilotUsed = 0;
+  if (autopilotLimit > 0 && autopilotLimit !== Infinity) {
+    try {
+      const { data: apRow } = await supabaseAdmin
+        .from('profiles')
+        .select('autopilot_executions_used, autopilot_cycle_reset_at')
+        .eq('id', userId)
+        .maybeSingle();
+      const cycleExpired = !apRow || !apRow.autopilot_cycle_reset_at || new Date(apRow.autopilot_cycle_reset_at) < new Date();
+      autopilotUsed = cycleExpired ? 0 : (apRow.autopilot_executions_used || 0);
+    } catch (err) {
+      console.warn('[creditManager] Failed to read autopilot usage:', err.message);
+    }
+  }
+
   return {
     balance,
     monthlyAllowance: allowance,
     usedThisMonth: Math.max(0, allowance - balance),
-    resetDate: data ? data.credits_cycle_end : null,
+    resetDate,
     plan,
     lifetimeUsed,
+    // Canonical per-action costs -- the one source the frontend reads for
+    // any "this will cost N credits" display, so a price change here never
+    // needs a matching frontend edit.
+    featureCosts: FEATURE_COSTS,
+    autopilotUsage: {
+      used: autopilotUsed,
+      limit: autopilotLimit === Infinity ? null : autopilotLimit, // null = unlimited, matches resetDate's null-means-n/a convention
+    },
   };
+}
+
+// Called from the automation engine (server.js _evaluateAutomationRules)
+// immediately before a rule is actually allowed to fire. Mirrors
+// reserveCredits' shape (throws on rejection) but tracks a separate
+// counter -- Autopilot executions are not paid for with AI Credits today
+// (background AI stays charge:false per the existing architecture), so
+// without this check Creator's rule count would be the only ceiling on
+// real AI cost, and there is none.
+//
+// Requires two columns on `profiles` this migration adds:
+//   autopilot_executions_used   integer NOT NULL DEFAULT 0
+//   autopilot_cycle_reset_at    timestamptz
+// and this RPC (mirrors spend_credits' atomic row-lock pattern):
+//
+// CREATE OR REPLACE FUNCTION increment_autopilot_usage(p_user_id uuid, p_limit integer, p_cycle_end timestamptz)
+// RETURNS TABLE(ok boolean, used integer) LANGUAGE plpgsql AS $$
+// DECLARE v_used integer; v_reset_at timestamptz;
+// BEGIN
+//   SELECT autopilot_executions_used, autopilot_cycle_reset_at INTO v_used, v_reset_at
+//     FROM profiles WHERE id = p_user_id FOR UPDATE;
+//   IF v_reset_at IS NULL OR v_reset_at < now() THEN
+//     v_used := 0;
+//     UPDATE profiles SET autopilot_executions_used = 0, autopilot_cycle_reset_at = p_cycle_end WHERE id = p_user_id;
+//   END IF;
+//   IF v_used < p_limit THEN
+//     UPDATE profiles SET autopilot_executions_used = autopilot_executions_used + 1 WHERE id = p_user_id;
+//     RETURN QUERY SELECT true, v_used + 1;
+//   ELSE
+//     RETURN QUERY SELECT false, v_used;
+//   END IF;
+// END; $$;
+class AutopilotLimitExceededError extends Error {
+  constructor(limit) {
+    super(`Autopilot monthly execution limit reached (${limit})`);
+    this.name = 'AutopilotLimitExceededError';
+    this.limit = limit;
+  }
+}
+
+async function checkAndIncrementAutopilotUsage(userId, plan, cycleEndISO) {
+  _assertInitialized();
+  const limit = PLAN_AUTOPILOT_LIMITS[plan] || 0;
+  if (limit === Infinity) return { ok: true, used: null, limit: null }; // Professional -- no separate cap
+  if (limit <= 0) throw new AutopilotLimitExceededError(0); // Starter -- Autopilot not included at all
+
+  const { data, error } = await supabaseAdmin.rpc('increment_autopilot_usage', {
+    p_user_id: userId,
+    p_limit: limit,
+    p_cycle_end: cycleEndISO || new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString(),
+  });
+  if (error) throw error;
+  const row = Array.isArray(data) ? data[0] : data;
+  if (!row || !row.ok) throw new AutopilotLimitExceededError(limit);
+  return { ok: true, used: row.used, limit };
 }
 
 module.exports = {
@@ -172,8 +347,12 @@ module.exports = {
   FEATURE_COSTS,
   PLAN_ALLOWANCES,
   PLAN_TEAM_SEATS,
+  PLAN_AUTOPILOT_LIMITS,
   InsufficientCreditsError,
+  AutopilotLimitExceededError,
   reserveCredits,
   finalizeCreditLog,
   getCreditStatus,
+  checkAndIncrementAutopilotUsage,
+  provisionCreditsForCycle,
 };

@@ -215,11 +215,32 @@ app.post('/api/stripe-webhook', express.raw({ type: 'application/json' }), async
     const pendingPlan = sub.metadata && sub.metadata.pending_plan;
     if (pendingPlan && sub.status === 'active') {
       console.log('[Webhook] subscription.updated â†’ applying plan:', pendingPlan);
-      const { error } = await supabaseAdmin.from('profiles')
+      const { data: profile, error } = await supabaseAdmin.from('profiles')
         .update({ subscription_status: pendingPlan, pending_plan: null, pending_plan_date: null })
-        .eq('stripe_customer_id', customerId);
-      if (error) console.error('[Webhook] subscription.updated DB error:', error.message);
-      else console.log('[Webhook] âœ… Plan updated to:', pendingPlan, 'for customer:', customerId);
+        .eq('stripe_customer_id', customerId)
+        .select('id').maybeSingle();
+      if (error) {
+        console.error('[Webhook] subscription.updated DB error:', error.message);
+      } else {
+        console.log('[Webhook] âœ… Plan updated to:', pendingPlan, 'for customer:', customerId);
+        // A plan switch (Creator<->Professional etc.) doesn't always land a
+        // proration invoice.payment_succeeded soon enough (or at all, e.g.
+        // a $0 proration) to be the thing that provisions the new plan's
+        // credit cycle -- this is the same root cause class as the DB-only
+        // fallbacks below, just reachable via the real Stripe path too.
+        // Reprovision here directly using this event's own period, with
+        // the same idempotency guard (a duplicate delivery of this event
+        // is a no-op since credits_cycle_end won't have changed).
+        if (profile) {
+          try {
+            const cycleStart = sub.current_period_start ? new Date(sub.current_period_start * 1000).toISOString() : new Date().toISOString();
+            const cycleEnd   = sub.current_period_end   ? new Date(sub.current_period_end   * 1000).toISOString() : new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString();
+            await creditManager.provisionCreditsForCycle(profile.id, pendingPlan, cycleStart, cycleEnd, 'stripe');
+          } catch (err) {
+            console.error('[Webhook] subscription.updated credit provisioning error:', err.message);
+          }
+        }
+      }
     } else {
       console.log('[Webhook] subscription.updated â€” no pending_plan or not active, skipping');
     }
@@ -240,18 +261,9 @@ app.post('/api/stripe-webhook', express.raw({ type: 'application/json' }), async
         const { data: profile } = await supabaseAdmin.from('profiles')
           .select('id, subscription_status').eq('stripe_customer_id', customerId).maybeSingle();
         if (profile) {
-          const allowance = creditManager.PLAN_ALLOWANCES[profile.subscription_status];
-          if (allowance != null) {
-            await supabaseAdmin.from('profiles').update({
-              credits_balance: allowance,
-              credits_cycle_start: periodStart,
-              credits_cycle_end: periodEnd,
-              credits_last_reset_source: 'stripe',
-            }).eq('id', profile.id);
-            console.log(`[Webhook] Credits reset to ${allowance} for ${profile.id} (plan: ${profile.subscription_status})`);
-          } else {
-            console.log('[Webhook] No credit allowance for plan:', profile.subscription_status, '- skipping reset');
-          }
+          const result = await creditManager.provisionCreditsForCycle(profile.id, profile.subscription_status, periodStart, periodEnd, 'stripe');
+          if (result.provisioned) console.log(`[Webhook] Credits reset to ${result.allowance} for ${profile.id} (plan: ${profile.subscription_status})`);
+          else console.log(`[Webhook] Skipped credit reset for ${profile.id}:`, result.reason);
         } else {
           console.warn('[Webhook] invoice.payment_succeeded - no profile found for customer:', customerId);
         }
@@ -502,6 +514,16 @@ TECHNICAL REQUIREMENTS:
 
 OUTPUT: Return ONLY the HTML document. No explanation, no preamble, no markdown fences. Start directly with <!DOCTYPE html>.`;
 
+  let reservation;
+  if (req.user) {
+    try {
+      reservation = await creditManager.reserveCredits(req.user, 'campaign_generation');
+    } catch (err) {
+      if (err instanceof creditManager.InsufficientCreditsError) return res.status(402).json({ error: 'Out of credits', code: 'CREDITS_EXHAUSTED', balance: err.balance });
+      return res.status(500).json({ error: 'Could not verify credits right now.' });
+    }
+  }
+
   try {
     let raw = (await _aimlText('web', systemPrompt, userPrompt, { max_tokens: 8000 })).trim();
 
@@ -518,14 +540,17 @@ OUTPUT: Return ONLY the HTML document. No explanation, no preamble, no markdown 
 
     if (!html || html.length < 100) {
       console.error('[Web] response too short or missing HTML');
+      if (reservation) creditManager.finalizeCreditLog(reservation, 'campaign_generation', { success: false, error: 'response too short or missing HTML', route: req.path }).catch(() => {});
       return res.status(500).json({ error: 'Failed to generate website' });
     }
 
     console.log(`[Web] page ready â€” ${html.length} chars`);
     _recordCreativeAsset(req.user && req.user.id, { kind: 'landing_page', title: brand_name || product || 'Landing page', content: { html }, source_route: '/api/generate-web' });
+    if (reservation) creditManager.finalizeCreditLog(reservation, 'campaign_generation', { provider: 'aiml', success: true, route: req.path }).catch(() => {});
     res.json({ html });
   } catch (err) {
     console.error('[Web] Anthropic error:', err.message);
+    if (reservation) creditManager.finalizeCreditLog(reservation, 'campaign_generation', { success: false, error: err.message, route: req.path }).catch(() => {});
     res.status(500).json({ error: 'Failed to generate website' });
   }
 });
@@ -830,13 +855,29 @@ Just produce the requested content, formatted cleanly and directly.${hasBrand ? 
 Be specific and direct. No preamble or filler.${hasBrand ? `\n\nBRAND CONTEXT:\n${brandSection}` : ''}${bizSection}`;
   }
 
+  // Cost depends on type: the assistant chat is the cheap ai_chat bucket
+  // (same as any other conversational AI turn); everything else here is
+  // content generation, priced like the app's other content-tool routes.
+  const _textFeatureKey = type === 'assistant' ? 'ai_chat' : 'campaign_improvement';
+  let reservation;
+  if (req.user) {
+    try {
+      reservation = await creditManager.reserveCredits(req.user, _textFeatureKey);
+    } catch (err) {
+      if (err instanceof creditManager.InsufficientCreditsError) return res.status(402).json({ error: 'Out of credits', code: 'CREDITS_EXHAUSTED', balance: err.balance });
+      return res.status(500).json({ error: 'Could not verify credits right now.' });
+    }
+  }
+
   try {
     const result = await _aimlText('text-copy', systemPrompt, prompt);
     console.log(`[Text/${type || 'default'}] AIML â†’ response ready`);
     _recordCreativeAsset(req.user && req.user.id, { kind: type || 'text', title: prompt.slice(0, 80), content: { text: result }, source_route: '/api/generate-text' });
+    if (reservation) creditManager.finalizeCreditLog(reservation, _textFeatureKey, { provider: 'aiml', success: true, route: req.path }).catch(() => {});
     res.json({ result });
   } catch (err) {
     console.error(`[Text/${type || 'default'}] AIML error:`, err.message);
+    if (reservation) creditManager.finalizeCreditLog(reservation, _textFeatureKey, { success: false, error: err.message, route: req.path }).catch(() => {});
     res.status(500).json({ error: 'Failed to generate text. Please try again.' });
   }
 });
@@ -866,12 +907,24 @@ DESIGN REQUIREMENTS:
 - CTA button must be a styled table cell with solid background colour, not a plain link
 - Write all copy based on the brief â€” zero placeholder text${_bizCtx ? `\n\nBUSINESS KNOWLEDGE (real, stored data about this business — reflect it instead of generic placeholder copy):\n${_bizCtx.text}` : ''}`;
 
+  let reservation;
+  if (req.user) {
+    try {
+      reservation = await creditManager.reserveCredits(req.user, 'campaign_improvement');
+    } catch (err) {
+      if (err instanceof creditManager.InsufficientCreditsError) return res.status(402).json({ error: 'Out of credits', code: 'CREDITS_EXHAUSTED', balance: err.balance });
+      return res.status(500).json({ error: 'Could not verify credits right now.' });
+    }
+  }
+
   try {
     const html = extractHtml(await _aimlText('email', system, prompt, { max_tokens: 4096 }));
     _recordCreativeAsset(req.user && req.user.id, { kind: 'email', title: prompt.slice(0, 80), content: { html }, source_route: '/api/generate-email' });
+    if (reservation) creditManager.finalizeCreditLog(reservation, 'campaign_improvement', { provider: 'aiml', success: true, route: req.path }).catch(() => {});
     res.json({ html });
   } catch (err) {
     console.error('[Email] AIML error:', err.message);
+    if (reservation) creditManager.finalizeCreditLog(reservation, 'campaign_improvement', { success: false, error: err.message, route: req.path }).catch(() => {});
     res.status(500).json({ error: 'Failed to generate email. Please try again.' });
   }
 });
@@ -923,6 +976,16 @@ RULES:
 - Apply the brand voice and tone from BrandCore to every word.
 - Every slide must have a strong, memorable title.`;
 
+  let reservation;
+  if (req.user) {
+    try {
+      reservation = await creditManager.reserveCredits(req.user, 'campaign_improvement');
+    } catch (err) {
+      if (err instanceof creditManager.InsufficientCreditsError) return res.status(402).json({ error: 'Out of credits', code: 'CREDITS_EXHAUSTED', balance: err.balance });
+      return res.status(500).json({ error: 'Could not verify credits right now.' });
+    }
+  }
+
   try {
     const raw = (await _aimlText('presentations', system, prompt, { max_tokens: 3000 })).trim();
     let parsed;
@@ -932,12 +995,15 @@ RULES:
       parsed = JSON.parse(clean);
     } catch (e) {
       console.error('[Deck] JSON parse failed:', e.message, raw.slice(0, 200));
+      if (reservation) creditManager.finalizeCreditLog(reservation, 'campaign_improvement', { success: false, error: 'invalid slide structure', route: req.path }).catch(() => {});
       return res.status(500).json({ error: 'AI returned invalid slide structure. Please try again.' });
     }
     _recordCreativeAsset(req.user && req.user.id, { kind: 'deck', title: prompt.slice(0, 80), content: { slides: parsed.slides || [] }, source_route: '/api/generate-deck' });
+    if (reservation) creditManager.finalizeCreditLog(reservation, 'campaign_improvement', { provider: 'aiml', success: true, route: req.path }).catch(() => {});
     res.json({ slides: parsed.slides || [] });
   } catch (err) {
     console.error('[Deck] AIML error:', err.message);
+    if (reservation) creditManager.finalizeCreditLog(reservation, 'campaign_improvement', { success: false, error: err.message, route: req.path }).catch(() => {});
     res.status(500).json({ error: 'Failed to generate deck. Please try again.' });
   }
 });
@@ -996,12 +1062,24 @@ POSTER MUST INCLUDE ALL OF THESE SECTIONS:
 5. CTA area (styled button or highlighted URL)
 6. Footer (tagline or brand detail)`;
 
+  let reservation;
+  if (req.user) {
+    try {
+      reservation = await creditManager.reserveCredits(req.user, 'campaign_improvement');
+    } catch (err) {
+      if (err instanceof creditManager.InsufficientCreditsError) return res.status(402).json({ error: 'Out of credits', code: 'CREDITS_EXHAUSTED', balance: err.balance });
+      return res.status(500).json({ error: 'Could not verify credits right now.' });
+    }
+  }
+
   try {
     const html = extractHtml(await _aimlText('poster', system, prompt, { max_tokens: 4096 }));
     _recordCreativeAsset(req.user && req.user.id, { kind: 'poster', title: prompt.slice(0, 80), content: { html }, source_route: '/api/generate-poster' });
+    if (reservation) creditManager.finalizeCreditLog(reservation, 'campaign_improvement', { provider: 'aiml', success: true, route: req.path }).catch(() => {});
     res.json({ html });
   } catch (err) {
     console.error('[Poster] AIML error:', err.message);
+    if (reservation) creditManager.finalizeCreditLog(reservation, 'campaign_improvement', { success: false, error: err.message, route: req.path }).catch(() => {});
     res.status(500).json({ error: 'Failed to generate poster. Please try again.' });
   }
 });
@@ -1052,12 +1130,24 @@ INFOGRAPHIC MUST INCLUDE ALL OF THESE:
 3. At least one prominent callout stat or highlight box
 4. CTA footer (brand-coloured, action-oriented)`;
 
+  let reservation;
+  if (req.user) {
+    try {
+      reservation = await creditManager.reserveCredits(req.user, 'campaign_improvement');
+    } catch (err) {
+      if (err instanceof creditManager.InsufficientCreditsError) return res.status(402).json({ error: 'Out of credits', code: 'CREDITS_EXHAUSTED', balance: err.balance });
+      return res.status(500).json({ error: 'Could not verify credits right now.' });
+    }
+  }
+
   try {
     const html = extractHtml(await _aimlText('infographic', system, prompt, { max_tokens: 4096 }));
     _recordCreativeAsset(req.user && req.user.id, { kind: 'infographic', title: prompt.slice(0, 80), content: { html }, source_route: '/api/generate-infographic' });
+    if (reservation) creditManager.finalizeCreditLog(reservation, 'campaign_improvement', { provider: 'aiml', success: true, route: req.path }).catch(() => {});
     res.json({ html });
   } catch (err) {
     console.error('[Infographic] AIML error:', err.message);
+    if (reservation) creditManager.finalizeCreditLog(reservation, 'campaign_improvement', { success: false, error: err.message, route: req.path }).catch(() => {});
     res.status(500).json({ error: 'Failed to generate infographic. Please try again.' });
   }
 });
@@ -1070,6 +1160,23 @@ INFOGRAPHIC MUST INCLUDE ALL OF THESE:
 app.post('/api/generate-image', requireSubIfAuthed, async (req, res) => {
   const { prompt, size, imageType, imageFormat, refImageData, uploadType } = req.body;
   if (!prompt) return res.status(400).json({ error: 'prompt is required' });
+
+  // This is the real image-generation route the main Launch creative flow
+  // calls for every ad-creative image (_generateOneCreative, app.html) --
+  // was missing creditManager wiring entirely while every other
+  // image-generating route (logo, product shoots) already charges
+  // 'image_generation'. req.user may be absent for the onboarding one-free-
+  // generation trial (requireSubIfAuthed, not requireSubscription), which
+  // stays unbilled just like the identical guard on every other route below.
+  let reservation;
+  if (req.user) {
+    try {
+      reservation = await creditManager.reserveCredits(req.user, 'image_generation');
+    } catch (err) {
+      if (err instanceof creditManager.InsufficientCreditsError) return res.status(402).json({ error: 'Out of credits', code: 'CREDITS_EXHAUSTED', balance: err.balance });
+      return res.status(500).json({ error: 'Could not verify credits right now.' });
+    }
+  }
 
   const resolvedSize = size || '1024x1024';
   console.log(`[Image] type=${imageType || '?'} format=${imageFormat || '?'} uploadType=${uploadType || 'none'} â†’ DALL-E size: ${resolvedSize}`);
@@ -1128,9 +1235,11 @@ app.post('/api/generate-image', requireSubIfAuthed, async (req, res) => {
     const imageUrl = await _aimlImage('visuals', finalPrompt, { aspect_ratio: _sizeToRatio(resolvedSize) });
     console.log('[Image] AIML â†’ image ready');
     _recordCreativeAsset(req.user && req.user.id, { kind: imageType || 'image', title: prompt.slice(0, 80), content: { url: imageUrl }, source_route: '/api/generate-image' });
+    if (reservation) creditManager.finalizeCreditLog(reservation, 'image_generation', { provider: 'aiml', success: true, route: req.path }).catch(() => {});
     res.json({ imageUrl });
   } catch (err) {
     console.error('[Image] AIML error:', err.message);
+    if (reservation) creditManager.finalizeCreditLog(reservation, 'image_generation', { success: false, error: err.message, route: req.path }).catch(() => {});
     res.status(500).json({ error: 'Could not generate that image right now. Please try again.' });
   }
 });
@@ -1160,6 +1269,16 @@ Reply ONLY with valid JSON (no markdown fences, no extra text):
 - body: benefit-led copy in brand voice (2-3 sentences, no filler, no generic phrases)
 - cta: action-driven, brand-appropriate (max 4 words)${_bizCtx ? `\n\nBUSINESS KNOWLEDGE (real, stored data about this business — use it instead of generic copy):\n${_bizCtx.text}` : ''}`;
 
+  let reservation;
+  if (req.user) {
+    try {
+      reservation = await creditManager.reserveCredits(req.user, 'campaign_generation');
+    } catch (err) {
+      if (err instanceof creditManager.InsufficientCreditsError) return res.status(402).json({ error: 'Out of credits', code: 'CREDITS_EXHAUSTED', balance: err.balance });
+      return res.status(500).json({ error: 'Could not verify credits right now.' });
+    }
+  }
+
   let adCopy, dallePrompt;
   try {
     // Run copy generation and visual prompt extraction in parallel
@@ -1179,6 +1298,7 @@ Reply ONLY with valid JSON (no markdown fences, no extra text):
     console.log('[Ads] Step 1+2 â€” copy and visual prompt ready');
   } catch (err) {
     console.error('[Ads] Anthropic error:', err.message);
+    if (reservation) creditManager.finalizeCreditLog(reservation, 'campaign_generation', { success: false, error: err.message, route: req.path }).catch(() => {});
     return res.status(500).json({ error: 'Failed to generate ad copy' });
   }
 
@@ -1191,6 +1311,7 @@ Reply ONLY with valid JSON (no markdown fences, no extra text):
     console.warn('[Ads] Step 3 â€” AIML image failed (non-fatal):', err.message);
   }
 
+  if (reservation) creditManager.finalizeCreditLog(reservation, 'campaign_generation', { provider: 'aiml', success: true, route: req.path }).catch(() => {});
   _recordCreativeAsset(req.user && req.user.id, { kind: 'ad', title: adCopy.title || prompt.slice(0, 80), content: { headline: adCopy.headline, body: adCopy.body, cta: adCopy.cta, imageUrl }, source_route: '/api/generate-ad' });
   res.json({
     title:    adCopy.title    || '',
@@ -1773,25 +1894,40 @@ app.post('/api/schedule-plan-change', requireSubscription, async (req, res) => {
   if (plan === 'free') {
     if (!subId) {
       // No Stripe subscription on record â€” just update DB immediately
-      await supabaseAdmin.from('profiles')
+      const { error: dbErr } = await supabaseAdmin.from('profiles')
         .update({ subscription_status: 'free', pending_plan: null, pending_plan_date: null })
         .eq('id', user.id);
+      if (dbErr) {
+        console.error('[SchedulePlan] DB downgrade-to-free failed:', dbErr.message);
+        return res.status(500).json({ error: 'Could not update your plan: ' + dbErr.message });
+      }
       return res.json({ ok: true, subscription_status: 'free', pending_plan: null, pending_plan_date: null });
     }
     try {
       const sub = await stripe.subscriptions.update(subId, { cancel_at_period_end: true });
       const periodEnd = new Date(sub.current_period_end * 1000).toISOString();
-      await supabaseAdmin.from('profiles')
+      const { error: dbErr } = await supabaseAdmin.from('profiles')
         .update({ pending_plan: 'free', pending_plan_date: periodEnd })
         .eq('id', user.id);
+      if (dbErr) {
+        // Stripe change already went through â€” un-cancel it so Stripe and the
+        // DB don't disagree, then report the real failure instead of ok:true.
+        console.error('[SchedulePlan] DB write failed after Stripe cancel scheduled, reverting Stripe:', dbErr.message);
+        await stripe.subscriptions.update(subId, { cancel_at_period_end: false }).catch(() => {});
+        return res.status(500).json({ error: 'Could not save the scheduled cancellation: ' + dbErr.message });
+      }
       console.log('[SchedulePlan] Cancellation scheduled for:', periodEnd);
       return res.json({ ok: true, pending_plan: 'free', pending_plan_date: periodEnd });
     } catch (err) {
       // Stripe failed (invalid/missing sub) â€” downgrade in DB immediately
       console.error('[SchedulePlan] Stripe cancel failed, falling back to DB downgrade:', err.message);
-      await supabaseAdmin.from('profiles')
+      const { error: dbErr } = await supabaseAdmin.from('profiles')
         .update({ subscription_status: 'free', pending_plan: null, pending_plan_date: null, stripe_subscription_id: null })
         .eq('id', user.id);
+      if (dbErr) {
+        console.error('[SchedulePlan] DB fallback downgrade also failed:', dbErr.message);
+        return res.status(500).json({ error: 'Could not cancel your subscription: ' + err.message });
+      }
       return res.json({ ok: true, subscription_status: 'free', pending_plan: null, pending_plan_date: null });
     }
   }
@@ -1801,10 +1937,26 @@ app.post('/api/schedule-plan-change', requireSubscription, async (req, res) => {
   if (!newPriceId) return res.status(400).json({ error: 'Price not configured for plan: ' + plan });
 
   if (!subId) {
-    // No Stripe subscription â€” apply plan change directly in DB (edge case: manual override)
-    await supabaseAdmin.from('profiles')
+    // No Stripe subscription â€” apply plan change directly in DB (edge case: manual override).
+    // This path has no real Stripe invoice/period to anchor a credit cycle
+    // to, and no invoice.payment_succeeded webhook will ever fire for it --
+    // this exact gap (subscription_status changed, credits never
+    // provisioned) was the root cause of accounts showing a paid plan with
+    // credits_balance:0, credits_cycle_end:null. Provision a placeholder
+    // 30-day cycle now, same convention checkout.session.completed uses.
+    const { error: dbErr } = await supabaseAdmin.from('profiles')
       .update({ subscription_status: plan, pending_plan: null, pending_plan_date: null })
       .eq('id', user.id);
+    if (dbErr) {
+      console.error('[SchedulePlan] No sub ID â€” DB plan update failed:', dbErr.message);
+      return res.status(500).json({ error: 'Could not update your plan: ' + dbErr.message });
+    }
+    try {
+      const cyc = { start: new Date(), end: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000) };
+      await creditManager.provisionCreditsForCycle(user.id, plan, cyc.start.toISOString(), cyc.end.toISOString(), 'manual');
+    } catch (err) {
+      console.error('[SchedulePlan] No sub ID â€” credit provisioning failed:', err.message);
+    }
     console.log('[SchedulePlan] No sub ID â€” applied plan directly in DB:', plan);
     return res.json({ ok: true, subscription_status: plan });
   }
@@ -1820,18 +1972,34 @@ app.post('/api/schedule-plan-change', requireSubscription, async (req, res) => {
       metadata: { pending_plan: plan },
     });
 
-    await supabaseAdmin.from('profiles')
+    const { error: dbErr } = await supabaseAdmin.from('profiles')
       .update({ pending_plan: plan, pending_plan_date: periodEnd })
       .eq('id', user.id);
+    if (dbErr) {
+      console.error('[SchedulePlan] DB write failed after Stripe plan change applied:', dbErr.message);
+      return res.status(500).json({ error: 'Plan was updated with the payment provider but could not be saved: ' + dbErr.message });
+    }
 
     console.log('[SchedulePlan] Plan change to', plan, 'scheduled for:', periodEnd);
     return res.json({ ok: true, pending_plan: plan, pending_plan_date: periodEnd });
   } catch (err) {
-    // Stripe failed â€” apply plan change directly in DB so the user isn't stuck
+    // Stripe failed â€” apply plan change directly in DB so the user isn't stuck.
+    // Same reasoning as the "no sub ID" branch above: no Stripe event will
+    // provision a credit cycle for this change, so do it here directly.
     console.error('[SchedulePlan] Stripe update failed, falling back to DB plan change:', err.message);
-    await supabaseAdmin.from('profiles')
+    const { error: dbErr } = await supabaseAdmin.from('profiles')
       .update({ subscription_status: plan, pending_plan: null, pending_plan_date: null })
       .eq('id', user.id);
+    if (dbErr) {
+      console.error('[SchedulePlan] DB fallback plan change also failed:', dbErr.message);
+      return res.status(500).json({ error: 'Could not change your plan: ' + err.message });
+    }
+    try {
+      const cyc = { start: new Date(), end: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000) };
+      await creditManager.provisionCreditsForCycle(user.id, plan, cyc.start.toISOString(), cyc.end.toISOString(), 'manual');
+    } catch (provErr) {
+      console.error('[SchedulePlan] Fallback credit provisioning failed:', provErr.message);
+    }
     return res.json({ ok: true, subscription_status: plan });
   }
 });
@@ -2656,15 +2824,28 @@ Rules: first-person only, no stage directions, no brackets, output ONLY the spok
     'Output ONLY the spoken script.',
   ].filter(Boolean).join('\n');
 
+  let reservation;
+  try {
+    reservation = await creditManager.reserveCredits(user, 'campaign_improvement');
+  } catch (err) {
+    if (err instanceof creditManager.InsufficientCreditsError) return res.status(402).json({ error: 'Out of credits', code: 'CREDITS_EXHAUSTED', balance: err.balance });
+    return res.status(500).json({ error: 'Could not verify credits right now.' });
+  }
+
   try {
     const script = (await _aimlText('ugc-script', system, userMsg, { max_tokens: 1024 })).trim();
-    if (!script) return res.status(500).json({ error: 'Empty script generated' });
+    if (!script) {
+      creditManager.finalizeCreditLog(reservation, 'campaign_improvement', { success: false, error: 'empty script', route: req.path }).catch(() => {});
+      return res.status(500).json({ error: 'Empty script generated' });
+    }
 
     console.log('[UGC] Script generated | user:', user.id);
     _recordCreativeAsset(user.id, { kind: 'script', title: (brandName || creatorStyle || 'UGC script').slice(0, 80), content: { text: script }, source_route: '/api/generate-ugc-script' });
+    creditManager.finalizeCreditLog(reservation, 'campaign_improvement', { provider: 'aiml', success: true, route: req.path }).catch(() => {});
     return res.json({ ok: true, script });
   } catch (err) {
     console.error('[UGC] Script generation error:', err.message);
+    creditManager.finalizeCreditLog(reservation, 'campaign_improvement', { success: false, error: err.message, route: req.path }).catch(() => {});
     return res.status(500).json({ error: 'Could not generate that script right now. Please try again.' });
   }
 });
@@ -2679,6 +2860,19 @@ app.post('/api/generate-ugc-video', requireSubIfAuthed, async (req, res) => {
   const { script } = req.body || {};
   if (!script || !script.trim()) return res.status(400).json({ error: 'Script is required' });
 
+  // Real Kling video submission via AIML -- was missing creditManager
+  // wiring entirely (every other video route already charges
+  // 'video_generation'). Reserve/finalize around the submission call
+  // itself, same as /api/video-ads/generate just below: the billable event
+  // is successfully queuing the generation, not waiting for it to render.
+  let reservation;
+  try {
+    reservation = await creditManager.reserveCredits(user, 'video_generation');
+  } catch (err) {
+    if (err instanceof creditManager.InsufficientCreditsError) return res.status(402).json({ error: 'Out of credits', code: 'CREDITS_EXHAUSTED', balance: err.balance });
+    console.warn('[UGC/video] Credit reservation error:', err.message);
+  }
+
   try {
     const aiml     = require('./providers/aimlProvider');
     const router   = require('./services/modelRouter');
@@ -2691,9 +2885,11 @@ app.post('/api/generate-ugc-video', requireSubIfAuthed, async (req, res) => {
       duration:     5,
     });
     console.log('[UGC/video] Submitted:', generationId, '| user:', user.id);
+    if (reservation) creditManager.finalizeCreditLog(reservation, 'video_generation', { provider: 'aiml', success: true, route: req.path }).catch(() => {});
     return res.json({ ok: true, videoId: generationId, status: 'processing' });
   } catch (err) {
     console.error('[UGC/video] Error:', err.message);
+    if (reservation) creditManager.finalizeCreditLog(reservation, 'video_generation', { success: false, error: err.message, route: req.path }).catch(() => {});
     return res.status(500).json({ error: 'Could not start that video generation right now. Please try again.' });
   }
 });
@@ -4226,6 +4422,16 @@ Rules:
     ? `Brand context:\n${ctxLines.join('\n')}`
     : 'No brand context provided â€” generate a brief for an early-stage brand getting started.';
 
+  let reservation;
+  if (req.user) {
+    try {
+      reservation = await creditManager.reserveCredits(req.user, 'campaign_improvement');
+    } catch (err) {
+      if (err instanceof creditManager.InsufficientCreditsError) return res.status(402).json({ error: 'Out of credits', code: 'CREDITS_EXHAUSTED', balance: err.balance });
+      return res.status(500).json({ error: 'Could not verify credits right now.' });
+    }
+  }
+
   try {
     const raw = await _aimlText('daily-brief', system, userMsg, { max_tokens: 800 });
     const cleaned = raw.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '').trim();
@@ -4234,12 +4440,15 @@ Rules:
       brief = JSON.parse(cleaned);
     } catch {
       console.error('[DailyBrief] JSON parse failed:', cleaned.slice(0, 200));
+      if (reservation) creditManager.finalizeCreditLog(reservation, 'campaign_improvement', { success: false, error: 'unparseable response', route: req.path }).catch(() => {});
       return res.status(500).json({ error: 'Failed to parse daily brief' });
     }
     console.log('[DailyBrief] Generated for:', brandCore && brandCore.name);
+    if (reservation) creditManager.finalizeCreditLog(reservation, 'campaign_improvement', { provider: 'aiml', success: true, route: req.path }).catch(() => {});
     res.json(brief);
   } catch (err) {
     console.error('[DailyBrief] AIML error:', err.message);
+    if (reservation) creditManager.finalizeCreditLog(reservation, 'campaign_improvement', { success: false, error: err.message, route: req.path }).catch(() => {});
     res.status(500).json({ error: 'Failed to generate daily brief' });
   }
 });
@@ -4386,6 +4595,16 @@ Rules:
     ? `Brand Core:\n${bcLines.join('\n')}`
     : 'No brand core provided â€” analyze a general D2C brand in a competitive consumer market.';
 
+  let reservation;
+  if (req.user) {
+    try {
+      reservation = await creditManager.reserveCredits(req.user, 'competitor_analysis');
+    } catch (err) {
+      if (err instanceof creditManager.InsufficientCreditsError) return res.status(402).json({ error: 'Out of credits', code: 'CREDITS_EXHAUSTED', balance: err.balance });
+      return res.status(500).json({ error: 'Could not verify credits right now.' });
+    }
+  }
+
   try {
     const raw = await _aimlText('market-research', system, userMsg, { max_tokens: 1800 });
     const cleaned = raw.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '').trim();
@@ -4394,12 +4613,15 @@ Rules:
       report = JSON.parse(cleaned);
     } catch {
       console.error('[MarketResearch] JSON parse failed:', cleaned.slice(0, 200));
+      if (reservation) creditManager.finalizeCreditLog(reservation, 'competitor_analysis', { success: false, error: 'unparseable response', route: req.path }).catch(() => {});
       return res.status(500).json({ error: 'Failed to parse market research' });
     }
     console.log('[MarketResearch] Complete for:', brandCore && brandCore.name);
+    if (reservation) creditManager.finalizeCreditLog(reservation, 'competitor_analysis', { provider: 'aiml', success: true, route: req.path }).catch(() => {});
     res.json(report);
   } catch (err) {
     console.error('[MarketResearch] AIML error:', err.message);
+    if (reservation) creditManager.finalizeCreditLog(reservation, 'competitor_analysis', { success: false, error: err.message, route: req.path }).catch(() => {});
     res.status(500).json({ error: 'Failed to generate market research' });
   }
 });
@@ -4463,6 +4685,16 @@ Rules:
     ? `Context:\n${ctxLines.join('\n')}`
     : 'No context provided â€” identify opportunities for an early-stage consumer brand in a competitive market.';
 
+  let reservation;
+  if (req.user) {
+    try {
+      reservation = await creditManager.reserveCredits(req.user, 'competitor_analysis');
+    } catch (err) {
+      if (err instanceof creditManager.InsufficientCreditsError) return res.status(402).json({ error: 'Out of credits', code: 'CREDITS_EXHAUSTED', balance: err.balance });
+      return res.status(500).json({ error: 'Could not verify credits right now.' });
+    }
+  }
+
   try {
     const raw = await _aimlText('opportunities', system, userMsg, { max_tokens: 1600 });
     const cleaned = raw.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '').trim();
@@ -4471,12 +4703,15 @@ Rules:
       report = JSON.parse(cleaned);
     } catch {
       console.error('[Opportunities] JSON parse failed:', cleaned.slice(0, 200));
+      if (reservation) creditManager.finalizeCreditLog(reservation, 'competitor_analysis', { success: false, error: 'unparseable response', route: req.path }).catch(() => {});
       return res.status(500).json({ error: 'Failed to parse opportunities' });
     }
     console.log('[Opportunities] Complete for:', brandCore && brandCore.name);
+    if (reservation) creditManager.finalizeCreditLog(reservation, 'competitor_analysis', { provider: 'aiml', success: true, route: req.path }).catch(() => {});
     res.json(report);
   } catch (err) {
     console.error('[Opportunities] AIML error:', err.message);
+    if (reservation) creditManager.finalizeCreditLog(reservation, 'competitor_analysis', { success: false, error: err.message, route: req.path }).catch(() => {});
     res.status(500).json({ error: 'Failed to generate opportunities' });
   }
 });
@@ -9860,6 +10095,7 @@ app.post('/api/ads/analyze', async (req, res) => {
 // Fetches fresh campaign and keyword data directly from Google Ads.
 // Accepts only { date_range } from the request body.
 app.post('/api/ads/recommend', async (req, res) => {
+  let reservation;
   try {
     const user = await getUserFromToken(req);
     if (!user) return res.status(401).json({ error: 'Authentication required' });
@@ -9974,6 +10210,13 @@ ${kwSummary || 'No keyword data'}
 SEARCH TERMS WITH SPEND BUT NO CONVERSIONS (negative keyword candidates):
 ${negCandidates || 'None with significant spend'}`;
 
+    try {
+      reservation = await creditManager.reserveCredits(user, 'campaign_improvement');
+    } catch (err) {
+      if (err instanceof creditManager.InsufficientCreditsError) return res.status(402).json({ error: 'Out of credits', code: 'CREDITS_EXHAUSTED', balance: err.balance });
+      throw err;
+    }
+
     const raw = await _aimlText('text-copy', system, userMsg, { max_tokens: 2400 });
 
     let parsed;
@@ -9981,14 +10224,20 @@ ${negCandidates || 'None with significant spend'}`;
       parsed = JSON.parse(raw.replace(/^```json\s*/i, '').replace(/```\s*$/, '').trim());
     } catch (_) {
       const m = raw.match(/\{[\s\S]*\}/);
-      if (!m) { console.error('[Ads/recommend] unparseable AI response:', raw.slice(0, 300)); return res.status(500).json({ error: 'AI response could not be parsed â€” try again' }); }
+      if (!m) {
+        console.error('[Ads/recommend] unparseable AI response:', raw.slice(0, 300));
+        creditManager.finalizeCreditLog(reservation, 'campaign_improvement', { success: false, error: 'unparseable AI response', route: req.path }).catch(() => {});
+        return res.status(500).json({ error: 'AI response could not be parsed â€” try again' });
+      }
       parsed = JSON.parse(m[0]);
     }
 
     console.log('[Ads/recommend] headlines:', parsed.headlines?.length, '| negatives:', parsed.negative_keywords?.length);
+    creditManager.finalizeCreditLog(reservation, 'campaign_improvement', { provider: 'aiml', success: true, route: req.path }).catch(() => {});
     res.json(parsed);
   } catch (err) {
     console.error('[Ads/recommend]', err.message);
+    if (reservation) creditManager.finalizeCreditLog(reservation, 'campaign_improvement', { success: false, error: err.message, route: req.path }).catch(() => {});
     res.status(err.status || 500).json({ error: err.message || 'Internal server error', gads_status: err.gadsStatus || null, gads_codes: err.gadsErrorCodes || null });
   }
 });
@@ -11827,19 +12076,46 @@ cron.schedule('0 3 * * *', async () => {
       .in('subscription_status', ['starter', 'creator', 'professional'])
       .lt('credits_cycle_end', new Date().toISOString());
     if (error) { console.error('[CreditReset] Query error:', error.message); return; }
-    if (!overdue || !overdue.length) { console.log('[CreditReset] No overdue credit cycles'); return; }
-    console.log(`[CreditReset] Resetting ${overdue.length} overdue credit cycle(s)`);
-    for (const row of overdue) {
-      const allowance = creditManager.PLAN_ALLOWANCES[row.subscription_status];
-      if (allowance == null) continue;
-      const oldEnd = row.credits_cycle_end ? new Date(row.credits_cycle_end) : new Date();
-      const nextEnd = new Date(oldEnd.getTime() + 30 * 24 * 60 * 60 * 1000);
-      await supabaseAdmin.from('profiles').update({
-        credits_balance: allowance,
-        credits_cycle_start: oldEnd.toISOString(),
-        credits_cycle_end: nextEnd.toISOString(),
-        credits_last_reset_source: 'fallback_cron',
-      }).eq('id', row.id);
+    if (overdue && overdue.length) {
+      console.log(`[CreditReset] Resetting ${overdue.length} overdue credit cycle(s)`);
+      for (const row of overdue) {
+        const allowance = creditManager.PLAN_ALLOWANCES[row.subscription_status];
+        if (allowance == null) continue;
+        const oldEnd = row.credits_cycle_end ? new Date(row.credits_cycle_end) : new Date();
+        const nextEnd = new Date(oldEnd.getTime() + 30 * 24 * 60 * 60 * 1000);
+        await supabaseAdmin.from('profiles').update({
+          credits_balance: allowance,
+          credits_cycle_start: oldEnd.toISOString(),
+          credits_cycle_end: nextEnd.toISOString(),
+          credits_last_reset_source: 'fallback_cron',
+        }).eq('id', row.id);
+      }
+    } else {
+      console.log('[CreditReset] No overdue credit cycles');
+    }
+
+    // Same defense-in-depth as getCreditStatus()'s one-time repair, run as
+    // a nightly sweep too: `.lt('credits_cycle_end', now)` above never
+    // matches a NULL cycle_end (SQL comparisons against NULL are never
+    // true), so a paid account that was never provisioned at all -- the
+    // exact bug this pass fixes -- would otherwise sit broken forever
+    // until its owner happens to load /api/credits/status.
+    const { data: neverProvisioned, error: npErr } = await supabaseAdmin.from('profiles')
+      .select('id, subscription_status')
+      .in('subscription_status', ['starter', 'creator', 'professional'])
+      .is('credits_cycle_end', null);
+    if (npErr) { console.error('[CreditReset] Never-provisioned query error:', npErr.message); return; }
+    if (neverProvisioned && neverProvisioned.length) {
+      console.log(`[CreditReset] Repairing ${neverProvisioned.length} never-provisioned paid account(s)`);
+      for (const row of neverProvisioned) {
+        const start = new Date();
+        const end = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000);
+        try {
+          await creditManager.provisionCreditsForCycle(row.id, row.subscription_status, start.toISOString(), end.toISOString(), 'repair');
+        } catch (err) {
+          console.error('[CreditReset] Repair failed for', row.id, ':', err.message);
+        }
+      }
     }
   } catch (err) {
     console.error('[CreditReset] Unexpected error:', err.message);
@@ -12057,7 +12333,22 @@ async function _generateRecommendation({ userId, sourceEventId, platform, campai
 
     const system = `You are a senior marketing strategist explaining a detected issue to a business owner. Given the real, already-computed problem and evidence below, write: businessReason (why this matters to the business, 1 sentence), marketingReason (why this matters from a marketing/platform perspective, 1 sentence), estimatedImprovement (a qualitative, honest estimate, e.g. "could reduce wasted spend" â€” never invent a specific percentage unless it already appears in the evidence given), estimatedRoi (qualitative, same rule), suggestedAction (1 short, plain-English sentence). Reply ONLY with valid JSON: {"businessReason":"...","marketingReason":"...","estimatedImprovement":"...","estimatedRoi":"...","suggestedAction":"..."}.`;
     const userMsg = `Problem: ${problem}\nConfidence: ${confidence}%\nEvidence: ${evidence ? JSON.stringify(evidence) : 'n/a'}\nPlatform: ${platform || 'n/a'}\nCampaign: ${campaignName || 'n/a'}\nType: ${type}`;
-    const raw = await _aimlText('autopilot-recommendation', system, userMsg, { max_tokens: 400 });
+    // Background/cron-triggered AI call -- per the credit-economy design,
+    // this never deducts from the user's balance (charge:false), only logs
+    // to credit_transactions for cost observability. Reusing the
+    // 'campaign_improvement' featureKey rather than inventing a new price
+    // point: no separate "autopilot_recommendation" bucket exists in
+    // creditManager's canonical FEATURE_COSTS.
+    let reservation;
+    let raw;
+    try {
+      reservation = await creditManager.reserveCredits({ id: userId }, 'campaign_improvement', { charge: false });
+      raw = await _aimlText('autopilot-recommendation', system, userMsg, { max_tokens: 400 });
+      creditManager.finalizeCreditLog(reservation, 'campaign_improvement', { provider: 'aiml', success: true, route: '_generateRecommendation(cron)' }).catch(() => {});
+    } catch (aiErr) {
+      if (reservation) creditManager.finalizeCreditLog(reservation, 'campaign_improvement', { success: false, error: aiErr.message, route: '_generateRecommendation(cron)' }).catch(() => {});
+      throw aiErr;
+    }
     const cleaned = raw.replace(/^```(?:json)?\s*/i, '').replace(/```\s*$/, '').trim();
     let ai = {};
     try { ai = JSON.parse(cleaned); } catch (_) { console.warn('[Autopilot] recommendation narration unparseable'); }
@@ -12255,7 +12546,18 @@ async function _evaluateAutomationRules(user, platform, campaigns) {
     if (!rules || !rules.length) return;
     const today = new Date().toISOString().slice(0, 10);
 
+    // Autopilot's monthly execution allowance is separate from AI Credits
+    // (see creditManager.PLAN_AUTOPILOT_LIMITS) -- read once per pass, not
+    // per rule, so a Creator user near their cap doesn't get a partial mix
+    // of allowed/blocked fires within the same tick depending on rule
+    // order. Reached once here means every rule this tick is skipped.
+    const { data: profile } = await supabaseAdmin.from('profiles')
+      .select('subscription_status, credits_cycle_end').eq('id', user.id).maybeSingle();
+    const plan = (profile && profile.subscription_status) || 'starter';
+    let autopilotBlocked = false;
+
     for (const rule of rules) {
+      if (autopilotBlocked) break; // limit already hit this tick -- stop attempting further rules
       if (rule.platform && rule.platform !== platform) continue;
       if (!AUTOPILOT_RULE_METRICS.includes(rule.trigger_metric)) continue;
       if (rule.last_triggered_at && rule.last_triggered_at.slice(0, 10) === today) continue; // at most once/day per rule
@@ -12272,6 +12574,22 @@ async function _evaluateAutomationRules(user, platform, campaigns) {
         return actual != null && op(actual, compareVal);
       });
       if (!matches.length) continue;
+
+      // Plan-based monthly Autopilot execution cap (separate from AI
+      // Credits -- see creditManager.PLAN_AUTOPILOT_LIMITS). Checked right
+      // before the rule is allowed to actually fire, not earlier, so a
+      // rule that wouldn't have matched anything today never counts
+      // against the allowance.
+      try {
+        await creditManager.checkAndIncrementAutopilotUsage(user.id, plan, profile && profile.credits_cycle_end);
+      } catch (err) {
+        if (err instanceof creditManager.AutopilotLimitExceededError) {
+          console.log(`[Autopilot] execution limit reached for user ${user.id} (plan: ${plan}, limit: ${err.limit}) -- skipping remaining rules this tick`);
+          autopilotBlocked = true;
+          break;
+        }
+        console.warn(`[Autopilot] usage check failed for user ${user.id}, allowing this execution:`, err.message);
+      }
 
       // At most once/day/rule, so only the first qualifying campaign is
       // acted on per tick even if several matched â€” prevents one noisy
