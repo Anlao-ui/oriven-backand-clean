@@ -1419,6 +1419,12 @@ Rules:
   console.log(`[Campaign] Done â€” ${variationsWithImages.length} variations with images`);
   variationsWithImages.forEach(v => _recordCreativeAsset(req.user && req.user.id, { kind: 'ad', title: v.title || prompt.slice(0, 80), content: v, source_route: '/api/generate-campaign' }));
   if (reservation) creditManager.finalizeCreditLog(reservation, 'campaign_generation', { provider: 'aiml', success: true, route: req.path }).catch(() => {});
+  // Subscription page's "Campaigns Generated" counter -- incremented once
+  // per successful generation here (not per variation row above), the
+  // single point every success path above returns through and every
+  // failure path (prompt missing, AIML error, JSON parse failure,
+  // insufficient credits) returns before reaching.
+  if (req.user) creditManager.incrementCampaignsGenerated(req.user.id).catch(() => {});
   res.json({ variations: variationsWithImages });
 });
 
@@ -11321,6 +11327,75 @@ app.put('/api/user/preferences', async (req, res) => {
   } catch (err) {
     console.error('[user/preferences PUT]', err.message);
     res.status(500).json({ error: 'Could not save your preferences.' });
+  }
+});
+
+// â”€â”€ POST /api/account/delete â”€â”€ permanent, user-initiated deletion â”€â”€â”€â”€
+// SECURITY: identity comes ONLY from the Supabase JWT via getUserFromToken
+// (the same helper GET /api/creative/assets already uses unauthenticated-
+// route-style, i.e. no requireSubscription gate -- deletion must work
+// regardless of plan). There is no user-id field read from req.body
+// anywhere in this handler, so a caller can never delete anyone's account
+// but their own. auth.admin.deleteUser requires the service-role client
+// (supabaseAdmin, server-side only, never sent to the browser) -- mirrors
+// the existing unverified-account cleanup cron just above
+// (`cron.schedule('0 2 * * *', ...)`), which already deletes real Supabase
+// Auth users the same way.
+app.post('/api/account/delete', async (req, res) => {
+  const user = await getUserFromToken(req);
+  if (!user) return res.status(401).json({ error: 'Authentication required' });
+
+  try {
+    // Explicit cleanup of owned application data rather than assuming an
+    // unconfirmed FK cascade from auth.users -- so nothing is left
+    // dangling if the schema doesn't cascade-delete.
+    await supabaseAdmin.from('creative_assets').delete().eq('user_id', user.id);
+    // Disband any team this user owns (their invited seats).
+    await supabaseAdmin.from('team_members').delete().eq('owner_user_id', user.id);
+    // Remove this user's own seat on someone else's team, if any --
+    // leaves that owner's other members untouched.
+    await supabaseAdmin.from('team_members').delete().eq('accepted_user_id', user.id);
+    // credit_transactions is an append-only audit ledger (financial/usage
+    // history) -- deliberately left in place, matching how the cleanup
+    // cron above also only removes the auth user, not historical rows.
+    const { error: profileDelErr } = await supabaseAdmin.from('profiles').delete().eq('id', user.id);
+    if (profileDelErr) console.warn('[Account] profiles delete warning (continuing to auth deletion):', profileDelErr.message);
+
+    const { error: authDelErr } = await supabaseAdmin.auth.admin.deleteUser(user.id);
+    if (authDelErr) throw authDelErr;
+
+    console.log('[Account] Deleted account:', user.id, user.email || '(no email)');
+    res.json({ ok: true });
+  } catch (err) {
+    console.error('[Account] Delete error:', err.message);
+    res.status(500).json({ error: 'Could not delete your account right now. Please try again or contact support.' });
+  }
+});
+
+// â”€â”€ POST /api/profile/sync-email â”€â”€ reconciles profiles.email to match
+// Supabase Auth after a user changes their email (settings.js
+// saveAccountEmail â†’ SB.auth.updateUser({email}), confirmed via Supabase's
+// own email-change link -- there is no webhook available in this
+// environment for that confirmation event, so the client calls this once
+// per session resolution instead (auth.js _loadUserProfile) and it
+// self-corrects the next time the user is active with a confirmed new
+// email). The email written here comes ONLY from the verified JWT
+// (getUserFromToken â†’ Supabase Auth's own record for this token), never
+// from the request body -- a caller can only ever sync their own real
+// authenticated email, never an arbitrary one.
+app.post('/api/profile/sync-email', async (req, res) => {
+  const user = await getUserFromToken(req);
+  if (!user || !user.email) return res.status(401).json({ error: 'Authentication required' });
+  try {
+    const { data: profile } = await supabaseAdmin.from('profiles').select('email').eq('id', user.id).maybeSingle();
+    if (profile && profile.email === user.email) return res.json({ ok: true, synced: false });
+    const { error } = await supabaseAdmin.from('profiles').update({ email: user.email }).eq('id', user.id);
+    if (error) throw error;
+    console.log('[Profile] Synced email for', user.id, 'â†’', user.email);
+    res.json({ ok: true, synced: true });
+  } catch (err) {
+    console.error('[Profile] sync-email error:', err.message);
+    res.status(500).json({ error: 'Could not sync profile email.' });
   }
 });
 

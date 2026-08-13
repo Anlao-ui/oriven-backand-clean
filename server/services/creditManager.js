@@ -265,7 +265,7 @@ async function getCreditStatus(userId) {
   _assertInitialized();
   const { data, error } = await supabaseAdmin
     .from('profiles')
-    .select('credits_balance, credits_cycle_end, subscription_status, credits_provisioned_plan')
+    .select('credits_balance, credits_cycle_end, subscription_status, credits_provisioned_plan, campaigns_generated')
     .eq('id', userId)
     .maybeSingle();
   if (error) throw error;
@@ -342,6 +342,30 @@ async function getCreditStatus(userId) {
     }
   }
 
+  // Campaigns Generated -- profiles.campaigns_generated, incremented
+  // exactly once per successful /api/generate-campaign call (see
+  // incrementCampaignsGenerated below), never per creative_assets row
+  // (a single generation writes one creative_assets row PER VARIATION,
+  // which would overcount "campaigns" if used directly as the counter).
+  const campaignsGenerated = (data && data.campaigns_generated) || 0;
+
+  // Saved Assets -- creative_assets is the one real, already-existing
+  // asset library (also used by the Studio/Asset Library page via
+  // GET /api/creative/assets) -- a count query here, not that route's
+  // 200-row page, so the number stays accurate past 200 assets.
+  let savedAssets = 0;
+  try {
+    const { count: assetCount, error: assetErr } = await supabaseAdmin
+      .from('creative_assets')
+      .select('id', { count: 'exact', head: true })
+      .eq('user_id', userId)
+      .eq('archived', false);
+    if (assetErr) throw assetErr;
+    savedAssets = assetCount || 0;
+  } catch (err) {
+    console.warn('[creditManager] Failed to count saved assets:', err.message);
+  }
+
   return {
     balance,
     monthlyAllowance: allowance,
@@ -349,6 +373,8 @@ async function getCreditStatus(userId) {
     resetDate,
     plan,
     lifetimeUsed,
+    campaignsGenerated,
+    savedAssets,
     // Canonical per-action costs -- the one source the frontend reads for
     // any "this will cost N credits" display, so a price change here never
     // needs a matching frontend edit.
@@ -358,6 +384,39 @@ async function getCreditStatus(userId) {
       limit: autopilotLimit === Infinity ? null : autopilotLimit, // null = unlimited, matches resetDate's null-means-n/a convention
     },
   };
+}
+
+// Called once from the single canonical success point of a real campaign
+// generation (server.js POST /api/generate-campaign, after variations +
+// images are produced) -- never on generation-screen open, cancel, or
+// failure, since those paths return/throw before this is reached. Uses an
+// atomic RPC (mirrors spend_credits/increment_autopilot_usage's row-lock
+// pattern) so concurrent generations from the same user can't race and
+// undercount.
+//
+// REQUIRED MIGRATION:
+//
+//   ALTER TABLE profiles ADD COLUMN IF NOT EXISTS campaigns_generated integer NOT NULL DEFAULT 0;
+//
+//   CREATE OR REPLACE FUNCTION increment_campaigns_generated(p_user_id uuid)
+//   RETURNS integer LANGUAGE plpgsql AS $$
+//   DECLARE v_count integer;
+//   BEGIN
+//     UPDATE profiles SET campaigns_generated = campaigns_generated + 1
+//       WHERE id = p_user_id
+//       RETURNING campaigns_generated INTO v_count;
+//     RETURN v_count;
+//   END; $$;
+async function incrementCampaignsGenerated(userId) {
+  if (!userId) return null;
+  try {
+    const { data, error } = await supabaseAdmin.rpc('increment_campaigns_generated', { p_user_id: userId });
+    if (error) throw error;
+    return data;
+  } catch (err) {
+    console.warn('[creditManager] Failed to increment campaigns_generated for', userId, ':', err.message);
+    return null;
+  }
 }
 
 // Called from the automation engine (server.js _evaluateAutomationRules)
@@ -428,4 +487,5 @@ module.exports = {
   getCreditStatus,
   checkAndIncrementAutopilotUsage,
   provisionCreditsForCycle,
+  incrementCampaignsGenerated,
 };
