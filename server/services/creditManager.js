@@ -56,14 +56,15 @@ const PLAN_TEAM_SEATS  = { starter: 1,   creator: 1,    professional: 10   };
 // architecture), so an unlimited rule count could otherwise generate
 // unbounded real AI cost with zero credit-balance signal to the user.
 // Starter has no Autopilot at all (existing autopilotEligible gate).
-// Creator: capped, not unlimited -- ~200/mo is roughly 6-7 active rules
-// firing at the existing "at most once/day/rule" ceiling (server.js
-// _evaluateAutomationRules), which comfortably covers real usage while
-// keeping Creator's worst-case background AI cost a small fraction of the
-// plan's price. Professional: Infinity -- no separate monthly cap, per
-// the plan's "Unlimited" positioning (the underlying per-operation credit
-// economy still applies wherever a route already charges credits).
-const PLAN_AUTOPILOT_LIMITS = { starter: 0, creator: 200, professional: Infinity };
+// Creator: capped, not unlimited -- 10/mo, revised down from an earlier
+// 200/mo per explicit product decision to keep Creator's plan-card number
+// small and legible (10 executions is plenty for the "1-2 active rules"
+// realistic Creator usage pattern, still comfortably inside the "at most
+// once/day/rule" ceiling in server.js _evaluateAutomationRules).
+// Professional: Infinity -- no separate monthly cap, per the plan's
+// "Unlimited" positioning (the underlying per-operation credit economy
+// still applies wherever a route already charges credits).
+const PLAN_AUTOPILOT_LIMITS = { starter: 0, creator: 10, professional: Infinity };
 
 class InsufficientCreditsError extends Error {
   constructor(cost, balance) {
