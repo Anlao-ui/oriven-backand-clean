@@ -159,7 +159,20 @@ async function finalizeCreditLog(reservation, featureKey, info) {
 // equals the target cycle end, so a duplicate delivery of the same Stripe
 // webhook event (Stripe's documented at-least-once delivery) or a second
 // call for the same billing period never grants credits twice.
-async function provisionCreditsForCycle(userId, plan, cycleStartISO, cycleEndISO, source) {
+// opts.previousPlan: the plan on record BEFORE this call's caller changed
+// subscription_status (callers that change plan must capture it first and
+// pass it here). Root-caused bug this parameter fixes: Stripe does not
+// reset current_period_end on a plain `items.update` price swap (e.g.
+// Creator -> Professional), so a genuine mid-cycle upgrade can carry the
+// exact same cycleEndISO as the account's last (Creator) provision. The
+// cycle_end-only idempotency check below would then treat the upgrade as
+// "already provisioned for this cycle" and silently skip granting the new
+// plan's allowance, leaving Professional accounts stuck showing whatever
+// balance Creator had left (observed: showing 3000-ish instead of 12000).
+// A plan change is never a duplicate of a prior grant regardless of
+// whether the billing period boundary happens to coincide.
+async function provisionCreditsForCycle(userId, plan, cycleStartISO, cycleEndISO, source, opts) {
+  opts = opts || {};
   _assertInitialized();
   const allowance = PLAN_ALLOWANCES[plan];
   if (allowance == null) return { provisioned: false, reason: 'no allowance for plan ' + plan };
@@ -168,7 +181,8 @@ async function provisionCreditsForCycle(userId, plan, cycleStartISO, cycleEndISO
     .from('profiles').select('credits_cycle_end').eq('id', userId).maybeSingle();
   if (readErr) throw readErr;
 
-  if (profile && profile.credits_cycle_end && cycleEndISO &&
+  const planUnchanged = !opts.previousPlan || opts.previousPlan === plan;
+  if (profile && profile.credits_cycle_end && cycleEndISO && planUnchanged &&
       new Date(profile.credits_cycle_end).getTime() === new Date(cycleEndISO).getTime()) {
     return { provisioned: false, reason: 'already provisioned for this cycle' };
   }

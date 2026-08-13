@@ -215,6 +215,17 @@ app.post('/api/stripe-webhook', express.raw({ type: 'application/json' }), async
     const pendingPlan = sub.metadata && sub.metadata.pending_plan;
     if (pendingPlan && sub.status === 'active') {
       console.log('[Webhook] subscription.updated â†’ applying plan:', pendingPlan);
+      // Capture the plan BEFORE overwriting it -- Stripe does not reset
+      // current_period_end on a plain price swap (e.g. Creator ->
+      // Professional keeps the same billing-period boundary), so the
+      // idempotency check inside provisionCreditsForCycle needs to know a
+      // real plan change happened even though cycle_end looks unchanged.
+      // Root cause of Professional accounts showing a stale ~3000 balance
+      // instead of 12000 after upgrading from Creator.
+      const { data: beforeProfile } = await supabaseAdmin.from('profiles')
+        .select('subscription_status').eq('stripe_customer_id', customerId).maybeSingle();
+      const previousPlan = beforeProfile && beforeProfile.subscription_status;
+
       const { data: profile, error } = await supabaseAdmin.from('profiles')
         .update({ subscription_status: pendingPlan, pending_plan: null, pending_plan_date: null })
         .eq('stripe_customer_id', customerId)
@@ -228,14 +239,14 @@ app.post('/api/stripe-webhook', express.raw({ type: 'application/json' }), async
         // a $0 proration) to be the thing that provisions the new plan's
         // credit cycle -- this is the same root cause class as the DB-only
         // fallbacks below, just reachable via the real Stripe path too.
-        // Reprovision here directly using this event's own period, with
-        // the same idempotency guard (a duplicate delivery of this event
-        // is a no-op since credits_cycle_end won't have changed).
+        // Reprovision here directly using this event's own period; the
+        // idempotency guard now also checks previousPlan so a genuine
+        // plan change is never mistaken for a duplicate event delivery.
         if (profile) {
           try {
             const cycleStart = sub.current_period_start ? new Date(sub.current_period_start * 1000).toISOString() : new Date().toISOString();
             const cycleEnd   = sub.current_period_end   ? new Date(sub.current_period_end   * 1000).toISOString() : new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString();
-            await creditManager.provisionCreditsForCycle(profile.id, pendingPlan, cycleStart, cycleEnd, 'stripe');
+            await creditManager.provisionCreditsForCycle(profile.id, pendingPlan, cycleStart, cycleEnd, 'stripe', { previousPlan: previousPlan });
           } catch (err) {
             console.error('[Webhook] subscription.updated credit provisioning error:', err.message);
           }
@@ -1953,7 +1964,7 @@ app.post('/api/schedule-plan-change', requireSubscription, async (req, res) => {
     }
     try {
       const cyc = { start: new Date(), end: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000) };
-      await creditManager.provisionCreditsForCycle(user.id, plan, cyc.start.toISOString(), cyc.end.toISOString(), 'manual');
+      await creditManager.provisionCreditsForCycle(user.id, plan, cyc.start.toISOString(), cyc.end.toISOString(), 'manual', { previousPlan: currentPlan });
     } catch (err) {
       console.error('[SchedulePlan] No sub ID â€” credit provisioning failed:', err.message);
     }
@@ -1996,7 +2007,7 @@ app.post('/api/schedule-plan-change', requireSubscription, async (req, res) => {
     }
     try {
       const cyc = { start: new Date(), end: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000) };
-      await creditManager.provisionCreditsForCycle(user.id, plan, cyc.start.toISOString(), cyc.end.toISOString(), 'manual');
+      await creditManager.provisionCreditsForCycle(user.id, plan, cyc.start.toISOString(), cyc.end.toISOString(), 'manual', { previousPlan: currentPlan });
     } catch (provErr) {
       console.error('[SchedulePlan] Fallback credit provisioning failed:', provErr.message);
     }
