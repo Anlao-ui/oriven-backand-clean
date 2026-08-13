@@ -13,6 +13,44 @@
 // type like 'text-copy' is reused by both a 1-credit chat helper and a
 // 5-credit account-analysis call, so cost is always priced off the
 // caller-supplied featureKey, never inferred from the AI task type.
+//
+// ── REQUIRED MIGRATION — credits_provisioned_plan ──────────────────
+// New column this file's self-heal logic depends on (see getCreditStatus
+// and provisionCreditsForCycle below). Records which plan the account's
+// CURRENT credits_balance/cycle was actually granted for, independent of
+// whatever profiles.subscription_status says right now -- this is what
+// lets getCreditStatus() detect and correct a stale balance left over
+// from an earlier plan-change bug, without ever re-resetting a correctly
+// provisioned account on an ordinary page load.
+//
+//   ALTER TABLE profiles ADD COLUMN credits_provisioned_plan text;
+//
+//   -- Safe backfill: for every OTHER existing paid account, assume its
+//   -- current balance already belongs to its current plan (a no-op for
+//   -- anyone not exhibiting the bug -- this does NOT change their
+//   -- balance, only labels it).
+//   UPDATE profiles SET credits_provisioned_plan = subscription_status
+//     WHERE subscription_status IN ('starter','creator','professional')
+//       AND credits_provisioned_plan IS NULL;
+//
+//   -- Targeted repair for a SPECIFIC known-affected account (e.g. the
+//   -- Professional account reported showing a stale ~3000 balance) --
+//   -- run this AFTER the backfill above, substituting the real user id
+//   -- or email, so it isn't silently marked "already correct" by the
+//   -- blanket backfill:
+//   UPDATE profiles
+//     SET credits_balance = 12000,
+//         credits_cycle_start = now(),
+//         credits_cycle_end = now() + interval '30 days',
+//         credits_provisioned_plan = 'professional',
+//         credits_last_reset_source = 'repair'
+//     WHERE id = '<affected-user-id>'; -- or WHERE email = '<affected-user-email>'
+//
+// Once the column exists, getCreditStatus() also self-heals this exact
+// case automatically on next load for ANY account where
+// credits_provisioned_plan != subscription_status -- the targeted UPDATE
+// above is only needed if an immediate fix is wanted without waiting for
+// the account owner's next request.
 // ════════════════════════════════════════════════════════════════
 
 const crypto = require('crypto');
@@ -178,10 +216,24 @@ async function provisionCreditsForCycle(userId, plan, cycleStartISO, cycleEndISO
   if (allowance == null) return { provisioned: false, reason: 'no allowance for plan ' + plan };
 
   const { data: profile, error: readErr } = await supabaseAdmin
-    .from('profiles').select('credits_cycle_end').eq('id', userId).maybeSingle();
+    .from('profiles').select('credits_cycle_end, credits_provisioned_plan').eq('id', userId).maybeSingle();
   if (readErr) throw readErr;
 
-  const planUnchanged = !opts.previousPlan || opts.previousPlan === plan;
+  // planUnchanged checks BOTH the caller-supplied opts.previousPlan (set by
+  // callers that know they're mid-transition, e.g. the subscription.updated
+  // webhook) AND the stored credits_provisioned_plan -- the plan this
+  // account's CURRENT balance was actually granted for, independent of
+  // whatever subscription_status says right now. The second check is what
+  // makes this self-healing: if subscription_status was ever changed by a
+  // path that didn't call this function (a bug, a manual DB edit, or a race
+  // before this column existed), credits_provisioned_plan stays stale and
+  // this comparison alone is enough to trigger a correct reprovision the
+  // next time anything calls this function for the account -- no separate
+  // "is credits_cycle_end null" heuristic needed, which is what let a
+  // Professional account with a real (non-null) cycle_end keep showing a
+  // stale Creator-era balance indefinitely.
+  const priorPlan = (profile && profile.credits_provisioned_plan) || opts.previousPlan || null;
+  const planUnchanged = !priorPlan || priorPlan === plan;
   if (profile && profile.credits_cycle_end && cycleEndISO && planUnchanged &&
       new Date(profile.credits_cycle_end).getTime() === new Date(cycleEndISO).getTime()) {
     return { provisioned: false, reason: 'already provisioned for this cycle' };
@@ -192,6 +244,7 @@ async function provisionCreditsForCycle(userId, plan, cycleStartISO, cycleEndISO
     credits_cycle_start: cycleStartISO,
     credits_cycle_end: cycleEndISO,
     credits_last_reset_source: source,
+    credits_provisioned_plan: plan,
   }).eq('id', userId);
   if (error) throw error;
   console.log(`[creditManager] Provisioned ${allowance} credits for user ${userId} (plan: ${plan}, source: ${source})`);
@@ -212,7 +265,7 @@ async function getCreditStatus(userId) {
   _assertInitialized();
   const { data, error } = await supabaseAdmin
     .from('profiles')
-    .select('credits_balance, credits_cycle_end, subscription_status')
+    .select('credits_balance, credits_cycle_end, subscription_status, credits_provisioned_plan')
     .eq('id', userId)
     .maybeSingle();
   if (error) throw error;
@@ -221,25 +274,30 @@ async function getCreditStatus(userId) {
   let balance = data ? data.credits_balance : 0;
   let resetDate = data ? data.credits_cycle_end : null;
 
-  // One-time repair: a paid plan with no cycle_end at all means this
-  // account's subscription_status was written by a code path that never
-  // provisioned a credit cycle (the bug this function exists to fix).
-  // This does NOT re-run on every load/status-check -- once provisioned,
-  // credits_cycle_end is no longer null, so this branch is never reached
-  // again for this account. Never fires for free/unpaid accounts (no
-  // allowance to provision), and never touches an already-provisioned
-  // balance regardless of its value (a real 0 after real spending is not
-  // this condition -- only a genuinely never-provisioned NULL cycle is).
-  if (data && !data.credits_cycle_end && allowance > 0) {
+  // Self-heal: reprovision when either (a) there's no cycle_end at all
+  // (subscription_status was written by a path that never provisioned a
+  // cycle), or (b) credits_provisioned_plan doesn't match the CURRENT
+  // subscription_status (the balance on record was granted for a
+  // different plan than the account is on now -- e.g. a Professional
+  // account still sitting on a stale Creator-era balance/cycle because an
+  // earlier bug or manual DB edit changed subscription_status without
+  // ever calling provisionCreditsForCycle). Both branches are self-
+  // limiting: once provisioned, credits_provisioned_plan matches
+  // subscription_status and cycle_end is non-null, so neither condition
+  // fires again until a real plan/cycle change happens -- this does NOT
+  // reset credits on every Settings open or page load.
+  const neverProvisioned = data && !data.credits_cycle_end;
+  const provisionedForWrongPlan = data && data.credits_cycle_end && data.credits_provisioned_plan && data.credits_provisioned_plan !== plan;
+  if ((neverProvisioned || provisionedForWrongPlan) && allowance > 0) {
     try {
       const cyc = _placeholderCycle();
-      const result = await provisionCreditsForCycle(userId, plan, cyc.startISO, cyc.endISO, 'repair');
+      const result = await provisionCreditsForCycle(userId, plan, cyc.startISO, cyc.endISO, 'repair', { previousPlan: data.credits_provisioned_plan });
       if (result.provisioned) {
         balance = result.allowance;
         resetDate = cyc.endISO;
       }
     } catch (err) {
-      console.warn('[creditManager] One-time cycle repair failed for', userId, ':', err.message);
+      console.warn('[creditManager] Credit cycle repair failed for', userId, ':', err.message);
     }
   }
 

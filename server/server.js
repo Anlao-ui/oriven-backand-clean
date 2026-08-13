@@ -2338,6 +2338,22 @@ app.post('/api/resend-verification', async (req, res) => {
 // â”€â”€ POST /api/send-invite â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 // Sends a team invite email via Outlook SMTP.
 // Body: { name, email, role, message, workspaceName }
+//
+// REQUIRED MIGRATION -- the secure token-based accept flow below needs 5
+// columns on team_members that may not exist yet on every environment:
+//
+//   ALTER TABLE team_members
+//     ADD COLUMN IF NOT EXISTS invite_token      text,
+//     ADD COLUMN IF NOT EXISTS invite_expires_at timestamptz,
+//     ADD COLUMN IF NOT EXISTS workspace_name    text,
+//     ADD COLUMN IF NOT EXISTS accepted_user_id  uuid,
+//     ADD COLUMN IF NOT EXISTS accepted_at       timestamptz;
+//   CREATE INDEX IF NOT EXISTS team_members_invite_token_idx
+//     ON team_members(invite_token);
+//
+// Without this migration, /api/send-invite's insert (invite_token/
+// invite_expires_at/workspace_name) and /api/invite/:token's lookup will
+// fail against a stale schema -- run this before deploying this feature.
 // -- GET /api/team/members -----------------------------------------
 // Lists the caller's own team (pending + accepted seats only -- revoked
 // seats don't count against the limit and aren't shown).
@@ -2421,6 +2437,15 @@ app.post('/api/send-invite', requireSubscription, async (req, res) => {
   const roleLabel        = role  || 'Member';
   const personalNote     = message ? `<p style="margin:0 0 14px;color:#374151;font-size:14px;line-height:1.6;font-style:italic;">"${message}"</p>` : '';
 
+  // Secure, single-use, expiring token -- the invite link must not just
+  // drop the recipient on the generic /app URL (which had no connection
+  // to this specific invitation, this workspace, or even this email
+  // address). 14 days, matching the existing email-verification link's
+  // own expiry convention (_verificationEmailHtml / verification_token).
+  const inviteToken = crypto.randomBytes(32).toString('hex');
+  const inviteExpiresAt = new Date(Date.now() + 14 * 24 * 60 * 60 * 1000).toISOString();
+  const acceptUrl = `${FRONTEND_URL}?invite_token=${inviteToken}`;
+
   const html = `<!DOCTYPE html>
 <html lang="en">
 <head><meta charset="UTF-8"><title>You're invited to ${senderWorkspace}</title></head>
@@ -2452,7 +2477,7 @@ app.post('/api/send-invite', requireSubscription, async (req, res) => {
 
       <!-- CTA -->
       <div style="text-align:center;margin:8px 0 28px;">
-        <a href="https://orivenai.com/app" style="display:inline-block;background:#B7FF2A;color:#000;font-size:14px;font-weight:600;text-decoration:none;padding:13px 32px;border-radius:8px;letter-spacing:.01em;">
+        <a href="${acceptUrl}" style="display:inline-block;background:#B7FF2A;color:#000;font-size:14px;font-weight:600;text-decoration:none;padding:13px 32px;border-radius:8px;letter-spacing:.01em;">
           Accept Invitation &rarr;
         </a>
       </div>
@@ -2472,11 +2497,12 @@ app.post('/api/send-invite', requireSubscription, async (req, res) => {
       to:      email,
       subject: `You've been invited to ${senderWorkspace} on ORIVEN`,
       html:    html,
-      text:    `Hi ${recipientName},\n\nYou've been invited to join "${senderWorkspace}" on ORIVEN as a ${roleLabel}.\n\nVisit https://orivenai.com/app to accept.\n\nâ€” The ORIVEN Team`
+      text:    `Hi ${recipientName},\n\nYou've been invited to join "${senderWorkspace}" on ORIVEN as a ${roleLabel}.\n\nAccept your invitation:\n${acceptUrl}\n\nThis link is valid for 14 days.\n\nâ€” The ORIVEN Team`
     });
 
     const { data: memberRow, error: insertErr } = await supabaseAdmin.from('team_members').insert({
       owner_user_id: req.user.id, invitee_email: email, invitee_name: name || null, role: roleLabel, status: 'pending',
+      invite_token: inviteToken, invite_expires_at: inviteExpiresAt, workspace_name: senderWorkspace,
     }).select('id, invitee_name, invitee_email, role, status, created_at').maybeSingle();
     if (insertErr) console.error('[Invite] Email sent but DB insert failed (non-fatal, seat count may under-report):', insertErr.message);
 
@@ -2485,6 +2511,67 @@ app.post('/api/send-invite', requireSubscription, async (req, res) => {
   } catch (err) {
     console.error('[Invite] âŒ Failed to send invite email:', err.message);
     res.status(500).json({ error: 'Could not send that invite right now. Please try again.' });
+  }
+});
+
+// â”€â”€ GET /api/invite/:token â”€â”€ public lookup, no auth required (the
+// recipient hasn't necessarily signed up/in yet when the accept-invite
+// landing page first loads and needs to show "Jane invited you to X"). ONLY
+// returns the minimal display info a not-yet-authenticated visitor needs
+// -- never the owner's user id or any other account data.
+app.get('/api/invite/:token', async (req, res) => {
+  try {
+    const { data: invite, error } = await supabaseAdmin.from('team_members')
+      .select('invitee_email, role, status, workspace_name, invite_expires_at')
+      .eq('invite_token', req.params.token).maybeSingle();
+    if (error) throw error;
+    if (!invite) return res.status(404).json({ error: 'This invitation link is invalid.' });
+    if (invite.status !== 'pending') return res.status(410).json({ error: 'This invitation has already been ' + invite.status + '.' });
+    if (invite.invite_expires_at && new Date(invite.invite_expires_at) < new Date()) {
+      return res.status(410).json({ error: 'This invitation has expired. Ask the workspace owner to send a new one.' });
+    }
+    res.json({
+      valid: true,
+      email: invite.invitee_email,
+      role: invite.role,
+      workspaceName: invite.workspace_name || 'ORIVEN Workspace',
+    });
+  } catch (err) {
+    console.error('[Invite] Lookup error:', err.message);
+    res.status(500).json({ error: 'Could not look up that invitation right now.' });
+  }
+});
+
+// â”€â”€ POST /api/invite/:token/accept â”€â”€ requires the recipient to already
+// be authenticated (either just signed up via /api/signup or signed in
+// with an existing account) -- the real security boundary: the
+// AUTHENTICATED user's own email must exactly match the invitation's
+// invitee_email, so only the actual invited person can accept it,
+// regardless of what token they happen to have.
+app.post('/api/invite/:token/accept', requireSubscription, async (req, res) => {
+  try {
+    const { data: invite, error } = await supabaseAdmin.from('team_members')
+      .select('id, owner_user_id, invitee_email, status, invite_expires_at').eq('invite_token', req.params.token).maybeSingle();
+    if (error) throw error;
+    if (!invite) return res.status(404).json({ error: 'This invitation link is invalid.' });
+    if (invite.status !== 'pending') return res.status(410).json({ error: 'This invitation has already been ' + invite.status + '.' });
+    if (invite.invite_expires_at && new Date(invite.invite_expires_at) < new Date()) {
+      return res.status(410).json({ error: 'This invitation has expired.' });
+    }
+    if ((req.user.email || '').toLowerCase() !== (invite.invitee_email || '').toLowerCase()) {
+      return res.status(403).json({ error: 'This invitation was sent to a different email address. Sign in with ' + invite.invitee_email + ' to accept it.' });
+    }
+
+    const { error: updateErr } = await supabaseAdmin.from('team_members')
+      .update({ status: 'accepted', accepted_user_id: req.user.id, accepted_at: new Date().toISOString() })
+      .eq('id', invite.id);
+    if (updateErr) throw updateErr;
+
+    console.log(`[Invite] Accepted invitation ${invite.id} for owner ${invite.owner_user_id} by ${req.user.email}`);
+    res.json({ ok: true });
+  } catch (err) {
+    console.error('[Invite] Accept error:', err.message);
+    res.status(500).json({ error: 'Could not accept that invitation right now.' });
   }
 });
 
