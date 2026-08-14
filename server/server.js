@@ -5478,6 +5478,45 @@ app.post('/api/publish/google', requireSubscription, async (req, res) => {
     const googleGoalConfig = campaignGoals.GOOGLE_GOAL_CONFIG[goal];
     console.log('[publish/google] goal:', goal, '| bidding:', googleGoalConfig.biddingField);
 
+    // ── Server-side budget validation ───────────────────────────────────
+    // Real advertising spend -- never trust the frontend alone. Computed
+    // ONCE here (all three campaign-type branches below reuse this single
+    // validated value instead of each re-deriving/silently defaulting their
+    // own amount) and rejected clearly if it isn't a genuine positive
+    // number, rather than the old behavior of silently falling back to a
+    // hardcoded 10 for anything missing/NaN/negative.
+    const GOOGLE_ADS_MIN_DAILY_BUDGET = 1; // sanity floor -- Google's own API rejects anything smaller for the account's currency, surfaced via that error if this floor is too permissive for a given case
+    const _rawBudget = s.budgetRecommendation;
+    const _rawAmount = (typeof _rawBudget === 'object' && _rawBudget !== null)
+      ? (_rawBudget.amount != null ? _rawBudget.amount : _rawBudget.daily)
+      : _rawBudget;
+    const _budgetAmount = Number(_rawAmount);
+    if (_rawAmount === undefined || _rawAmount === null || _rawAmount === '' ||
+        !Number.isFinite(_budgetAmount) || _budgetAmount < GOOGLE_ADS_MIN_DAILY_BUDGET) {
+      return res.status(400).json({ ok: false, error: 'A valid daily budget amount is required to publish to Google Ads (a positive number, minimum ' + GOOGLE_ADS_MIN_DAILY_BUDGET + ').' });
+    }
+    const dailyAmountMicros = String(Math.round(_budgetAmount * 1e6));
+    console.log('[publish/google] validated daily budget:', _budgetAmount, '→', dailyAmountMicros, 'micros');
+
+    // Pulls Google's actual error code(s) + message out of the REST error
+    // envelope (details[0].errors[].errorCode/message) so the response sent
+    // back to the client is a real, specific Google Ads error (e.g.
+    // "...— [{"campaignBudgetError":"BIDDING_STRATEGY_TYPE_INCOMPATIBLE_WITH_SHARED_BUDGET"}]")
+    // instead of either a generic "Could not publish" or an unreadable raw
+    // JSON blob. The full raw body is still logged server-side either way.
+    function _extractGadsErrorMessage(d) {
+      const gErr = (d && d.error && Array.isArray(d.error.details) && d.error.details[0]) || {};
+      const errCodes = [];
+      if (Array.isArray(gErr.errors)) {
+        gErr.errors.forEach(function(e) {
+          if (e.errorCode) errCodes.push(JSON.stringify(e.errorCode));
+          if (e.message)   errCodes.push('msg:' + e.message);
+        });
+      }
+      const baseMsg = (d && d.error && d.error.message) || 'Google Ads API error';
+      return errCodes.length ? (baseMsg + ' [' + errCodes.join('; ') + ']') : baseMsg;
+    }
+
     async function _gadsMutate(resource, operations) {
       const url = 'https://googleads.googleapis.com/v24/customers/' + customerId + '/' + resource + ':mutate';
       const headers = {
@@ -5488,7 +5527,10 @@ app.post('/api/publish/google', requireSubscription, async (req, res) => {
       if (loginCustomerId && loginCustomerId !== customerId) headers['login-customer-id'] = loginCustomerId;
       const r = await fetch(url, { method: 'POST', headers, body: JSON.stringify({ operations }) });
       const d = await r.json();
-      if (!r.ok) throw Object.assign(new Error(JSON.stringify(d.error || d)), { status: r.status });
+      if (!r.ok) {
+        console.error('[publish/google] Google Ads API error on', resource, ':', JSON.stringify(d.error || d));
+        throw Object.assign(new Error(_extractGadsErrorMessage(d)), { status: r.status, gadsRawError: d.error || d });
+      }
       return d;
     }
 
@@ -5520,7 +5562,10 @@ app.post('/api/publish/google', requireSubscription, async (req, res) => {
       if (loginCustomerId && loginCustomerId !== customerId) headers['login-customer-id'] = loginCustomerId;
       const r = await fetch(url, { method: 'POST', headers, body: JSON.stringify({ mutateOperations }) });
       const d = await r.json();
-      if (!r.ok) throw Object.assign(new Error(JSON.stringify(d.error || d)), { status: r.status });
+      if (!r.ok) {
+        console.error('[publish/google] Google Ads API error on batch mutate:', JSON.stringify(d.error || d));
+        throw Object.assign(new Error(_extractGadsErrorMessage(d)), { status: r.status, gadsRawError: d.error || d });
+      }
       return d;
     }
 
@@ -5601,33 +5646,36 @@ app.post('/api/publish/google', requireSubscription, async (req, res) => {
       // exact name when one exists (avoids CampaignBudgetError.DUPLICATE_NAME
       // on republish), otherwise create one, falling back to a deterministic
       // unique name if the base name is taken by an unrelated/incompatible
-      // budget. The requested daily amount itself is never altered here --
-      // it's only used when we actually create a new budget resource.
-      const dgDailyAmountMicros = (function(){
-        var budgetRec = s.budgetRecommendation;
-        var amt = (typeof budgetRec === 'object' && budgetRec ? (budgetRec.amount || budgetRec.daily || 10) : (Number(budgetRec) || 10));
-        return String(Math.round(amt * 1e6));
-      })();
-      const dgBudgetDecision = await _gadsResolveBudgetName(accessToken, customerId, loginCustomerId, campaignName, campaignName + ' Budget');
+      // budget. Amount already validated once, above, as dailyAmountMicros --
+      // reused here rather than re-derived, and never altered when reusing.
+      const dgBudgetDecision = await _gadsResolveBudgetName(accessToken, customerId, loginCustomerId, campaignName, campaignName + ' Budget', demandGenGoalConfig.biddingField);
       let dgBudgetResourceName;
       if (dgBudgetDecision.action === 'reuse') {
         dgBudgetResourceName = dgBudgetDecision.resourceName;
       } else {
+        // explicitlyShared:false -- new Oriven budgets are dedicated to their
+        // own campaign by default (see _gadsResolveBudgetName's comment on
+        // BIDDING_STRATEGY_TYPE_INCOMPATIBLE_WITH_SHARED_BUDGET).
         const dgBudgetRes = await _gadsMutate('campaignBudgets', [{
-          create: { name: dgBudgetDecision.name, amountMicros: dgDailyAmountMicros, deliveryMethod: 'STANDARD' }
+          create: { name: dgBudgetDecision.name, amountMicros: dailyAmountMicros, deliveryMethod: 'STANDARD', explicitlyShared: false }
         }]);
         dgBudgetResourceName = dgBudgetRes.results[0].resourceName;
         createdBudgetResourceName = dgBudgetResourceName;
       }
       console.log('[publish/google] Demand Gen campaign budget resolution:', dgBudgetDecision.action, '| resourceName:', dgBudgetResourceName, '| name:', dgBudgetDecision.name);
 
-      // 2. Campaign (DEMAND_GEN, PAUSED)
+      // 2. Campaign (DEMAND_GEN, PAUSED). containsEuPoliticalAdvertising is
+      // now a required field on every Google campaign create call -- Oriven
+      // never generates political-advertising campaigns, so this always
+      // declares DOES_NOT_CONTAIN_EU_POLITICAL_ADVERTISING rather than
+      // relying on any Google default.
       const dgCampaignRes = await _gadsMutate('campaigns', [{
         create: {
           name: campaignName,
           advertisingChannelType: 'DEMAND_GEN',
           status: 'PAUSED',
           campaignBudget: dgBudgetResourceName,
+          containsEuPoliticalAdvertising: 'DOES_NOT_CONTAIN_EU_POLITICAL_ADVERTISING',
           [demandGenGoalConfig.biddingField]: demandGenGoalConfig.biddingValue,
         }
       }]);
@@ -5764,13 +5812,9 @@ app.post('/api/publish/google', requireSubscription, async (req, res) => {
       // created budget here can never end up orphaned by a later failure in
       // this same request -- either everything in `ops` is created together
       // or nothing is, so no separate cleanup bookkeeping is needed for this
-      // path the way the sequential Search/Demand Gen flows need.
-      const pmDailyAmountMicros = (function(){
-        var budgetRec = s.budgetRecommendation;
-        var amt = (typeof budgetRec === 'object' && budgetRec ? (budgetRec.amount || budgetRec.daily || 10) : (Number(budgetRec) || 10));
-        return String(Math.round(amt * 1e6));
-      })();
-      const pmBudgetDecision = await _gadsResolveBudgetName(accessToken, customerId, loginCustomerId, campaignName, campaignName + ' Budget');
+      // path the way the sequential Search/Demand Gen flows need. Amount
+      // already validated once, above, as dailyAmountMicros.
+      const pmBudgetDecision = await _gadsResolveBudgetName(accessToken, customerId, loginCustomerId, campaignName, campaignName + ' Budget', pmaxGoalConfig.biddingField);
       const rn = {
         budget:    pmBudgetDecision.action === 'reuse' ? pmBudgetDecision.resourceName : ('customers/' + cid + '/campaignBudgets/-1'),
         campaign:  'customers/' + cid + '/campaigns/-2',
@@ -5780,18 +5824,31 @@ app.post('/api/publish/google', requireSubscription, async (req, res) => {
       const ops = [];
 
       if (pmBudgetDecision.action !== 'reuse') {
+        // explicitlyShared:false -- new Oriven budgets are dedicated to
+        // their own campaign by default (see _gadsResolveBudgetName's
+        // comment on BIDDING_STRATEGY_TYPE_INCOMPATIBLE_WITH_SHARED_BUDGET).
+        // Still created inside the SAME atomic batch as the campaign/asset
+        // group/assets below -- only the reuse-vs-create decision moved
+        // earlier, the atomicity of the mutate itself is unchanged.
         ops.push({ campaignBudgetOperation: { create: {
           resourceName: rn.budget, name: pmBudgetDecision.name,
-          amountMicros: pmDailyAmountMicros,
+          amountMicros: dailyAmountMicros,
           deliveryMethod: 'STANDARD',
+          explicitlyShared: false,
         } } });
       }
       console.log('[publish/google] Performance Max campaign budget resolution:', pmBudgetDecision.action, '| resourceName:', rn.budget, '| name:', pmBudgetDecision.name);
 
+      // containsEuPoliticalAdvertising is now a required field on every
+      // Google campaign create call -- Oriven never generates political-
+      // advertising campaigns, so this always declares
+      // DOES_NOT_CONTAIN_EU_POLITICAL_ADVERTISING rather than relying on
+      // any Google default.
       ops.push({ campaignOperation: { create: {
         resourceName: rn.campaign, name: campaignName,
         advertisingChannelType: 'PERFORMANCE_MAX', status: 'PAUSED',
         campaignBudget: rn.budget,
+        containsEuPoliticalAdvertising: 'DOES_NOT_CONTAIN_EU_POLITICAL_ADVERTISING',
         [pmaxGoalConfig.biddingField]: pmaxGoalConfig.biddingValue,
       } } });
 
@@ -5913,20 +5970,17 @@ app.post('/api/publish/google', requireSubscription, async (req, res) => {
     // exact name when one exists (avoids CampaignBudgetError.DUPLICATE_NAME
     // on republish), otherwise create one, falling back to a deterministic
     // unique name if the base name is taken by an unrelated/incompatible
-    // budget. The requested daily amount itself is never altered here --
-    // it's only used when we actually create a new budget resource.
-    const dailyAmountMicros = (function(){
-      var budgetRec = s.budgetRecommendation;
-      var amt = (typeof budgetRec === 'object' && budgetRec ? (budgetRec.amount || budgetRec.daily || 10) : (Number(budgetRec) || 10));
-      return String(Math.round(amt * 1e6));
-    })();
-    const budgetDecision = await _gadsResolveBudgetName(accessToken, customerId, loginCustomerId, campaignName, campaignName + ' Budget');
+    // budget. Amount already validated once, above, as dailyAmountMicros.
+    const budgetDecision = await _gadsResolveBudgetName(accessToken, customerId, loginCustomerId, campaignName, campaignName + ' Budget', googleGoalConfig.biddingField);
     let budgetResourceName;
     if (budgetDecision.action === 'reuse') {
       budgetResourceName = budgetDecision.resourceName;
     } else {
+      // explicitlyShared:false -- new Oriven budgets are dedicated to their
+      // own campaign by default (see _gadsResolveBudgetName's comment on
+      // BIDDING_STRATEGY_TYPE_INCOMPATIBLE_WITH_SHARED_BUDGET).
       const budgetRes = await _gadsMutate('campaignBudgets', [{
-        create: { name: budgetDecision.name, amountMicros: dailyAmountMicros, deliveryMethod: 'STANDARD' }
+        create: { name: budgetDecision.name, amountMicros: dailyAmountMicros, deliveryMethod: 'STANDARD', explicitlyShared: false }
       }]);
       budgetResourceName = budgetRes.results[0].resourceName;
       createdBudgetResourceName = budgetResourceName;
@@ -5941,12 +5995,18 @@ app.post('/api/publish/google', requireSubscription, async (req, res) => {
     // search ad groups/keywords/RSAs, so Awareness is differentiated by
     // bidding + broader goal-aware keywords/copy rather than a Display
     // channel switch this pipeline has no creative path for.
+    // containsEuPoliticalAdvertising is now a required field on every
+    // Google campaign create call -- Oriven never generates political-
+    // advertising campaigns, so this always declares
+    // DOES_NOT_CONTAIN_EU_POLITICAL_ADVERTISING rather than relying on any
+    // Google default.
     const campaignRes = await _gadsMutate('campaigns', [{
       create: {
         name: campaignName,
         advertisingChannelType: 'SEARCH',
         status: 'PAUSED',
         campaignBudget: budgetResourceName,
+        containsEuPoliticalAdvertising: 'DOES_NOT_CONTAIN_EU_POLITICAL_ADVERTISING',
         [googleGoalConfig.biddingField]: googleGoalConfig.biddingValue,
       }
     }]);
@@ -9689,6 +9749,22 @@ async function _gadsMutate(accessToken, customerId, resource, operations, loginC
   return d;
 }
 
+// Maps Oriven's internal campaignGoals.js `biddingField` names (the inline
+// campaign-level bidding fields this pipeline actually sets, e.g.
+// `maximizeConversions: {}`) to Google's real `campaign.bidding_strategy_type`
+// enum values (what a GAQL query on an existing campaign returns) -- needed
+// to compare "the strategy this publish is about to use" against "the
+// strategy a candidate budget's existing campaign already uses".
+const _GADS_BIDDING_FIELD_TO_STRATEGY_TYPE = {
+  maximizeConversions:    'MAXIMIZE_CONVERSIONS',
+  maximizeConversionValue:'MAXIMIZE_CONVERSION_VALUE',
+  targetSpend:             'TARGET_SPEND',
+  targetImpressionShare:   'TARGET_IMPRESSION_SHARE',
+  targetCpa:                'TARGET_CPA',
+  targetRoas:                'TARGET_ROAS',
+  manualCpc:                  'MANUAL_CPC',
+};
+
 // ── Google Ads: campaign budget name resolution (dedupe / reuse) ────────────
 // Google Ads requires campaign_budget.name to be unique within a customer
 // account. Oriven's publish flow names budgets deterministically from the
@@ -9699,27 +9775,48 @@ async function _gadsMutate(accessToken, customerId, resource, operations, loginC
 // anything itself, so it's safe to call from a sequential single-mutate flow
 // (Search/Demand Gen) or ahead of an atomic batch mutate (Performance Max).
 //
+// A SECOND, separate Google error this also guards against:
+// CampaignBudgetError.BIDDING_STRATEGY_TYPE_INCOMPATIBLE_WITH_SHARED_BUDGET --
+// campaigns using an inline (non-portfolio) bidding strategy like this
+// pipeline's maximizeConversions/targetSpend/targetImpressionShare can only
+// safely share a budget with another campaign using the SAME strategy type;
+// attaching a new campaign to an existing SHARED budget whose other
+// campaign(s) use a different strategy is what Google rejects. Rather than
+// try to model Google's exact per-strategy shared-budget matrix, this never
+// reuses a SHARED budget at all (see `_isCompatible` below) and every NEW
+// budget Oriven creates is `explicitlyShared: false` (dedicated) -- a
+// dedicated budget belongs to exactly one campaign, so this class of error
+// cannot occur for anything created going forward. A budget is only ever
+// reused when it's already dedicated AND its one existing campaign (if any)
+// uses the SAME bidding strategy type this publish is about to use.
+//
 // Returned `action`:
-//   'reuse'          - an existing ENABLED, DAILY, shareable budget with this
-//                       exact name already exists in THIS customer, and is
-//                       either unattached (a leftover orphan, most likely
-//                       from a prior failed publish under this same naming
-//                       convention) or attached only to campaign(s) whose
-//                       name is IDENTICAL to the one being published now --
-//                       i.e. clearly a republish of the same Oriven campaign.
+//   'reuse'          - an existing ENABLED, DAILY, DEDICATED (non-shared)
+//                       budget with this exact name already exists in THIS
+//                       customer, and is either unattached (a leftover
+//                       orphan, most likely from a prior failed publish
+//                       under this same naming convention) or attached only
+//                       to a campaign whose name is IDENTICAL to the one
+//                       being published now AND whose bidding strategy type
+//                       matches -- i.e. clearly a republish of the same
+//                       Oriven campaign with a compatible strategy.
 //                       `resourceName` is set; do not create anything.
-//   'create'         - the base name is free; create a new budget with it
-//                       exactly as given.
+//   'create'         - the base name is free; create a new (dedicated)
+//                       budget with it exactly as given.
 //   'create_renamed' - the base name is taken by an incompatible/unrelated
-//                       budget (wrong period, not shareable, or attached to
-//                       a campaign with a DIFFERENT name -- a real foreign
-//                       budget that just happens to collide) -- create a new
-//                       budget under a deterministic "{baseName} — N" suffix,
-//                       having re-checked that THAT name is itself free.
-//                       Never blindly retries the original duplicate name.
+//                       budget (shared, wrong period, attached to a campaign
+//                       with a DIFFERENT name, or a bidding-strategy
+//                       mismatch) -- create a new dedicated budget under a
+//                       deterministic "{baseName} — N" suffix, having
+//                       re-checked that THAT name is itself free. Never
+//                       blindly retries the original duplicate name, and
+//                       never modifies/reuses the incompatible budget found.
 // Lookups are scoped to the given customerId only -- never reuses a budget
-// from another Google Ads account.
-async function _gadsResolveBudgetName(accessToken, customerId, loginCustomerId, campaignName, baseName) {
+// from another Google Ads account. Never touches another campaign's budget,
+// bidding strategy, or amount -- an incompatible match is simply skipped.
+async function _gadsResolveBudgetName(accessToken, customerId, loginCustomerId, campaignName, baseName, biddingField) {
+  const expectedStrategyType = _GADS_BIDDING_FIELD_TO_STRATEGY_TYPE[biddingField] || null;
+
   function _escGaql(s) { return String(s).replace(/\\/g, '\\\\').replace(/'/g, "\\'"); }
 
   async function _findBudgetsByName(name) {
@@ -9730,17 +9827,20 @@ async function _gadsResolveBudgetName(accessToken, customerId, loginCustomerId, 
     return (rows || []).map(function(r) { return r.campaignBudget; }).filter(Boolean);
   }
 
-  async function _campaignNamesOnBudget(budgetResourceName) {
-    const gaql = "SELECT campaign.name FROM campaign WHERE campaign.campaign_budget = '" +
+  async function _campaignsOnBudget(budgetResourceName) {
+    const gaql = "SELECT campaign.name, campaign.bidding_strategy_type FROM campaign WHERE campaign.campaign_budget = '" +
       _escGaql(budgetResourceName) + "' AND campaign.status != 'REMOVED'";
     const rows = await _gadsQuery(accessToken, customerId, gaql, loginCustomerId);
-    return (rows || []).map(function(r) { return r.campaign && r.campaign.name; }).filter(Boolean);
+    return (rows || []).map(function(r) { return r.campaign; }).filter(Boolean);
   }
 
-  function _isCompatible(budget) {
+  // Dedicated-only: a SHARED budget (explicitlyShared true/unset) is never
+  // reused, regardless of name/status/period/attached campaigns -- see the
+  // BIDDING_STRATEGY_TYPE_INCOMPATIBLE_WITH_SHARED_BUDGET note above.
+  function _isCandidateForReuse(budget) {
     return budget.status === 'ENABLED' &&
       (!budget.period || budget.period === 'DAILY') &&
-      budget.explicitlyShared !== false;
+      budget.explicitlyShared === false;
   }
 
   let candidateName = baseName;
@@ -9750,16 +9850,22 @@ async function _gadsResolveBudgetName(accessToken, customerId, loginCustomerId, 
       return { action: attempt === 0 ? 'create' : 'create_renamed', name: candidateName, resourceName: null };
     }
     const budget = matches[0];
-    if (_isCompatible(budget)) {
-      const attachedNames = await _campaignNamesOnBudget(budget.resourceName);
-      const clearlyOurs = attachedNames.length === 0 || attachedNames.every(function(n) { return n === campaignName; });
-      if (clearlyOurs) {
+    if (_isCandidateForReuse(budget)) {
+      const attached = await _campaignsOnBudget(budget.resourceName);
+      const clearlyOurs = attached.length === 0 || attached.every(function(c) { return c.name === campaignName; });
+      // If we know the expected strategy type, the existing campaign(s) (if
+      // any) must match it -- an unattached dedicated budget has no
+      // strategy commitment yet, so it's compatible with anything.
+      const biddingCompatible = !expectedStrategyType || attached.length === 0 ||
+        attached.every(function(c) { return c.biddingStrategyType === expectedStrategyType; });
+      if (clearlyOurs && biddingCompatible) {
         return { action: 'reuse', name: budget.name, resourceName: budget.resourceName };
       }
     }
-    // Name taken by an incompatible or unrelated budget -- try a
+    // Name taken by a shared, incompatible, or unrelated budget -- try a
     // deterministic unique suffix and check THAT one too, rather than
-    // assuming it's free or blindly retrying the same duplicate name.
+    // assuming it's free or blindly retrying the same duplicate name. The
+    // budget we declined to reuse is left completely untouched.
     candidateName = baseName + ' — ' + (attempt + 2);
   }
   throw new Error('Could not find or safely create a Google Ads campaign budget for "' + baseName + '" after 25 attempts — too many colliding budget names in this account.');
