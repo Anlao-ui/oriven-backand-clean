@@ -8058,18 +8058,46 @@ app.post('/api/tiktok/disconnect', async (req, res) => {
 });
 
 // POST /api/tiktok/active-account â€” set active TikTok Ads account for a user
+// SECURITY: advertiser_id alone is never trusted as proof of access -- same
+// fix already applied to POST /api/google/active-account. The client-
+// submitted id is checked against THIS user's own real, previously-
+// discovered tiktok_ads_accounts list (populated only by
+// _fetchTikTokAdvertisers against their own OAuth token) before it's
+// accepted; an id that isn't in that list is rejected outright. Display
+// metadata (account_name/currency) also comes from that authoritative
+// stored record, not the client's copy of it.
 app.post('/api/tiktok/active-account', async (req, res) => {
   const user = await getUserFromToken(req);
   if (!user) return res.status(401).json({ error: 'Authentication required' });
 
-  const { advertiser_id, advertiser_name, currency } = req.body || {};
+  const { advertiser_id } = req.body || {};
   if (!advertiser_id) return res.status(400).json({ error: 'advertiser_id is required' });
+  const requestedId = String(advertiser_id);
+
+  const { data: integration, error: fetchErr } = await supabaseAdmin
+    .from('integrations')
+    .select('tiktok_ads_accounts')
+    .eq('user_id', user.id)
+    .eq('provider', 'tiktok_ads')
+    .maybeSingle();
+  if (fetchErr) {
+    console.error('[TikTok ActiveAccount] DB fetch error:', fetchErr.message);
+    return res.status(500).json({ error: 'Database error' });
+  }
+  if (!integration) return res.status(404).json({ error: 'TikTok Ads not connected' });
+
+  const knownAccounts = integration.tiktok_ads_accounts || [];
+  const match = knownAccounts.find(function (a) { return String(a.account_id || '') === requestedId; });
+  if (!match) {
+    console.warn('[TikTok ActiveAccount] Rejected -- advertiser_id not in this user\'s accessible accounts:', requestedId, '| user:', user.id);
+    return res.status(403).json({ error: 'That account is not accessible with your connected TikTok Ads credentials.' });
+  }
 
   const active_ad_account = {
     platform:      'tiktok_ads',
-    account_id:    String(advertiser_id),
-    account_name:  String(advertiser_name || ''),
-    currency:      currency || null
+    account_id:    String(match.account_id),
+    account_name:  String(match.account_name || ''),
+    currency:      match.currency || null
   };
 
   const { error } = await supabaseAdmin
@@ -8082,6 +8110,7 @@ app.post('/api/tiktok/active-account', async (req, res) => {
     console.error('[TikTok ActiveAccount] DB error:', error.message);
     return res.status(500).json({ error: 'Could not update active account' });
   }
+  console.log('[TikTok ActiveAccount] Set | user:', user.id, '| account:', active_ad_account.account_id, active_ad_account.account_name);
   res.json({ ok: true, active_ad_account });
 });
 
