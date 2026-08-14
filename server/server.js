@@ -5517,6 +5517,27 @@ app.post('/api/publish/google', requireSubscription, async (req, res) => {
       return errCodes.length ? (baseMsg + ' [' + errCodes.join('; ') + ']') : baseMsg;
     }
 
+    // Pulls the failing operation's index out of Google's error location
+    // (details[0].errors[].location.fieldPathElements, e.g. the "operations"
+    // element's `index` for "operations[3].create...") so a failure log
+    // names exactly which operation in the batch was rejected, not just the
+    // resource type. Returns null if Google's response doesn't carry that
+    // shape (never guessed/fabricated) -- e.g. errors from the different
+    // batch-mutate endpoint used by _gadsBatchMutate below may not.
+    function _extractGadsOperationIndex(d) {
+      const gErr = (d && d.error && Array.isArray(d.error.details) && d.error.details[0]) || {};
+      if (Array.isArray(gErr.errors)) {
+        for (const e of gErr.errors) {
+          const els = e.location && e.location.fieldPathElements;
+          if (Array.isArray(els)) {
+            const opEl = els.find(function(el) { return el.fieldName === 'operations' || el.fieldName === 'mutateOperations'; });
+            if (opEl && opEl.index != null) return opEl.index;
+          }
+        }
+      }
+      return null;
+    }
+
     async function _gadsMutate(resource, operations) {
       const url = 'https://googleads.googleapis.com/v24/customers/' + customerId + '/' + resource + ':mutate';
       const headers = {
@@ -5528,8 +5549,12 @@ app.post('/api/publish/google', requireSubscription, async (req, res) => {
       const r = await fetch(url, { method: 'POST', headers, body: JSON.stringify({ operations }) });
       const d = await r.json();
       if (!r.ok) {
-        console.error('[publish/google] Google Ads API error on', resource, ':', JSON.stringify(d.error || d));
-        throw Object.assign(new Error(_extractGadsErrorMessage(d)), { status: r.status, gadsRawError: d.error || d });
+        // Deliberately logs only resource/campaign-type/operation-index/error
+        // body -- never `headers` (which holds the OAuth access token and
+        // developer-token) and never accessToken/refreshToken directly.
+        const opIndex = _extractGadsOperationIndex(d);
+        console.error('[publish/google] Google Ads API error | resource:', resource, '| campaignType:', campaignType, '| operationIndex:', opIndex, '| totalOperations:', operations.length, '| error:', JSON.stringify(d.error || d));
+        throw Object.assign(new Error(_extractGadsErrorMessage(d)), { status: r.status, gadsRawError: d.error || d, gadsOperationIndex: opIndex, gadsResource: resource });
       }
       return d;
     }
@@ -5563,8 +5588,10 @@ app.post('/api/publish/google', requireSubscription, async (req, res) => {
       const r = await fetch(url, { method: 'POST', headers, body: JSON.stringify({ mutateOperations }) });
       const d = await r.json();
       if (!r.ok) {
-        console.error('[publish/google] Google Ads API error on batch mutate:', JSON.stringify(d.error || d));
-        throw Object.assign(new Error(_extractGadsErrorMessage(d)), { status: r.status, gadsRawError: d.error || d });
+        // Same no-secrets logging discipline as _gadsMutate above.
+        const opIndex = _extractGadsOperationIndex(d);
+        console.error('[publish/google] Google Ads API error | resource: batch mutate | campaignType:', campaignType, '| operationIndex:', opIndex, '| totalOperations:', mutateOperations.length, '| error:', JSON.stringify(d.error || d));
+        throw Object.assign(new Error(_extractGadsErrorMessage(d)), { status: r.status, gadsRawError: d.error || d, gadsOperationIndex: opIndex, gadsResource: 'batch mutate' });
       }
       return d;
     }
@@ -6036,10 +6063,18 @@ app.post('/api/publish/google', requireSubscription, async (req, res) => {
       const groupKeywords = (struct.groups > 1 && allKeywords.length >= struct.groups * 3)
         ? allKeywords.slice(Math.floor(gi * allKeywords.length / struct.groups), Math.floor((gi + 1) * allKeywords.length / struct.groups))
         : allKeywords.slice(0, 20);
-      if (groupKeywords.length) {
-        await _gadsMutate('adGroupCriteria', groupKeywords.slice(0, 20).map(kw => ({
-          create: { adGroup: adGroupResourceName, text: kw, matchType: 'BROAD', status: 'ENABLED' }
-        })));
+      // AdGroupCriterion operations -- keyword text/matchType nested under
+      // create.keyword per Google Ads API v24 (see _gadsBuildKeywordOperations
+      // above for why the previous flattened create.text/create.matchType
+      // shape was rejected). g.matchType is undefined today (no per-campaign
+      // or per-keyword match-type selector exists in the product yet) --
+      // _gadsNormalizeMatchType defaults an absent value to BROAD, Oriven's
+      // only-ever-used match type, and will validate/normalize a real value
+      // the moment one is ever wired in without needing this call site
+      // touched again.
+      const keywordOps = _gadsBuildKeywordOperations(adGroupResourceName, groupKeywords.slice(0, 20), g.matchType);
+      if (keywordOps.length) {
+        await _gadsMutate('adGroupCriteria', keywordOps);
       }
 
       // M Responsive Search Ads per group, each a rotated window of the
@@ -9869,6 +9904,55 @@ async function _gadsResolveBudgetName(accessToken, customerId, loginCustomerId, 
     candidateName = baseName + ' — ' + (attempt + 2);
   }
   throw new Error('Could not find or safely create a Google Ads campaign budget for "' + baseName + '" after 25 attempts — too many colliding budget names in this account.');
+}
+
+// ── Google Ads: Search keyword match-type normalization + operation builder ──
+// Google Ads' AdGroupCriterion resource has no top-level `text`/`matchType`
+// fields -- they must be nested under `create.keyword.{text,matchType}`.
+// Sending them flattened onto `create` (create.text/create.matchType) is
+// exactly what produced "Unknown name 'text' at 'operations[N].create':
+// Cannot find field." / "Unknown name 'matchType' ..." for every keyword
+// operation. This is the ONE place Oriven builds keyword operations (the
+// whole /api/publish/google implementation was audited for every keyword/
+// adGroupCriteria/campaignCriterion call site; pkg.googleAds.negativeKeywords
+// is generated by the AI but never actually published to Google anywhere in
+// this route today, so there is no second occurrence of this bug).
+const GADS_VALID_MATCH_TYPES = ['BROAD', 'PHRASE', 'EXACT'];
+
+// BROAD is Oriven's only-ever-used match type today -- no per-keyword or
+// per-campaign match-type selector exists anywhere in the product (AI
+// generation only ever produces a flat array of keyword strings, no match
+// type; the frontend keyword UI only ever renders plain chips). So an
+// ABSENT value defaulting to BROAD reflects real existing behavior, not an
+// invented one. An explicit-but-unrecognized value is rejected outright
+// (never silently coerced to BROAD) so a bad value fails loudly with a
+// clear validation error instead of reaching Google as malformed JSON.
+function _gadsNormalizeMatchType(raw) {
+  if (raw === undefined || raw === null || raw === '') return 'BROAD';
+  const upper = String(raw).trim().toUpperCase();
+  if (!GADS_VALID_MATCH_TYPES.includes(upper)) {
+    throw Object.assign(new Error('Invalid keyword match type "' + raw + '" — must be one of ' + GADS_VALID_MATCH_TYPES.join(', ') + '.'), { status: 400 });
+  }
+  return upper;
+}
+
+// Builds correctly-shaped AdGroupCriterion CREATE operations for a list of
+// positive Search keywords: trims + drops empty keyword text (never sends
+// create.keyword.text as blank/whitespace), normalizes/validates the match
+// type once via _gadsNormalizeMatchType (shared across the whole list --
+// there is no per-keyword match type in Oriven today), and nests both
+// fields under `create.keyword` per Google Ads API v24's real
+// AdGroupCriterion schema. Preserves the existing keyword text and
+// match-type value exactly -- never invents keywords, never changes what
+// the user/AI selected.
+function _gadsBuildKeywordOperations(adGroupResourceName, keywords, matchType) {
+  const normalizedType = _gadsNormalizeMatchType(matchType);
+  return (keywords || [])
+    .map(function(kw) { return typeof kw === 'string' ? kw.trim() : ''; })
+    .filter(function(kw) { return kw.length > 0; })
+    .map(function(text) {
+      return { create: { adGroup: adGroupResourceName, status: 'ENABLED', keyword: { text: text, matchType: normalizedType } } };
+    });
 }
 
 app.get('/api/ads/overview', async (req, res) => {
