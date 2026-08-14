@@ -5451,6 +5451,10 @@ app.post('/api/publish/google', requireSubscription, async (req, res) => {
   // resource alone is sufficient (same single-call pattern already used
   // by the existing DELETE /api/google/campaign/:id route).
   let createdCampaignResourceName = null;
+  // Tracks a budget WE created fresh in this request (never set when an
+  // existing budget was reused) so a later failure can clean up the orphan
+  // instead of leaving it behind -- see the budget-cleanup block below.
+  let createdBudgetResourceName = null;
   let rbAccessToken, rbCustomerId, rbLoginCustomerId;
 
   try {
@@ -5593,15 +5597,29 @@ app.post('/api/publish/google', requireSubscription, async (req, res) => {
         return u || 'https://example.com';
       })();
 
-      // 1. Campaign budget
-      const dgBudgetRes = await _gadsMutate('campaignBudgets', [{
-        create: { name: campaignName + ' Budget', amountMicros: (function(){
-          var budgetRec = s.budgetRecommendation;
-          var amt = (typeof budgetRec === 'object' && budgetRec ? (budgetRec.amount || budgetRec.daily || 10) : (Number(budgetRec) || 10));
-          return String(Math.round(amt * 1e6));
-        })(), deliveryMethod: 'STANDARD' }
-      }]);
-      const dgBudgetResourceName = dgBudgetRes.results[0].resourceName;
+      // 1. Campaign budget -- reuse an existing compatible budget with this
+      // exact name when one exists (avoids CampaignBudgetError.DUPLICATE_NAME
+      // on republish), otherwise create one, falling back to a deterministic
+      // unique name if the base name is taken by an unrelated/incompatible
+      // budget. The requested daily amount itself is never altered here --
+      // it's only used when we actually create a new budget resource.
+      const dgDailyAmountMicros = (function(){
+        var budgetRec = s.budgetRecommendation;
+        var amt = (typeof budgetRec === 'object' && budgetRec ? (budgetRec.amount || budgetRec.daily || 10) : (Number(budgetRec) || 10));
+        return String(Math.round(amt * 1e6));
+      })();
+      const dgBudgetDecision = await _gadsResolveBudgetName(accessToken, customerId, loginCustomerId, campaignName, campaignName + ' Budget');
+      let dgBudgetResourceName;
+      if (dgBudgetDecision.action === 'reuse') {
+        dgBudgetResourceName = dgBudgetDecision.resourceName;
+      } else {
+        const dgBudgetRes = await _gadsMutate('campaignBudgets', [{
+          create: { name: dgBudgetDecision.name, amountMicros: dgDailyAmountMicros, deliveryMethod: 'STANDARD' }
+        }]);
+        dgBudgetResourceName = dgBudgetRes.results[0].resourceName;
+        createdBudgetResourceName = dgBudgetResourceName;
+      }
+      console.log('[publish/google] Demand Gen campaign budget resolution:', dgBudgetDecision.action, '| resourceName:', dgBudgetResourceName, '| name:', dgBudgetDecision.name);
 
       // 2. Campaign (DEMAND_GEN, PAUSED)
       const dgCampaignRes = await _gadsMutate('campaigns', [{
@@ -5737,23 +5755,38 @@ app.post('/api/publish/google', requireSubscription, async (req, res) => {
       ]);
 
       const cid = customerId;
+      // Campaign budget -- reuse an existing compatible budget with this
+      // exact name when one exists (avoids CampaignBudgetError.DUPLICATE_NAME
+      // on republish), otherwise create one inside the SAME atomic batch
+      // below (falling back to a deterministic unique name if the base name
+      // is taken by an unrelated/incompatible budget). Because the whole
+      // batch is atomic (see _gadsBatchMutate's comment above), a freshly
+      // created budget here can never end up orphaned by a later failure in
+      // this same request -- either everything in `ops` is created together
+      // or nothing is, so no separate cleanup bookkeeping is needed for this
+      // path the way the sequential Search/Demand Gen flows need.
+      const pmDailyAmountMicros = (function(){
+        var budgetRec = s.budgetRecommendation;
+        var amt = (typeof budgetRec === 'object' && budgetRec ? (budgetRec.amount || budgetRec.daily || 10) : (Number(budgetRec) || 10));
+        return String(Math.round(amt * 1e6));
+      })();
+      const pmBudgetDecision = await _gadsResolveBudgetName(accessToken, customerId, loginCustomerId, campaignName, campaignName + ' Budget');
       const rn = {
-        budget:    'customers/' + cid + '/campaignBudgets/-1',
+        budget:    pmBudgetDecision.action === 'reuse' ? pmBudgetDecision.resourceName : ('customers/' + cid + '/campaignBudgets/-1'),
         campaign:  'customers/' + cid + '/campaigns/-2',
         assetGroup:'customers/' + cid + '/assetGroups/-3',
       };
       let nextAssetTmpId = 10;
       const ops = [];
 
-      ops.push({ campaignBudgetOperation: { create: {
-        resourceName: rn.budget, name: campaignName + ' Budget',
-        amountMicros: (function(){
-          var budgetRec = s.budgetRecommendation;
-          var amt = (typeof budgetRec === 'object' && budgetRec ? (budgetRec.amount || budgetRec.daily || 10) : (Number(budgetRec) || 10));
-          return String(Math.round(amt * 1e6));
-        })(),
-        deliveryMethod: 'STANDARD',
-      } } });
+      if (pmBudgetDecision.action !== 'reuse') {
+        ops.push({ campaignBudgetOperation: { create: {
+          resourceName: rn.budget, name: pmBudgetDecision.name,
+          amountMicros: pmDailyAmountMicros,
+          deliveryMethod: 'STANDARD',
+        } } });
+      }
+      console.log('[publish/google] Performance Max campaign budget resolution:', pmBudgetDecision.action, '| resourceName:', rn.budget, '| name:', pmBudgetDecision.name);
 
       ops.push({ campaignOperation: { create: {
         resourceName: rn.campaign, name: campaignName,
@@ -5876,15 +5909,29 @@ app.post('/api/publish/google', requireSubscription, async (req, res) => {
       return out;
     }
 
-    // 1. Campaign budget
-    const budgetRes = await _gadsMutate('campaignBudgets', [{
-      create: { name: campaignName + ' Budget', amountMicros: (function(){
-        var budgetRec = s.budgetRecommendation;
-        var amt = (typeof budgetRec === 'object' && budgetRec ? (budgetRec.amount || budgetRec.daily || 10) : (Number(budgetRec) || 10));
-        return String(Math.round(amt * 1e6));
-      })(), deliveryMethod: 'STANDARD' }
-    }]);
-    const budgetResourceName = budgetRes.results[0].resourceName;
+    // 1. Campaign budget -- reuse an existing compatible budget with this
+    // exact name when one exists (avoids CampaignBudgetError.DUPLICATE_NAME
+    // on republish), otherwise create one, falling back to a deterministic
+    // unique name if the base name is taken by an unrelated/incompatible
+    // budget. The requested daily amount itself is never altered here --
+    // it's only used when we actually create a new budget resource.
+    const dailyAmountMicros = (function(){
+      var budgetRec = s.budgetRecommendation;
+      var amt = (typeof budgetRec === 'object' && budgetRec ? (budgetRec.amount || budgetRec.daily || 10) : (Number(budgetRec) || 10));
+      return String(Math.round(amt * 1e6));
+    })();
+    const budgetDecision = await _gadsResolveBudgetName(accessToken, customerId, loginCustomerId, campaignName, campaignName + ' Budget');
+    let budgetResourceName;
+    if (budgetDecision.action === 'reuse') {
+      budgetResourceName = budgetDecision.resourceName;
+    } else {
+      const budgetRes = await _gadsMutate('campaignBudgets', [{
+        create: { name: budgetDecision.name, amountMicros: dailyAmountMicros, deliveryMethod: 'STANDARD' }
+      }]);
+      budgetResourceName = budgetRes.results[0].resourceName;
+      createdBudgetResourceName = budgetResourceName;
+    }
+    console.log('[publish/google] Search campaign budget resolution:', budgetDecision.action, '| resourceName:', budgetResourceName, '| name:', budgetDecision.name);
 
     // 2. Campaign (PAUSED - user activates after review)
     // Bidding strategy is goal-aware (campaignGoals.GOOGLE_GOAL_CONFIG) --
@@ -5984,6 +6031,33 @@ app.post('/api/publish/google', requireSubscription, async (req, res) => {
         else console.error('[publish/google] Rollback FAILED for campaign', createdCampaignResourceName, '— HTTP', rbRes.status, await rbRes.text());
       } catch (rbErr) {
         console.error('[publish/google] Rollback FAILED for campaign', createdCampaignResourceName, '—', rbErr.message);
+      }
+    }
+
+    // ── Budget cleanup ───────────────────────────────────────────────────
+    // Only fires for a budget WE created fresh in THIS failed request
+    // (createdBudgetResourceName is never set on the 'reuse' path) --
+    // Google's own guidance is to avoid leaving an orphaned campaign budget
+    // behind when campaign creation/assignment fails partway through. Runs
+    // after the campaign rollback above so a still-attached budget isn't
+    // rejected for being "in use" by the campaign we're also removing.
+    if (createdBudgetResourceName && rbAccessToken) {
+      try {
+        const cbUrl = 'https://googleads.googleapis.com/v24/customers/' + rbCustomerId + '/campaignBudgets:mutate';
+        const cbHeaders = {
+          'Authorization':   'Bearer ' + rbAccessToken,
+          'developer-token': process.env.GOOGLE_ADS_DEVELOPER_TOKEN || '',
+          'Content-Type':    'application/json',
+        };
+        if (rbLoginCustomerId && rbLoginCustomerId !== rbCustomerId) cbHeaders['login-customer-id'] = rbLoginCustomerId;
+        const cbRes = await fetch(cbUrl, {
+          method: 'POST', headers: cbHeaders,
+          body: JSON.stringify({ operations: [{ remove: createdBudgetResourceName }] })
+        });
+        if (cbRes.ok) console.warn('[publish/google] Rollback: removed orphaned campaign budget', createdBudgetResourceName);
+        else console.error('[publish/google] Rollback FAILED for campaign budget', createdBudgetResourceName, '— HTTP', cbRes.status, await cbRes.text());
+      } catch (cbErr) {
+        console.error('[publish/google] Rollback FAILED for campaign budget', createdBudgetResourceName, '—', cbErr.message);
       }
     }
 
@@ -9613,6 +9687,82 @@ async function _gadsMutate(accessToken, customerId, resource, operations, loginC
   }
   console.log('[GAdsMutate] OK', resource, JSON.stringify((d.results || []).map(function(r){ return r.resourceName; })));
   return d;
+}
+
+// ── Google Ads: campaign budget name resolution (dedupe / reuse) ────────────
+// Google Ads requires campaign_budget.name to be unique within a customer
+// account. Oriven's publish flow names budgets deterministically from the
+// campaign name ("{campaignName} Budget"), so republishing the same campaign
+// -- or any account that already happens to have a same-named budget -- was
+// hitting CampaignBudgetError.DUPLICATE_NAME. This resolves what to do about
+// the name BEFORE any create call is made; it never creates or modifies
+// anything itself, so it's safe to call from a sequential single-mutate flow
+// (Search/Demand Gen) or ahead of an atomic batch mutate (Performance Max).
+//
+// Returned `action`:
+//   'reuse'          - an existing ENABLED, DAILY, shareable budget with this
+//                       exact name already exists in THIS customer, and is
+//                       either unattached (a leftover orphan, most likely
+//                       from a prior failed publish under this same naming
+//                       convention) or attached only to campaign(s) whose
+//                       name is IDENTICAL to the one being published now --
+//                       i.e. clearly a republish of the same Oriven campaign.
+//                       `resourceName` is set; do not create anything.
+//   'create'         - the base name is free; create a new budget with it
+//                       exactly as given.
+//   'create_renamed' - the base name is taken by an incompatible/unrelated
+//                       budget (wrong period, not shareable, or attached to
+//                       a campaign with a DIFFERENT name -- a real foreign
+//                       budget that just happens to collide) -- create a new
+//                       budget under a deterministic "{baseName} — N" suffix,
+//                       having re-checked that THAT name is itself free.
+//                       Never blindly retries the original duplicate name.
+// Lookups are scoped to the given customerId only -- never reuses a budget
+// from another Google Ads account.
+async function _gadsResolveBudgetName(accessToken, customerId, loginCustomerId, campaignName, baseName) {
+  function _escGaql(s) { return String(s).replace(/\\/g, '\\\\').replace(/'/g, "\\'"); }
+
+  async function _findBudgetsByName(name) {
+    const gaql = "SELECT campaign_budget.resource_name, campaign_budget.name, campaign_budget.status, " +
+      "campaign_budget.period, campaign_budget.explicitly_shared " +
+      "FROM campaign_budget WHERE campaign_budget.name = '" + _escGaql(name) + "' AND campaign_budget.status != 'REMOVED'";
+    const rows = await _gadsQuery(accessToken, customerId, gaql, loginCustomerId);
+    return (rows || []).map(function(r) { return r.campaignBudget; }).filter(Boolean);
+  }
+
+  async function _campaignNamesOnBudget(budgetResourceName) {
+    const gaql = "SELECT campaign.name FROM campaign WHERE campaign.campaign_budget = '" +
+      _escGaql(budgetResourceName) + "' AND campaign.status != 'REMOVED'";
+    const rows = await _gadsQuery(accessToken, customerId, gaql, loginCustomerId);
+    return (rows || []).map(function(r) { return r.campaign && r.campaign.name; }).filter(Boolean);
+  }
+
+  function _isCompatible(budget) {
+    return budget.status === 'ENABLED' &&
+      (!budget.period || budget.period === 'DAILY') &&
+      budget.explicitlyShared !== false;
+  }
+
+  let candidateName = baseName;
+  for (let attempt = 0; attempt < 25; attempt++) {
+    const matches = await _findBudgetsByName(candidateName);
+    if (!matches.length) {
+      return { action: attempt === 0 ? 'create' : 'create_renamed', name: candidateName, resourceName: null };
+    }
+    const budget = matches[0];
+    if (_isCompatible(budget)) {
+      const attachedNames = await _campaignNamesOnBudget(budget.resourceName);
+      const clearlyOurs = attachedNames.length === 0 || attachedNames.every(function(n) { return n === campaignName; });
+      if (clearlyOurs) {
+        return { action: 'reuse', name: budget.name, resourceName: budget.resourceName };
+      }
+    }
+    // Name taken by an incompatible or unrelated budget -- try a
+    // deterministic unique suffix and check THAT one too, rather than
+    // assuming it's free or blindly retrying the same duplicate name.
+    candidateName = baseName + ' — ' + (attempt + 2);
+  }
+  throw new Error('Could not find or safely create a Google Ads campaign budget for "' + baseName + '" after 25 attempts — too many colliding budget names in this account.');
 }
 
 app.get('/api/ads/overview', async (req, res) => {
