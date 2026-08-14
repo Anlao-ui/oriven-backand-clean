@@ -5554,7 +5554,11 @@ app.post('/api/publish/google', requireSubscription, async (req, res) => {
         // developer-token) and never accessToken/refreshToken directly.
         const opIndex = _extractGadsOperationIndex(d);
         console.error('[publish/google] Google Ads API error | resource:', resource, '| campaignType:', campaignType, '| operationIndex:', opIndex, '| totalOperations:', operations.length, '| error:', JSON.stringify(d.error || d));
-        throw Object.assign(new Error(_extractGadsErrorMessage(d)), { status: r.status, gadsRawError: d.error || d, gadsOperationIndex: opIndex, gadsResource: resource });
+        const policyFindings = _extractGadsPolicyFindings(d, resource);
+        if (policyFindings.some(function(f) { return f.isPolicyFinding; })) {
+          console.error('[publish/google] POLICY_FINDING | campaignType:', campaignType, '| resource:', resource, '| totalOperations:', operations.length, '| policyDetails:', JSON.stringify(policyFindings.filter(function(f) { return f.isPolicyFinding; })));
+        }
+        throw Object.assign(new Error(_extractGadsErrorMessage(d)), { status: r.status, gadsRawError: d.error || d, gadsOperationIndex: opIndex, gadsResource: resource, gadsPolicyFindings: policyFindings });
       }
       return d;
     }
@@ -5591,7 +5595,11 @@ app.post('/api/publish/google', requireSubscription, async (req, res) => {
         // Same no-secrets logging discipline as _gadsMutate above.
         const opIndex = _extractGadsOperationIndex(d);
         console.error('[publish/google] Google Ads API error | resource: batch mutate | campaignType:', campaignType, '| operationIndex:', opIndex, '| totalOperations:', mutateOperations.length, '| error:', JSON.stringify(d.error || d));
-        throw Object.assign(new Error(_extractGadsErrorMessage(d)), { status: r.status, gadsRawError: d.error || d, gadsOperationIndex: opIndex, gadsResource: 'batch mutate' });
+        const policyFindings = _extractGadsPolicyFindings(d, 'batch mutate');
+        if (policyFindings.some(function(f) { return f.isPolicyFinding; })) {
+          console.error('[publish/google] POLICY_FINDING | campaignType:', campaignType, '| resource: batch mutate | totalOperations:', mutateOperations.length, '| policyDetails:', JSON.stringify(policyFindings.filter(function(f) { return f.isPolicyFinding; })));
+        }
+        throw Object.assign(new Error(_extractGadsErrorMessage(d)), { status: r.status, gadsRawError: d.error || d, gadsOperationIndex: opIndex, gadsResource: 'batch mutate', gadsPolicyFindings: policyFindings });
       }
       return d;
     }
@@ -6156,7 +6164,23 @@ app.post('/api/publish/google', requireSubscription, async (req, res) => {
       }
     }
 
-    return res.status(err.status || 500).json({ ok: false, error: err.message || 'Failed to publish to Google Ads' });
+    // ── Policy-finding surfacing ─────────────────────────────────────────
+    // err.gadsPolicyFindings is only set by _gadsMutate/_gadsBatchMutate
+    // above, and only ever contains real data extracted from Google's own
+    // response -- _buildGadsPolicyErrorPayload returns null for every other
+    // error type (DUPLICATE_NAME, BIDDING_STRATEGY_TYPE_INCOMPATIBLE_WITH_
+    // SHARED_BUDGET, keyword/budget validation, auth errors, etc.), so
+    // those continue to return exactly err.message as before -- unchanged.
+    const policyPayload = _buildGadsPolicyErrorPayload(err.gadsPolicyFindings || []);
+    if (policyPayload) {
+      console.error('[publish/google] POLICY_FINDING (final) | campaignType:', typeof campaignType !== 'undefined' ? campaignType : null, '| operationIndex:', policyPayload.operationIndex, '| resourceType:', policyPayload.resourceType, '| topics:', JSON.stringify(policyPayload.topics), '| googleMessage:', policyPayload.googleMessage);
+    }
+
+    return res.status(err.status || 500).json({
+      ok: false,
+      error: policyPayload ? policyPayload.summary : (err.message || 'Failed to publish to Google Ads'),
+      policy: policyPayload, // null for every non-policy error, unchanged from before
+    });
   }
 });
 
@@ -9953,6 +9977,100 @@ function _gadsBuildKeywordOperations(adGroupResourceName, keywords, matchType) {
     .map(function(text) {
       return { create: { adGroup: adGroupResourceName, status: 'ENABLED', keyword: { text: text, matchType: normalizedType } } };
     });
+}
+
+// Maps the REST resource-collection name Oriven itself targeted (known with
+// certainty from which endpoint was called -- never a guess) to a cleaner
+// display name for error messages/logs. For the atomic Performance Max
+// batch endpoint, Google's own "{x}Operation" key names (e.g.
+// "campaignOperation") are mapped the same way once the "Operation" suffix
+// is stripped. An unmapped value falls back to the raw string itself
+// (still real, known information) rather than "unknown".
+const _GADS_RESOURCE_DISPLAY_NAMES = {
+  campaigns: 'Campaign', campaign: 'Campaign',
+  campaignBudgets: 'CampaignBudget', campaignBudget: 'CampaignBudget',
+  adGroups: 'AdGroup', adGroup: 'AdGroup',
+  adGroupCriteria: 'AdGroupCriterion (Keyword)', adGroupCriterion: 'AdGroupCriterion (Keyword)',
+  adGroupAds: 'AdGroupAd (Ad)', adGroupAd: 'AdGroupAd (Ad)',
+  assetGroups: 'AssetGroup', assetGroup: 'AssetGroup',
+  assets: 'Asset', asset: 'Asset',
+  assetGroupAssets: 'AssetGroupAsset', assetGroupAsset: 'AssetGroupAsset',
+};
+function _gadsDisplayResourceName(raw) {
+  if (!raw) return null;
+  return _GADS_RESOURCE_DISPLAY_NAMES[raw] || raw;
+}
+
+// ── Google Ads: POLICY_FINDING extraction ────────────────────────────────
+// When Google rejects an operation for a policy reason, the REST error
+// envelope's errors[] entry carries an errorCode.policyFindingError (e.g.
+// "POLICY_FINDING") plus Google's own human-readable `message` -- both
+// already surfaced generically by _extractGadsErrorMessage. This ADDS
+// extraction of the deeper structured detail Google sometimes also
+// includes: errors[].details.policyFindingDetails.policyTopicEntries[],
+// each with a `topic` (the actual policy topic name/category, e.g.
+// "PROHIBITED_CONTENT") and `type` (severity/kind, e.g. "PROHIBITED").
+// That structured detail is NOT always present in Google's response --
+// this never fabricates a topic/resource Google didn't actually return;
+// when absent, policyTopics stays [] and the caller must say so explicitly
+// rather than inventing a cause. Also identifies WHICH operation/resource
+// failed from the same error's `location.fieldPathElements` already used
+// by the existing _extractGadsOperationIndex, extended here to also read
+// the operation-type field name for the atomic batch endpoint (where a
+// single call mixes multiple resource types, unlike the single-resource
+// _gadsMutate endpoint where `fallbackResource` alone already answers it
+// with certainty).
+function _extractGadsPolicyFindings(d, fallbackResource) {
+  const gErr = (d && d.error && Array.isArray(d.error.details) && d.error.details[0]) || {};
+  const errorsArr = Array.isArray(gErr.errors) ? gErr.errors : [];
+  return errorsArr.map(function(e) {
+    const errorCode = e.errorCode || null;
+    const isPolicyFinding = !!(errorCode && errorCode.policyFindingError);
+    const els = (e.location && e.location.fieldPathElements) || [];
+    const opElIdx = els.findIndex(function(el) { return el.fieldName === 'operations' || el.fieldName === 'mutateOperations'; });
+    const operationIndex = (opElIdx !== -1 && els[opElIdx].index != null) ? els[opElIdx].index : null;
+    let resourceType = _gadsDisplayResourceName(fallbackResource);
+    if (opElIdx !== -1) {
+      const nextEl = els[opElIdx + 1];
+      if (nextEl && nextEl.fieldName && /Operation$/.test(nextEl.fieldName)) {
+        resourceType = _gadsDisplayResourceName(nextEl.fieldName.replace(/Operation$/, ''));
+      }
+    }
+    let policyTopics = [];
+    const pfd = e.details && e.details.policyFindingDetails;
+    if (pfd && Array.isArray(pfd.policyTopicEntries)) {
+      policyTopics = pfd.policyTopicEntries.map(function(pt) {
+        return { topic: pt.topic || null, type: pt.type || null };
+      });
+    }
+    return { errorCode, message: e.message || null, isPolicyFinding, policyTopics, operationIndex, resourceType };
+  });
+}
+
+// Builds the clean, structured payload sent to the client for a
+// POLICY_FINDING rejection (and returned for server-side logging). Returns
+// null when none of the findings are policy findings, so callers can fall
+// back to the existing generic error message/handling unchanged for every
+// other error type (DUPLICATE_NAME, BIDDING_STRATEGY_TYPE_INCOMPATIBLE_
+// WITH_SHARED_BUDGET, keyword/budget validation, etc.) -- this never
+// changes behavior for non-policy errors.
+function _buildGadsPolicyErrorPayload(findings) {
+  const policyFindings = (findings || []).filter(function(f) { return f.isPolicyFinding; });
+  if (!policyFindings.length) return null;
+  const allTopics = [];
+  policyFindings.forEach(function(f) { allTopics.push.apply(allTopics, f.policyTopics); });
+  const first = policyFindings[0];
+  const summary = allTopics.length
+    ? 'Google Ads rejected this resource because of a policy violation: ' + allTopics.map(function(t) { return t.topic || t.type || 'unknown topic'; }).join(', ') + '.'
+    : 'Google Ads rejected this resource because of a policy finding. Google did not provide additional policy details.';
+  return {
+    isPolicyFinding: true,
+    operationIndex: first.operationIndex, // null if Google's response didn't include it
+    resourceType: first.resourceType,     // null only if Oriven itself couldn't identify which call this was
+    topics: allTopics,                    // [] if Google didn't return structured policy topic entries
+    googleMessage: first.message,         // Google's own human-readable message, verbatim
+    summary: summary,
+  };
 }
 
 app.get('/api/ads/overview', async (req, res) => {
