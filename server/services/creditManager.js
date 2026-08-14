@@ -85,10 +85,18 @@ const FEATURE_COSTS = {
 const PLAN_ALLOWANCES = { starter: 500, creator: 3000, professional: 12000 };
 const PLAN_TEAM_SEATS  = { starter: 1,   creator: 1,    professional: 10   };
 
+// ── Intelligence monthly analysis allowance — separate cap layered on top
+// of the existing FEATURE_COSTS.ai_analysis (5cr) credit charge, not a
+// replacement for it. Applies specifically to the explicit "Analyze with
+// AI" action (server.js POST /api/meta/analyze, /api/ads/analyze) — the
+// only two routes that actually charge ai_analysis credits; the read-only
+// /api/intelligence/* dashboard routes (home/briefing/opportunities/etc.)
+// are a different, already-unmetered concept (Live Feed/summary views) and
+// are not affected by this cap.
+const PLAN_INTELLIGENCE_LIMITS = { starter: 50, creator: 100, professional: Infinity };
+
 // ── Autopilot monthly execution allowance — separate from AI Credits.
-// Intelligence never had its own cap (it's metered per-operation via
-// FEATURE_COSTS.ai_analysis, 5cr, already enforced) so it needs no entry
-// here. Autopilot is different: one rule firing a `suggest_only`/
+// Autopilot is different: one rule firing a `suggest_only`/
 // `require_approval` action calls _generateRecommendation (a real AI call,
 // charge:false — background AI is never billed per the existing credit
 // architecture), so an unlimited rule count could otherwise generate
@@ -474,18 +482,83 @@ async function checkAndIncrementAutopilotUsage(userId, plan, cycleEndISO) {
   return { ok: true, used: row.used, limit };
 }
 
+// Called from the two real "Analyze with AI" routes (server.js
+// POST /api/meta/analyze, POST /api/ads/analyze), immediately before
+// reserveCredits('ai_analysis') runs -- mirrors checkAndIncrementAutopilotUsage's
+// shape and its check-before-call, count-regardless-of-downstream-outcome
+// policy (same reasoning as reserveCredits: the request is what's being
+// rate-limited, not the parse result). Server-authoritative -- the client
+// cannot bypass this by manipulating frontend JS, since it's enforced here
+// before any AI provider call is made.
+//
+// Requires two columns on `profiles` (same convention as
+// autopilot_executions_used/autopilot_cycle_reset_at above) and this RPC:
+//
+//   ALTER TABLE profiles ADD COLUMN IF NOT EXISTS intelligence_analyses_used integer NOT NULL DEFAULT 0;
+//   ALTER TABLE profiles ADD COLUMN IF NOT EXISTS intelligence_cycle_reset_at timestamptz;
+//
+//   CREATE OR REPLACE FUNCTION increment_intelligence_usage(p_user_id uuid, p_limit integer, p_cycle_end timestamptz)
+//   RETURNS TABLE(ok boolean, used integer) LANGUAGE plpgsql AS $$
+//   DECLARE v_used integer; v_reset_at timestamptz;
+//   BEGIN
+//     SELECT intelligence_analyses_used, intelligence_cycle_reset_at INTO v_used, v_reset_at
+//       FROM profiles WHERE id = p_user_id FOR UPDATE;
+//     IF v_reset_at IS NULL OR v_reset_at < now() THEN
+//       v_used := 0;
+//       UPDATE profiles SET intelligence_analyses_used = 0, intelligence_cycle_reset_at = p_cycle_end WHERE id = p_user_id;
+//     END IF;
+//     IF v_used < p_limit THEN
+//       UPDATE profiles SET intelligence_analyses_used = intelligence_analyses_used + 1 WHERE id = p_user_id;
+//       RETURN QUERY SELECT true, v_used + 1;
+//     ELSE
+//       RETURN QUERY SELECT false, v_used;
+//     END IF;
+//   END; $$;
+class IntelligenceLimitExceededError extends Error {
+  constructor(limit) {
+    super(`Intelligence monthly analysis limit reached (${limit})`);
+    this.name = 'IntelligenceLimitExceededError';
+    this.limit = limit;
+  }
+}
+
+async function checkAndIncrementIntelligenceUsage(userId, plan, cycleEndISO) {
+  _assertInitialized();
+  // Only the three real paid plans have a defined cap here -- 'free' (or
+  // any other value) is not this function's concern and is left to the
+  // existing credit-balance check (reserveCredits) to gate exactly as it
+  // already did before this cap existed, unchanged behavior for free users.
+  if (!(plan in PLAN_INTELLIGENCE_LIMITS)) return { ok: true, used: null, limit: null };
+  const limit = PLAN_INTELLIGENCE_LIMITS[plan];
+  if (limit === Infinity) return { ok: true, used: null, limit: null }; // Professional -- unlimited
+  if (!limit || limit <= 0) throw new IntelligenceLimitExceededError(0);
+
+  const { data, error } = await supabaseAdmin.rpc('increment_intelligence_usage', {
+    p_user_id: userId,
+    p_limit: limit,
+    p_cycle_end: cycleEndISO || new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString(),
+  });
+  if (error) throw error;
+  const row = Array.isArray(data) ? data[0] : data;
+  if (!row || !row.ok) throw new IntelligenceLimitExceededError(limit);
+  return { ok: true, used: row.used, limit };
+}
+
 module.exports = {
   init,
   FEATURE_COSTS,
   PLAN_ALLOWANCES,
   PLAN_TEAM_SEATS,
   PLAN_AUTOPILOT_LIMITS,
+  PLAN_INTELLIGENCE_LIMITS,
   InsufficientCreditsError,
   AutopilotLimitExceededError,
+  IntelligenceLimitExceededError,
   reserveCredits,
   finalizeCreditLog,
   getCreditStatus,
   checkAndIncrementAutopilotUsage,
+  checkAndIncrementIntelligenceUsage,
   provisionCreditsForCycle,
   incrementCampaignsGenerated,
 };

@@ -163,6 +163,18 @@ const PRICE_IDS = {
   professional: process.env.STRIPE_PRICE_PROFESSIONAL,
 };
 
+// Reverse lookup (Stripe price ID -> plan name) -- the webhook handler
+// uses this to derive "what plan is this subscription actually on" from
+// Stripe's own current price, rather than trusting an app-set metadata
+// label that a subscription-schedule phase transition doesn't necessarily
+// carry forward. This is what makes the DB/UI genuinely reflect Stripe's
+// real state instead of our own assumption about what Stripe should do.
+const PLAN_BY_PRICE_ID = {};
+Object.keys(PRICE_IDS).forEach(function (plan) {
+  var priceId = PRICE_IDS[plan];
+  if (priceId) PLAN_BY_PRICE_ID[priceId] = plan;
+});
+
 app.use(cors());
 
 // â”€â”€ Static files â€” serve the frontend from the project root â”€â”€â”€â”€
@@ -209,51 +221,51 @@ app.post('/api/stripe-webhook', express.raw({ type: 'application/json' }), async
   }
 
   // â”€â”€ Subscription updated (paid-to-paid switch) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  // Plan is derived from the subscription's CURRENT active Stripe price
+  // (PLAN_BY_PRICE_ID reverse lookup), not from sub.metadata.pending_plan.
+  // Metadata was the old signal when /api/schedule-plan-change changed the
+  // Stripe price immediately; now that paid<->paid switches go through a
+  // Stripe Subscription Schedule (real period-end scheduling, see that
+  // route below), the price genuinely does not change in Stripe until the
+  // schedule's phase 2 begins -- at which point THIS event fires with the
+  // new price already active, and comparing it against the DB's current
+  // subscription_status is what detects a real, effective plan change.
+  // This also makes the handler naturally idempotent: once the DB already
+  // matches Stripe's price, repeated/unrelated subscription.updated events
+  // (schedule attachment, cancel_at_period_end toggling, etc.) are a no-op.
   if (event.type === 'customer.subscription.updated') {
     const sub = event.data.object;
     const customerId = sub.customer;
-    const pendingPlan = sub.metadata && sub.metadata.pending_plan;
-    if (pendingPlan && sub.status === 'active') {
-      console.log('[Webhook] subscription.updated â†’ applying plan:', pendingPlan);
-      // Capture the plan BEFORE overwriting it -- Stripe does not reset
-      // current_period_end on a plain price swap (e.g. Creator ->
-      // Professional keeps the same billing-period boundary), so the
-      // idempotency check inside provisionCreditsForCycle needs to know a
-      // real plan change happened even though cycle_end looks unchanged.
-      // Root cause of Professional accounts showing a stale ~3000 balance
-      // instead of 12000 after upgrading from Creator.
+    const currentPriceId = sub.items && sub.items.data && sub.items.data[0] && sub.items.data[0].price && sub.items.data[0].price.id;
+    const planFromStripe = currentPriceId && PLAN_BY_PRICE_ID[currentPriceId];
+
+    if (planFromStripe && sub.status === 'active' && customerId) {
       const { data: beforeProfile } = await supabaseAdmin.from('profiles')
-        .select('subscription_status').eq('stripe_customer_id', customerId).maybeSingle();
+        .select('id, subscription_status').eq('stripe_customer_id', customerId).maybeSingle();
       const previousPlan = beforeProfile && beforeProfile.subscription_status;
 
-      const { data: profile, error } = await supabaseAdmin.from('profiles')
-        .update({ subscription_status: pendingPlan, pending_plan: null, pending_plan_date: null })
-        .eq('stripe_customer_id', customerId)
-        .select('id').maybeSingle();
-      if (error) {
-        console.error('[Webhook] subscription.updated DB error:', error.message);
-      } else {
-        console.log('[Webhook] âœ… Plan updated to:', pendingPlan, 'for customer:', customerId);
-        // A plan switch (Creator<->Professional etc.) doesn't always land a
-        // proration invoice.payment_succeeded soon enough (or at all, e.g.
-        // a $0 proration) to be the thing that provisions the new plan's
-        // credit cycle -- this is the same root cause class as the DB-only
-        // fallbacks below, just reachable via the real Stripe path too.
-        // Reprovision here directly using this event's own period; the
-        // idempotency guard now also checks previousPlan so a genuine
-        // plan change is never mistaken for a duplicate event delivery.
-        if (profile) {
+      if (beforeProfile && planFromStripe !== previousPlan) {
+        console.log('[Webhook] subscription.updated â†’ Stripe price now maps to plan:', planFromStripe, '(was', previousPlan, ')');
+        const { error } = await supabaseAdmin.from('profiles')
+          .update({ subscription_status: planFromStripe, pending_plan: null, pending_plan_date: null })
+          .eq('id', beforeProfile.id);
+        if (error) {
+          console.error('[Webhook] subscription.updated DB error:', error.message);
+        } else {
+          console.log('[Webhook] âœ… Plan updated to:', planFromStripe, 'for customer:', customerId);
           try {
             const cycleStart = sub.current_period_start ? new Date(sub.current_period_start * 1000).toISOString() : new Date().toISOString();
             const cycleEnd   = sub.current_period_end   ? new Date(sub.current_period_end   * 1000).toISOString() : new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString();
-            await creditManager.provisionCreditsForCycle(profile.id, pendingPlan, cycleStart, cycleEnd, 'stripe', { previousPlan: previousPlan });
+            await creditManager.provisionCreditsForCycle(beforeProfile.id, planFromStripe, cycleStart, cycleEnd, 'stripe', { previousPlan: previousPlan });
           } catch (err) {
             console.error('[Webhook] subscription.updated credit provisioning error:', err.message);
           }
         }
+      } else {
+        console.log('[Webhook] subscription.updated â€” Stripe price already matches DB plan, no-op (idempotent)');
       }
     } else {
-      console.log('[Webhook] subscription.updated â€” no pending_plan or not active, skipping');
+      console.log('[Webhook] subscription.updated â€” unrecognized price or not active, skipping');
     }
     return res.json({ received: true });
   }
@@ -1879,6 +1891,28 @@ app.get('/api/get-subscription', async (req, res) => {
 });
 
 // â”€â”€ POST /api/schedule-plan-change â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+//
+// STRIPE FIELD AUDIT (investigated after a reported "Could not schedule
+// plan change" / "profiles.stripe_live_subscription_live ID does not
+// exist" error): grepping this entire codebase found ZERO references to
+// "stripe_live_subscription_live" or any variant of it -- every read/write
+// of the Stripe subscription id in this file consistently uses the single
+// column `stripe_subscription_id` (written once, at checkout.session.
+// completed above; read here and in /api/cancel-plan-change), and the
+// customer id consistently uses `stripe_customer_id`. There is no second,
+// competing, or dead Stripe-subscription-id column anywhere in the source.
+// This means the reported error is not reproducible from this codebase as
+// it stands -- it most likely reflects the LIVE deployed Supabase schema
+// being out of sync with this code (a column missing/renamed on the actual
+// `profiles` table), not a bug in the queries themselves. If that error
+// recurs in production, run this against the live DB to confirm/repair
+// (safe to run even if the columns already exist -- IF NOT EXISTS):
+//
+//   ALTER TABLE profiles ADD COLUMN IF NOT EXISTS stripe_subscription_id text;
+//   ALTER TABLE profiles ADD COLUMN IF NOT EXISTS stripe_customer_id     text;
+//   ALTER TABLE profiles ADD COLUMN IF NOT EXISTS pending_plan           text;
+//   ALTER TABLE profiles ADD COLUMN IF NOT EXISTS pending_plan_date      timestamptz;
+//
 app.post('/api/schedule-plan-change', requireSubscription, async (req, res) => {
   const user = await getUserFromToken(req);
   if (!user) return res.status(401).json({ error: 'Unauthorized' });
@@ -1980,24 +2014,50 @@ app.post('/api/schedule-plan-change', requireSubscription, async (req, res) => {
 
   try {
     const sub = await stripe.subscriptions.retrieve(subId);
-    const itemId = sub.items.data[0].id;
     const periodEnd = new Date(sub.current_period_end * 1000).toISOString();
+    const currentPriceId = sub.items.data[0].price.id;
 
-    await stripe.subscriptions.update(subId, {
-      items: [{ id: itemId, price: newPriceId }],
-      proration_behavior: 'create_prorations',
-      metadata: { pending_plan: plan },
+    if (currentPriceId === newPriceId) {
+      return res.status(400).json({ error: 'Already scheduled for this plan' });
+    }
+
+    // Real Stripe-native "change at period end, no charge now" mechanism --
+    // a Subscription Schedule with two phases (current price until the
+    // period boundary, then the new price). This does NOT change Stripe's
+    // active price today, unlike the previous implementation which called
+    // stripe.subscriptions.update(...) with proration_behavior:'create_
+    // prorations' -- that changed Stripe's price AND billed a prorated
+    // amount immediately, while the DB simultaneously told the user the
+    // change was merely "pending until periodEnd": a direct contradiction
+    // between what Stripe had already done and what the UI claimed. With a
+    // schedule, phase 2 genuinely does not take effect in Stripe until
+    // periodEnd, so DB/UI and Stripe now actually agree the whole time.
+    let scheduleId = sub.schedule;
+    if (!scheduleId) {
+      // Turns the existing subscription into a schedule without disrupting
+      // it (Stripe's documented pattern) -- does not create a second
+      // subscription or a second customer.
+      const schedule = await stripe.subscriptionSchedules.create({ from_subscription: subId });
+      scheduleId = schedule.id;
+    }
+    await stripe.subscriptionSchedules.update(scheduleId, {
+      end_behavior: 'release', // after phase 2 starts, release the schedule and let the subscription keep renewing normally at the new price -- do not cancel it
+      proration_behavior: 'none',
+      phases: [
+        { items: [{ price: currentPriceId, quantity: 1 }], start_date: sub.current_period_start, end_date: sub.current_period_end },
+        { items: [{ price: newPriceId, quantity: 1 }], start_date: sub.current_period_end },
+      ],
     });
 
     const { error: dbErr } = await supabaseAdmin.from('profiles')
       .update({ pending_plan: plan, pending_plan_date: periodEnd })
       .eq('id', user.id);
     if (dbErr) {
-      console.error('[SchedulePlan] DB write failed after Stripe plan change applied:', dbErr.message);
-      return res.status(500).json({ error: 'Plan was updated with the payment provider but could not be saved: ' + dbErr.message });
+      console.error('[SchedulePlan] DB write failed after Stripe schedule created:', dbErr.message);
+      return res.status(500).json({ error: 'Plan change was scheduled with the payment provider but could not be saved: ' + dbErr.message });
     }
 
-    console.log('[SchedulePlan] Plan change to', plan, 'scheduled for:', periodEnd);
+    console.log('[SchedulePlan] Plan change to', plan, 'scheduled (Stripe subscription schedule) for:', periodEnd);
     return res.json({ ok: true, pending_plan: plan, pending_plan_date: periodEnd });
   } catch (err) {
     // Stripe failed â€” apply plan change directly in DB so the user isn't stuck.
@@ -2034,19 +2094,39 @@ app.post('/api/cancel-plan-change', requireSubscription, async (req, res) => {
 
   if (profileError) return res.status(500).json({ error: profileError.message });
 
-  // If the pending change was a cancellation, un-cancel in Stripe
-  if (profile && profile.pending_plan === 'free' && profile.stripe_subscription_id) {
+  // Undo whatever is actually scheduled in Stripe -- BEFORE clearing the DB
+  // fields, and returning an error (not ok:true) if the Stripe side fails,
+  // so the DB is never left claiming "no scheduled change" while Stripe
+  // still has one. Two different Stripe mechanisms depending on what kind
+  // of change is pending:
+  if (profile && profile.pending_plan && profile.stripe_subscription_id) {
     try {
-      await stripe.subscriptions.update(profile.stripe_subscription_id, { cancel_at_period_end: false });
-      console.log('[CancelPlanChange] Un-canceled Stripe subscription:', profile.stripe_subscription_id);
+      if (profile.pending_plan === 'free') {
+        // Pending change was a cancel_at_period_end -- undo it.
+        await stripe.subscriptions.update(profile.stripe_subscription_id, { cancel_at_period_end: false });
+        console.log('[CancelPlanChange] Un-canceled Stripe subscription:', profile.stripe_subscription_id);
+      } else {
+        // Pending change was a paid<->paid switch scheduled via a
+        // Subscription Schedule (see /api/schedule-plan-change) -- release
+        // the schedule so Stripe keeps the CURRENT price indefinitely
+        // instead of transitioning to the scheduled phase 2 price at
+        // period end. Does not create a second subscription.
+        const sub = await stripe.subscriptions.retrieve(profile.stripe_subscription_id);
+        if (sub.schedule) {
+          await stripe.subscriptionSchedules.release(sub.schedule);
+          console.log('[CancelPlanChange] Released Stripe subscription schedule:', sub.schedule);
+        }
+      }
     } catch (err) {
-      console.error('[CancelPlanChange] Stripe un-cancel error:', err.message);
+      console.error('[CancelPlanChange] Stripe undo error:', err.message);
+      return res.status(500).json({ error: 'Could not cancel the scheduled change with the payment provider: ' + err.message });
     }
   }
 
-  await supabaseAdmin.from('profiles')
+  const { error: dbErr } = await supabaseAdmin.from('profiles')
     .update({ pending_plan: null, pending_plan_date: null })
     .eq('id', user.id);
+  if (dbErr) return res.status(500).json({ error: 'Could not clear the scheduled change: ' + dbErr.message });
 
   res.json({ ok: true });
 });
@@ -8974,6 +9054,11 @@ app.post('/api/meta/analyze', async (req, res) => {
   try {
     const user = await getUserFromToken(req);
     if (!user) return res.status(401).json({ error: 'Authentication required' });
+    // Plan-based monthly Intelligence analysis cap -- separate from the
+    // ai_analysis credit charge below, server-authoritative (checked here,
+    // before any AI call, not just displayed in the frontend).
+    const { data: _intelProfile } = await supabaseAdmin.from('profiles').select('subscription_status, credits_cycle_end').eq('id', user.id).maybeSingle();
+    await creditManager.checkAndIncrementIntelligenceUsage(user.id, (_intelProfile && _intelProfile.subscription_status) || 'free', _intelProfile && _intelProfile.credits_cycle_end);
     reservation = await creditManager.reserveCredits(user, 'ai_analysis');
     // Explicit "Analyze with AI" click -- always bypasses the shared cache.
     const dr = resolveDateRange(req.body && req.body.date_range, req.body && req.body.date_since, req.body && req.body.date_until);
@@ -8983,6 +9068,7 @@ app.post('/api/meta/analyze', async (req, res) => {
   } catch (err) {
     if (reservation) creditManager.finalizeCreditLog(reservation, 'ai_analysis', { success: false, error: err.message, route: req.path }).catch(() => {});
     if (err instanceof creditManager.InsufficientCreditsError) return res.status(402).json({ error: 'Out of credits', code: 'CREDITS_EXHAUSTED', balance: err.balance });
+    if (err instanceof creditManager.IntelligenceLimitExceededError) return res.status(402).json({ error: 'Intelligence analysis limit reached for your plan this month', code: 'INTELLIGENCE_LIMIT_REACHED', limit: err.limit });
     console.error('[Meta/analyze]', err.message);
     res.status(err.status || 500).json({ error: err.message || 'Internal server error', meta_code: err.metaCode || null });
   }
@@ -10181,6 +10267,11 @@ app.post('/api/ads/analyze', async (req, res) => {
   try {
     const user = await getUserFromToken(req);
     if (!user) return res.status(401).json({ error: 'Authentication required' });
+    // Plan-based monthly Intelligence analysis cap -- see /api/meta/analyze
+    // for the identical pattern; server-authoritative, checked before any
+    // AI call runs, not merely displayed in the frontend.
+    const { data: _intelProfile } = await supabaseAdmin.from('profiles').select('subscription_status, credits_cycle_end').eq('id', user.id).maybeSingle();
+    await creditManager.checkAndIncrementIntelligenceUsage(user.id, (_intelProfile && _intelProfile.subscription_status) || 'free', _intelProfile && _intelProfile.credits_cycle_end);
     reservation = await creditManager.reserveCredits(user, 'ai_analysis');
     // Explicit "Analyze with AI" click -- always bypasses the shared cache.
     const dr = resolveDateRange(req.body && req.body.date_range, req.body && req.body.date_since, req.body && req.body.date_until);
@@ -10190,6 +10281,7 @@ app.post('/api/ads/analyze', async (req, res) => {
   } catch (err) {
     if (reservation) creditManager.finalizeCreditLog(reservation, 'ai_analysis', { success: false, error: err.message, route: req.path }).catch(() => {});
     if (err instanceof creditManager.InsufficientCreditsError) return res.status(402).json({ error: 'Out of credits', code: 'CREDITS_EXHAUSTED', balance: err.balance });
+    if (err instanceof creditManager.IntelligenceLimitExceededError) return res.status(402).json({ error: 'Intelligence analysis limit reached for your plan this month', code: 'INTELLIGENCE_LIMIT_REACHED', limit: err.limit });
     console.error('[Ads/analyze]', err.message);
     res.status(err.status || 500).json({ error: err.message || 'Internal server error', gads_status: err.gadsStatus || null, gads_codes: err.gadsErrorCodes || null });
   }
@@ -11676,8 +11768,17 @@ async function _gatherBusinessContext(userId) {
     const sources = [];
     if (profile) {
       if (profile.company_name) { lines.push(`Company: ${profile.company_name}${profile.industry ? ' (' + profile.industry + ')' : ''}`); sources.push('Business profile'); }
+      // website/country/mission/vision were already fetched (select('*')
+      // above) but silently dropped before reaching the AI -- added here so
+      // Business Profile's full saved context (not just company/industry/
+      // stage/goals) actually reaches generation, per the Business page's
+      // "who are you and what are your goals" scope.
+      if (profile.website)      lines.push(`Website: ${profile.website}`);
+      if (profile.country)      lines.push(`Market/country: ${profile.country}`);
       if (profile.description)  lines.push(`About: ${profile.description}`);
       if (profile.business_stage) lines.push(`Stage: ${profile.business_stage}`);
+      if (profile.mission)      lines.push(`Mission: ${profile.mission}`);
+      if (profile.vision)       lines.push(`Vision: ${profile.vision}`);
       if (profile.primary_goals) lines.push(`Goals: ${profile.primary_goals}`);
     }
     if (brandCore) {
@@ -11685,8 +11786,17 @@ async function _gatherBusinessContext(userId) {
       if (brandCore.toneOfVoice) { lines.push(`Brand tone of voice: ${brandCore.toneOfVoice}`); usedBrand = true; }
       if (brandCore.usp)         { lines.push(`Brand USP: ${brandCore.usp}`); usedBrand = true; }
       if (brandCore.wordsAvoid)  { lines.push(`Words to avoid: ${Array.isArray(brandCore.wordsAvoid) ? brandCore.wordsAvoid.join(', ') : brandCore.wordsAvoid}`); usedBrand = true; }
+      // Brand colors were saved (brand_cores.brand_data.colors) but never
+      // reached any AI prompt -- phrased as available context to respect
+      // "where applicable", not a hard instruction to force them into
+      // every single output.
+      if (brandCore.colors)     { lines.push(`Brand colors (use where visually relevant): ${Array.isArray(brandCore.colors) ? brandCore.colors.join(', ') : brandCore.colors}`); usedBrand = true; }
       if (usedBrand) sources.push('Brand voice');
     }
+    // Official logo -- informational only ("this exists and belongs to the
+    // company"), not an instruction to insert it into every creative. The
+    // calling route/workflow decides when branded creative calls for it.
+    if (profile && profile.logo_url) { lines.push(`Official logo available (use when the workflow calls for branded creative): ${profile.logo_url}`); sources.push('Brand logo'); }
     if (products.length)  { lines.push(`Products: ${products.map(p => p.name + (p.usp ? ' (' + p.usp + ')' : '')).join('; ')}`); products.forEach(p => sources.push(`Product: ${p.name}`)); }
     if (audiences.length) { lines.push(`Target audiences: ${audiences.map(a => a.name).join(', ')}`); audiences.forEach(a => sources.push(`Audience: ${a.name}`)); }
     if (competitors.length) { lines.push(`Known competitors: ${competitors.map(c => c.company + (c.positioning ? ' (' + c.positioning + ')' : '')).join('; ')}`); competitors.forEach(c => sources.push(`Competitor: ${c.company}`)); }
