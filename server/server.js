@@ -6578,6 +6578,15 @@ const GOOGLE_ADS_DEVELOPER_TOKEN = process.env.GOOGLE_ADS_DEVELOPER_TOKEN || '';
 
 // Fetch all accessible Google Ads accounts for a given access token.
 // Returns { accounts: [{customer_id, name, currency, timezone}], error }
+//
+// REQUIRED MIGRATION -- google_ads_accounts_error lets /api/google/status
+// distinguish "genuinely zero accessible accounts" from "discovery
+// actually failed" (missing dev token, expired credentials, API outage),
+// so the frontend never has to guess from a bare empty array. Safe to run
+// even if already applied (IF NOT EXISTS):
+//
+//   ALTER TABLE integrations ADD COLUMN IF NOT EXISTS google_ads_accounts_error text;
+//
 async function _fetchGoogleAdsAccounts(accessToken) {
   if (!GOOGLE_ADS_DEVELOPER_TOKEN) {
     console.warn('[Google Ads] GOOGLE_ADS_DEVELOPER_TOKEN not set â€” skipping account fetch');
@@ -6649,9 +6658,22 @@ async function _fetchGoogleAdsAccounts(accessToken) {
     try {
       const searchUrl = 'https://googleads.googleapis.com/v24/customers/' + customerId + '/googleAds:search';
       console.log('[Google Ads] POST', searchUrl);
+      // No login-customer-id here -- this queries a customer returned
+      // directly by listAccessibleCustomers, i.e. one the access token can
+      // reach WITHOUT manager impersonation. Sending login-customer-id
+      // equal to the very customer being queried is a redundant self-
+      // reference that the Google Ads API can reject as a permission
+      // error for accounts not actually under manager linkage -- this is
+      // the exact bug _gadsQuery()/_getGadsAccess() elsewhere in this file
+      // already had to work around (see their comments: "a genuinely
+      // redundant self-referential value caused permission rejections"),
+      // just never fixed here too. Root cause of accessible accounts
+      // silently going missing/undiscovered, especially MCC-held accounts
+      // whose manager-detail query failed this way and therefore never
+      // triggered the customer_client sub-account expansion below.
       const searchRes = await _fetchWithTimeout(searchUrl, {
         method:  'POST',
-        headers: Object.assign({ 'Content-Type': 'application/json', 'login-customer-id': customerId }, headers),
+        headers: Object.assign({ 'Content-Type': 'application/json' }, headers),
         body:    JSON.stringify({
           query: 'SELECT customer.id, customer.descriptive_name, customer.currency_code, customer.time_zone, customer.manager, customer.status FROM customer LIMIT 1'
         })
@@ -6824,23 +6846,40 @@ app.get('/auth/google/callback', async (req, res) => {
     ? new Date(Date.now() + tokens.expires_in * 1000).toISOString()
     : null;
 
-  // Fetch Google Ads accounts immediately (non-fatal if dev token not configured yet)
-  const { accounts: gadsAccounts } = await _fetchGoogleAdsAccounts(tokens.access_token).catch(function() {
-    return { accounts: [] };
+  // Fetch Google Ads accounts immediately. Capture the real error too (was
+  // previously discarded here -- an empty array and "the API call actually
+  // failed" were indistinguishable to the frontend/user, violating "do not
+  // silently return an empty array if the Google Ads API actually failed").
+  const { accounts: gadsAccounts, error: gadsDiscoverErr } = await _fetchGoogleAdsAccounts(tokens.access_token).catch(function(err) {
+    return { accounts: [], error: err && err.message ? err.message : 'Unexpected error fetching Google Ads accounts' };
   });
 
-  const { error: dbError } = await supabaseAdmin
+  const _integrationRow = {
+    user_id:                 userId,
+    provider:                'google_ads',
+    google_email:             googleEmail,
+    access_token:             tokens.access_token,
+    refresh_token:            tokens.refresh_token || null,
+    token_expiry:             tokenExpiry,
+    connected_at:             new Date().toISOString(),
+    google_ads_accounts:      gadsAccounts,
+    google_ads_accounts_error: gadsDiscoverErr || null
+  };
+  let { error: dbError } = await supabaseAdmin
     .from('integrations')
-    .upsert({
-      user_id:               userId,
-      provider:              'google_ads',
-      google_email:          googleEmail,
-      access_token:          tokens.access_token,
-      refresh_token:         tokens.refresh_token || null,
-      token_expiry:          tokenExpiry,
-      connected_at:          new Date().toISOString(),
-      google_ads_accounts:   gadsAccounts
-    }, { onConflict: 'user_id,provider' });
+    .upsert(_integrationRow, { onConflict: 'user_id,provider' });
+
+  // google_ads_accounts_error is a new column (see REQUIRED MIGRATION at
+  // _fetchGoogleAdsAccounts) that may not exist yet in every environment --
+  // retry without it rather than failing the whole connection over one
+  // optional diagnostic field, same convention already used elsewhere in
+  // this file for opportunistic columns (e.g. business_profile.logo_url).
+  if (dbError && /google_ads_accounts_error/.test(dbError.message || '')) {
+    delete _integrationRow.google_ads_accounts_error;
+    ({ error: dbError } = await supabaseAdmin
+      .from('integrations')
+      .upsert(_integrationRow, { onConflict: 'user_id,provider' }));
+  }
 
   if (dbError) {
     console.error('[Google OAuth] DB upsert error:', dbError.message);
@@ -6856,9 +6895,13 @@ app.get('/api/google/status', async (req, res) => {
   const user = await getUserFromToken(req);
   if (!user) return res.status(401).json({ error: 'Authentication required' });
 
+  // google_ads_accounts_error is opportunistic (see REQUIRED MIGRATION at
+  // _fetchGoogleAdsAccounts) -- select('*') so a not-yet-migrated column
+  // never turns into a hard query failure, matching this route's own
+  // graceful-degradation convention elsewhere in the file.
   const { data, error } = await supabaseAdmin
     .from('integrations')
-    .select('google_email, connected_at, token_expiry, refresh_token, google_ads_accounts, active_ad_account')
+    .select('*')
     .eq('user_id', user.id)
     .eq('provider', 'google_ads')
     .maybeSingle();
@@ -6872,12 +6915,13 @@ app.get('/api/google/status', async (req, res) => {
   }
 
   res.json({
-    connected:           true,
+    connected:                 true,
     status,
-    google_email:        data.google_email,
-    connected_at:        data.connected_at,
-    google_ads_accounts: data.google_ads_accounts || [],
-    active_ad_account:   data.active_ad_account   || null
+    google_email:              data.google_email,
+    connected_at:               data.connected_at,
+    google_ads_accounts:        data.google_ads_accounts || [],
+    google_ads_accounts_error:  data.google_ads_accounts_error || null,
+    active_ad_account:          data.active_ad_account   || null
   });
 });
 
@@ -6940,18 +6984,30 @@ app.get('/api/google/accounts', async (req, res) => {
     const { accounts, error: gadsErr } = await _fetchGoogleAdsAccounts(accessToken);
     console.log('[Accounts] result â€” accounts:', accounts.length, '| error:', gadsErr);
 
+    // Persist both the account list AND the error state (previously only
+    // the list was saved -- a failed refresh that still returned some
+    // stale/partial accounts, or one that returned zero, left no trace
+    // for /api/google/status to later report "the last refresh failed"
+    // rather than "this account genuinely has zero Ads accounts").
+    const { error: updateErr } = await supabaseAdmin.from('integrations')
+      .update({ google_ads_accounts: accounts, google_ads_accounts_error: gadsErr || null })
+      .eq('user_id', user.id)
+      .eq('provider', 'google_ads');
+    if (updateErr && /google_ads_accounts_error/.test(updateErr.message || '')) {
+      const { error: retryErr } = await supabaseAdmin.from('integrations')
+        .update({ google_ads_accounts: accounts })
+        .eq('user_id', user.id)
+        .eq('provider', 'google_ads');
+      if (retryErr) console.warn('[Accounts] update warning:', retryErr.message);
+    } else if (updateErr) {
+      console.warn('[Accounts] update warning:', updateErr.message);
+    }
+
     if (gadsErr && accounts.length === 0) {
       return res.status(503).json({ error: gadsErr });
     }
 
-    // Persist updated account list (non-fatal if column not yet migrated)
-    const { error: updateErr } = await supabaseAdmin.from('integrations')
-      .update({ google_ads_accounts: accounts })
-      .eq('user_id', user.id)
-      .eq('provider', 'google_ads');
-    if (updateErr) console.warn('[Accounts] update warning (column missing?):', updateErr.message);
-
-    res.json({ accounts });
+    res.json({ accounts, error: gadsErr || null });
   } catch (err) {
     console.error('[Accounts] unexpected error:', err.message, err.stack);
     res.status(500).json({ error: 'Internal server error', detail: err.message });
@@ -6988,21 +7044,54 @@ app.post('/api/google/disconnect', async (req, res) => {
 });
 
 // POST /api/google/active-account â€” set the active Google Ads account for a user
+//
+// SECURITY: account_id alone is never trusted as proof of access. The
+// client-submitted id is checked against THIS user's own real, previously-
+// discovered google_ads_accounts list (populated only by _fetchGoogleAdsAccounts
+// against their own OAuth token) before it's accepted -- an id that isn't in
+// that list is rejected outright, so a client can never point Oriven's
+// Campaigns/Intelligence/Launch/Autopilot at an arbitrary customer id that
+// merely happens to exist in Google Ads somewhere. Display metadata
+// (account_name/is_manager/status/parent_manager_id) is also taken from
+// that authoritative stored record, not from the client's copy of it, so a
+// request can't spoof the UI with mismatched details either.
 app.post('/api/google/active-account', async (req, res) => {
   try {
     const user = await getUserFromToken(req);
     if (!user) return res.status(401).json({ error: 'Authentication required' });
 
-    const { account_id, account_name, is_manager, status, parent_manager_id } = req.body || {};
+    const { account_id } = req.body || {};
     if (!account_id) return res.status(400).json({ error: 'account_id is required' });
+    const requestedId = String(account_id).replace(/-/g, '');
+
+    const { data: integration, error: fetchErr } = await supabaseAdmin
+      .from('integrations')
+      .select('google_ads_accounts')
+      .eq('user_id', user.id)
+      .eq('provider', 'google_ads')
+      .maybeSingle();
+    if (fetchErr) {
+      console.error('[ActiveAccount] DB fetch error:', fetchErr.message);
+      return res.status(500).json({ error: 'Database error' });
+    }
+    if (!integration) return res.status(404).json({ error: 'Google Ads not connected' });
+
+    const knownAccounts = integration.google_ads_accounts || [];
+    const match = knownAccounts.find(function (a) {
+      return String(a.customer_id || '').replace(/-/g, '') === requestedId;
+    });
+    if (!match) {
+      console.warn('[ActiveAccount] Rejected -- account_id not in this user\'s accessible accounts:', requestedId, '| user:', user.id);
+      return res.status(403).json({ error: 'That account is not accessible with your connected Google Ads credentials.' });
+    }
 
     const active_ad_account = {
       platform:          'google_ads',
-      account_id:        String(account_id),
-      account_name:      String(account_name || ''),
-      is_manager:        !!is_manager,
-      status:            status            || null,
-      parent_manager_id: parent_manager_id ? String(parent_manager_id) : null
+      account_id:        String(match.customer_id),
+      account_name:      String(match.name || ''),
+      is_manager:        !!match.is_manager,
+      status:            match.status || null,
+      parent_manager_id: match.parent_manager_id ? String(match.parent_manager_id) : null
     };
 
     const { error } = await supabaseAdmin
@@ -7016,7 +7105,7 @@ app.post('/api/google/active-account', async (req, res) => {
       return res.status(500).json({ error: 'Database error' });
     }
 
-    console.log('[ActiveAccount] Set | user:', user.id, '| account:', account_id, account_name);
+    console.log('[ActiveAccount] Set | user:', user.id, '| account:', active_ad_account.account_id, active_ad_account.account_name);
     res.json({ ok: true, active_ad_account });
   } catch (err) {
     console.error('[ActiveAccount] unexpected error:', err.message);
