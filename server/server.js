@@ -5557,6 +5557,17 @@ app.post('/api/publish/google', requireSubscription, async (req, res) => {
         const policyFindings = _extractGadsPolicyFindings(d, resource);
         if (policyFindings.some(function(f) { return f.isPolicyFinding; })) {
           console.error('[publish/google] POLICY_FINDING | campaignType:', campaignType, '| resource:', resource, '| totalOperations:', operations.length, '| policyDetails:', JSON.stringify(policyFindings.filter(function(f) { return f.isPolicyFinding; })));
+          // Destination-specific diagnostic (section 4): the exact finalUrl
+          // Oriven actually sent for the rejected operation, so a
+          // DESTINATION_NOT_WORKING finding can be traced to a real value
+          // instead of only the generic policy topic/type.
+          policyFindings.filter(function(f) { return f.isPolicyFinding; }).forEach(function(f) {
+            const op = (f.operationIndex != null) ? operations[f.operationIndex] : null;
+            const dest = _gadsExtractDestinationFields(op);
+            f.policyTopics.forEach(function(topic) {
+              console.error('[publish/google] destination policy finding | resource:', f.resourceType || resource, '| finalUrl:', dest ? dest.finalUrls : '(operation has no destination fields)', '| trackingUrlTemplate:', dest ? dest.trackingUrlTemplate : null, '| mobileUrls:', dest ? dest.mobileUrls : null, '| policyTopic:', topic.topic, '| policyType:', topic.type);
+            });
+          });
         }
         throw Object.assign(new Error(_extractGadsErrorMessage(d)), { status: r.status, gadsRawError: d.error || d, gadsOperationIndex: opIndex, gadsResource: resource, gadsPolicyFindings: policyFindings });
       }
@@ -5598,6 +5609,14 @@ app.post('/api/publish/google', requireSubscription, async (req, res) => {
         const policyFindings = _extractGadsPolicyFindings(d, 'batch mutate');
         if (policyFindings.some(function(f) { return f.isPolicyFinding; })) {
           console.error('[publish/google] POLICY_FINDING | campaignType:', campaignType, '| resource: batch mutate | totalOperations:', mutateOperations.length, '| policyDetails:', JSON.stringify(policyFindings.filter(function(f) { return f.isPolicyFinding; })));
+          // Same destination-specific diagnostic as _gadsMutate above.
+          policyFindings.filter(function(f) { return f.isPolicyFinding; }).forEach(function(f) {
+            const op = (f.operationIndex != null) ? mutateOperations[f.operationIndex] : null;
+            const dest = _gadsExtractDestinationFields(op);
+            f.policyTopics.forEach(function(topic) {
+              console.error('[publish/google] destination policy finding | resource:', f.resourceType || 'batch mutate', '| finalUrl:', dest ? dest.finalUrls : '(operation has no destination fields)', '| trackingUrlTemplate:', dest ? dest.trackingUrlTemplate : null, '| mobileUrls:', dest ? dest.mobileUrls : null, '| policyTopic:', topic.topic, '| policyType:', topic.type);
+            });
+          });
         }
         throw Object.assign(new Error(_extractGadsErrorMessage(d)), { status: r.status, gadsRawError: d.error || d, gadsOperationIndex: opIndex, gadsResource: 'batch mutate', gadsPolicyFindings: policyFindings });
       }
@@ -5672,10 +5691,12 @@ app.post('/api/publish/google', requireSubscription, async (req, res) => {
         return res.status(400).json({ ok: false, error: 'At least one headline and one description are required to publish a Demand Gen campaign.' });
       }
 
-      const dgFinalUrl = (function() {
-        const u = (s.landingPageUrl || g.finalUrl || pkg.websiteUrl || s.websiteUrl || '').trim();
-        return u || 'https://example.com';
-      })();
+      // Centralized validation (never invents/modifies the URL -- see
+      // _gadsNormalizeFinalUrl) instead of the old silent-fallback-to-
+      // example.com behavior; the fallback chain itself (landingPageUrl ->
+      // g.finalUrl -> pkg.websiteUrl -> s.websiteUrl) is unchanged.
+      const dgFinalUrl = _gadsNormalizeFinalUrl(s.landingPageUrl || g.finalUrl || pkg.websiteUrl || s.websiteUrl || '');
+      console.log('[publish/google] Demand Gen destination URL resolved:', dgFinalUrl);
 
       // 1. Campaign budget -- reuse an existing compatible budget with this
       // exact name when one exists (avoids CampaignBudgetError.DUPLICATE_NAME
@@ -5818,10 +5839,11 @@ app.post('/api/publish/google', requireSubscription, async (req, res) => {
       // slot Google requires it for) truncated to Google's limit.
       const pmLongHeadline = String(g.longHeadline || pmDescriptions[0] || pmHeadlines[0] || campaignName).slice(0, 90);
 
-      const pmFinalUrl = (function() {
-        const u = (s.landingPageUrl || g.finalUrl || pkg.websiteUrl || s.websiteUrl || '').trim();
-        return u || 'https://example.com';
-      })();
+      // Centralized validation (never invents/modifies the URL -- see
+      // _gadsNormalizeFinalUrl) instead of the old silent-fallback-to-
+      // example.com behavior; the fallback chain itself is unchanged.
+      const pmFinalUrl = _gadsNormalizeFinalUrl(s.landingPageUrl || g.finalUrl || pkg.websiteUrl || s.websiteUrl || '');
+      console.log('[publish/google] Performance Max destination URL resolved:', pmFinalUrl);
 
       // Fetch + base64-encode all three images up front -- Google Ads
       // assets:mutate takes raw bytes, not hosted URLs (same as Demand
@@ -5983,11 +6005,11 @@ app.post('/api/publish/google', requireSubscription, async (req, res) => {
     if (allHeadlines.length < 3 || allDescriptions.length < 2) {
       return res.status(400).json({ ok: false, error: 'At least 3 headlines and 2 descriptions are required to publish a Search campaign.' });
     }
-    const finalUrl = (function() {
-      var u = (s.landingPageUrl || g.finalUrl || pkg.websiteUrl || s.websiteUrl || '').trim();
-      if (!u) { console.warn('[publish/google] No finalUrl in package — using placeholder'); return 'https://example.com'; }
-      return u;
-    })();
+    // Centralized validation (never invents/modifies the URL -- see
+    // _gadsNormalizeFinalUrl) instead of the old silent-fallback-to-
+    // example.com behavior; the fallback chain itself is unchanged.
+    const finalUrl = _gadsNormalizeFinalUrl(s.landingPageUrl || g.finalUrl || pkg.websiteUrl || s.websiteUrl || '');
+    console.log('[publish/google] Search destination URL resolved:', finalUrl);
 
     // Rotating window helper: ad index `i` (0-based, unique across the whole
     // campaign) gets a same-size subset starting at a different offset each
@@ -6090,6 +6112,13 @@ app.post('/api/publish/google', requireSubscription, async (req, res) => {
       for (let ai = 0; ai < struct.adsPerGroup; ai++) {
         const rsaHeadlines    = _rotatedWindow(allHeadlines, 15, globalAdIndex).map(h => ({ text: h }));
         const rsaDescriptions = _rotatedWindow(allDescriptions, 4, globalAdIndex).map(d => ({ text: d }));
+        // Development-safe diagnostic of exactly what destination Oriven is
+        // about to send for this AdGroupAd -- no trackingUrlTemplate/
+        // mobileUrls field is ever set anywhere in this `ad` object (only
+        // finalUrls), so those are logged as "(not set)" rather than
+        // omitted, confirming for real that nothing modifies/redirects the
+        // destination on this path. Never logs headers/tokens/secrets.
+        console.log('[publish/google] AdGroupAd destination payload | finalUrls:', [finalUrl], '| trackingUrlTemplate: (not set)', '| mobileUrls: (not set)');
         const rsaRes = await _gadsMutate('adGroupAds', [{
           create: {
             adGroup: adGroupResourceName,
@@ -7686,13 +7715,25 @@ app.get('/api/google/campaigns', async (req, res) => {
     if (!user) return res.status(401).json({ error: 'Authentication required' });
     const { accessToken, customerId, loginCustomerId, activeAccount } = await _getGadsAccess(user);
     console.log('[Google Campaigns] Fetching | user:', user.id, '| customer:', customerId);
+    // campaign.start_date was removed from this SELECT -- live Google Ads
+    // API (v24, as used throughout this file) rejects it with "Unrecognized
+    // field in the query: campaign.start_date". This project has no way to
+    // verify a replacement field against the real v24 schema (no live
+    // credentials in this environment), and campaign.end_date/other date
+    // fields were never queried or confirmed valid either -- so rather than
+    // guess a replacement, the field is simply dropped. There's no reliable
+    // Oriven-side substitute for it either: this query lists ALL campaigns
+    // in the connected Google Ads account (not just ones Oriven created),
+    // so most listed campaigns have no corresponding Oriven-side creation
+    // timestamp to fall back to. The frontend (_admRenderGoogleLive,
+    // app.html) already renders `c.start_date ? c.start_date : '—'`, so a
+    // missing value degrades to an honest "—" rather than breaking.
     const results = await _gadsQuery(accessToken, customerId, [
       'SELECT',
       '  campaign.id,',
       '  campaign.name,',
       '  campaign.status,',
       '  campaign.advertising_channel_type,',
-      '  campaign.start_date,',
       '  campaign.resource_name,',
       '  campaign_budget.amount_micros,',
       '  campaign_budget.resource_name',
@@ -7710,7 +7751,7 @@ app.get('/api/google/campaigns', async (req, res) => {
         campaign_resource: c.resourceName || '',
         status:            c.status || 'UNKNOWN',
         channel_type:      c.advertisingChannelType || '',
-        start_date:        c.startDate || null,
+        start_date:        null, // no longer queried -- see comment above
         budget_micros:     Number(cb.amountMicros || 0),
         budget_resource:   cb.resourceName || ''
       };
@@ -7732,9 +7773,12 @@ app.get('/api/google/campaign/:id', async (req, res) => {
     if (!campaignId) return res.status(400).json({ error: 'Invalid campaign ID' });
     const { accessToken, customerId, loginCustomerId, activeAccount } = await _getGadsAccess(user);
     console.log('[Google Campaign Fetch]', campaignId, '| user:', user.id, '| customer:', customerId);
+    // campaign.start_date removed -- see the matching comment on
+    // GET /api/google/campaigns above (same live "Unrecognized field"
+    // rejection, same field, no verifiable v24 replacement).
     const q = [
       'SELECT campaign.id, campaign.name, campaign.status,',
-      '  campaign.advertising_channel_type, campaign.start_date,',
+      '  campaign.advertising_channel_type,',
       '  campaign.resource_name, campaign_budget.amount_micros,',
       '  campaign_budget.resource_name',
       'FROM campaign',
@@ -7752,7 +7796,7 @@ app.get('/api/google/campaign/:id', async (req, res) => {
       campaign_resource: c.resourceName || '',
       status:            c.status || 'UNKNOWN',
       channel_type:      c.advertisingChannelType || '',
-      start_date:        c.startDate || null,
+      start_date:        null, // no longer queried -- see comment above
       budget_micros:     Number(cb.amountMicros || 0),
       budget_resource:   cb.resourceName || '',
       currency:          (activeAccount && activeAccount.currency) || 'USD'
@@ -10071,6 +10115,69 @@ function _buildGadsPolicyErrorPayload(findings) {
     googleMessage: first.message,         // Google's own human-readable message, verbatim
     summary: summary,
   };
+}
+
+// ── Google Ads: final destination URL normalization ──────────────────────
+// The ONE place a Google Ads final URL is validated before it's allowed
+// anywhere near a mutate call (ad.finalUrls / assetGroup.finalUrls). Never
+// invents a destination and never modifies a real one -- only trims
+// surrounding whitespace and confirms it's a genuine absolute http(s) URL.
+// No protocol downgrade, no path stripping, no re-serialization through
+// URL() (which can silently normalize things like a missing trailing
+// slash or hostname casing) -- the exact trimmed input string is what's
+// returned and what reaches Google, byte-for-byte.
+//
+// A bare domain ("orivenai.com", no scheme) is rejected with a clear 400
+// rather than silently guessing "the user meant https://...". That guess
+// IS made elsewhere in this file (POST /api/business/website/refresh,
+// an unrelated AI website-analysis feature) but nowhere in the Google Ads
+// publish path today -- so auto-prepending a scheme here would be new,
+// unrequested behavior for this flow, not a preserved existing one.
+//
+// An empty/missing URL is also rejected outright instead of the previous
+// behavior of silently substituting the placeholder 'https://example.com'
+// -- that placeholder was a fabricated destination that could reach a real
+// Google Ads mutate call under the user's name; failing clearly here means
+// a campaign is never published against a URL nobody actually configured.
+function _gadsNormalizeFinalUrl(raw) {
+  const trimmed = String(raw || '').trim();
+  if (!trimmed) {
+    throw Object.assign(new Error('A destination URL (landing page) is required to publish to Google Ads.'), { status: 400 });
+  }
+  let parsed;
+  try {
+    parsed = new URL(trimmed);
+  } catch (_) {
+    throw Object.assign(new Error('The destination URL "' + trimmed + '" is not a valid absolute URL (expected e.g. "https://example.com/page").'), { status: 400 });
+  }
+  if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+    throw Object.assign(new Error('The destination URL "' + trimmed + '" must use http:// or https:// (found "' + parsed.protocol + '").'), { status: 400 });
+  }
+  return trimmed;
+}
+
+// Pulls whatever destination-related fields (finalUrls, trackingUrlTemplate,
+// mobileUrls) are actually present on a single raw mutate operation, for
+// diagnostic logging only -- handles both the single-resource _gadsMutate
+// shape ({create:{...}}, with an AdGroupAd's destination fields nested one
+// level deeper under create.ad) and the atomic-batch _gadsBatchMutate shape
+// ({xOperation:{create:{...}}}). Returns null if none of those fields are
+// present on that operation (e.g. a campaignBudget or keyword operation) --
+// never fabricates a value.
+function _gadsExtractDestinationFields(rawOp) {
+  if (!rawOp) return null;
+  let create = rawOp.create;
+  if (!create) {
+    const opKey = Object.keys(rawOp).find(function(k) { return /Operation$/.test(k); });
+    create = opKey && rawOp[opKey] && rawOp[opKey].create;
+  }
+  if (!create) return null;
+  const target = create.ad || create; // AdGroupAd nests destination fields under .ad
+  const finalUrls = target.finalUrls || null;
+  const trackingUrlTemplate = target.trackingUrlTemplate || create.trackingUrlTemplate || null;
+  const mobileUrls = target.mobileUrls || null;
+  if (!finalUrls && !trackingUrlTemplate && !mobileUrls) return null;
+  return { finalUrls, trackingUrlTemplate, mobileUrls };
 }
 
 app.get('/api/ads/overview', async (req, res) => {
