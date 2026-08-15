@@ -8529,6 +8529,55 @@ setInterval(function() {
   }
 }, 5 * 60 * 1000);
 
+// Meta Graph API error code -> HTTP status, shared by every Meta API call
+// helper below (_metaFetch/_metaApiPost/_metaApiDelete) so a token vs.
+// permission vs. rate-limit failure is distinguished the same way on every
+// call, not just reads. These three code families (190/102 = invalid or
+// expired token, 200/10 = permission, 4/17 = rate limit) are the same ones
+// _metaFetch already recognized before this fix -- not new invented codes,
+// just applied consistently to the write/delete helpers too.
+function _metaStatusForCode(code) {
+  if (code === 190 || code === 102) return 401;
+  if (code === 200 || code === 10)  return 403;
+  if (code === 4   || code === 17)  return 429;
+  return null; // caller falls back to Meta's own HTTP response status
+}
+
+// Meta Graph API error -> a safe, differentiated user-facing message.
+// Built only from fields the *Meta helper functions already capture from
+// Meta's own response (code / error_subcode / error_user_msg) -- never
+// exposes tokens/secrets. error_user_msg, when Meta provides it, is
+// Meta's OWN user-facing guidance text (written by Meta to be shown to end
+// users), so surfacing it verbatim is safe and more useful than Oriven's
+// own generic category text alone. Falls back to Meta's raw top-level
+// message when no more specific code is recognized, rather than inventing
+// a cause that can't be verified without live Meta API access.
+function _metaBuildUserError(err) {
+  const code = err.metaCode;
+  let base = null;
+  if (code === 190 || code === 102) {
+    base = 'Your Meta connection has expired or been revoked. Reconnect Meta Ads in Integrations to continue.';
+  } else if (code === 200 || code === 10) {
+    base = 'Meta rejected this request: your connected Meta account does not have sufficient permission for this ad account or object.';
+  } else if (code === 100) {
+    // Meta reuses code 100 for many distinct validation problems (invalid/
+    // missing object ID, an out-of-range field value, etc.) -- there's no
+    // reliable way to tell "object doesn't exist" apart from "one of the
+    // submitted values is invalid" from the code alone, so this stays
+    // neutral rather than asserting deletion. error_user_msg (appended
+    // below when Meta provides it) usually carries the real specific
+    // reason on top of this.
+    base = 'Meta rejected this request as invalid -- this can mean the campaign, ad set, or ad no longer exists, isn\'t accessible to your connected Meta account, or one of the submitted values isn\'t valid for this object.';
+  } else if (code === 4 || code === 17) {
+    base = 'Meta is temporarily rate-limiting requests from this app. Please try again in a few minutes.';
+  }
+  const parts = [];
+  if (base) parts.push(base);
+  else if (err.message) parts.push(err.message);
+  if (err.metaUserMsg && (!base || !base.includes(err.metaUserMsg))) parts.push(err.metaUserMsg);
+  return parts.join(' ') || 'Meta Ads rejected this request.';
+}
+
 // â”€â”€ Helper: authenticated Meta Graph API call â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 // Throws on any API error (including 200 + error body from Facebook).
 // Error code 190/102 â†’ maps to HTTP 401 (expired/invalid token).
@@ -8553,17 +8602,39 @@ async function _metaFetch(path, accessToken, queryParams) {
   if (data.error) {
     const msg  = data.error.message || ('Meta API error code ' + data.error.code);
     const code = data.error.code;
-    console.error('[MetaAPI]', path, 'â†’', msg, '| code:', code, '| type:', data.error.type);
+    // Deliberately logs message/code/subcode/type/user_msg -- never
+    // access_token, client_secret, or any other credential.
+    console.error('[MetaAPI]', path, 'â†’', msg, '| code:', code, '| subcode:', data.error.error_subcode || 'â€”', '| type:', data.error.type, '| user_msg:', data.error.error_user_msg || 'â€”');
     const e    = new Error(msg);
-    e.metaCode = code;
-    e.metaType = data.error.type;
-    e.status   = (code === 190 || code === 102) ? 401
-               : (code === 200 || code === 10)  ? 403
-               : (code === 4   || code === 17)  ? 429
-               : 503;
+    e.metaCode      = code;
+    e.metaSubcode   = data.error.error_subcode || null;
+    e.metaType      = data.error.type;
+    e.metaUserMsg   = data.error.error_user_msg   || null;
+    e.metaUserTitle = data.error.error_user_title || null;
+    e.status = _metaStatusForCode(code) || res.status || 503;
     throw e;
   }
   return data;
+}
+
+// Verifies a campaign/ad/ad-set ID genuinely belongs to the user's
+// currently active Meta ad account before any management route is allowed
+// to touch it -- req.params.id is never trusted blindly. Oriven doesn't
+// maintain its own list of a user's Meta object IDs anywhere, so this
+// reuses the existing, already-authenticated Meta Graph API (one
+// lightweight read) instead of building a second tracking system --
+// account_id is the one field every Meta campaign/adset/ad object exposes
+// identifying its owning ad account. A genuine "not found/no access"
+// response from Meta itself propagates as-is (via _metaFetch's own error
+// handling above) rather than being masked by this check.
+async function _verifyMetaObjectOwnership(accessToken, objectId, expectedAccountId) {
+  const data = await _metaFetch('/' + objectId, accessToken, { fields: 'id,account_id' });
+  const expectedBare = String(expectedAccountId).replace(/^act_/, '');
+  if (!data || String(data.account_id) !== expectedBare) {
+    const e = new Error('This object does not belong to your currently connected Meta ad account.');
+    e.status = 403;
+    throw e;
+  }
 }
 
 // â”€â”€ Helper: resolve valid token + active account for a user â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
@@ -8591,6 +8662,8 @@ async function _metaApiPost(path, accessToken, params) {
   if (data.error) {
     const e   = data.error;
     const msg = e.message || ('Meta API error code ' + e.code);
+    // Deliberately logs message/code/subcode/type/user_title/user_msg/
+    // fbtrace_id -- never access_token, client_secret, or any credential.
     console.error('[MetaAPIPost] Error at', path);
     console.error('  message    :', e.message          || '—');
     console.error('  code       :', e.code             || '—');
@@ -8600,10 +8673,13 @@ async function _metaApiPost(path, accessToken, params) {
     console.error('  user_msg   :', e.error_user_msg   || '—');
     console.error('  fbtrace_id :', e.fbtrace_id       || '—');
     console.error('  full body  :', JSON.stringify(data));
-    const err       = new Error(msg);
-    err.metaCode    = e.code;
-    err.metaSubcode = e.error_subcode;
-    err.status      = res.status;
+    const err        = new Error(msg);
+    err.metaCode      = e.code;
+    err.metaSubcode   = e.error_subcode    || null;
+    err.metaType      = e.type             || null;
+    err.metaUserMsg   = e.error_user_msg   || null;
+    err.metaUserTitle = e.error_user_title || null;
+    err.status = _metaStatusForCode(e.code) || res.status || 503;
     throw err;
   }
   return data;
@@ -8624,16 +8700,23 @@ async function _metaApiDelete(path, accessToken) {
   if (data.error) {
     const e   = data.error;
     const msg = e.message || ('Meta API error code ' + e.code);
+    // Same no-secrets logging discipline as _metaApiPost above.
     console.error('[MetaAPIDelete] Error at', path);
     console.error('  message    :', e.message          || '—');
     console.error('  code       :', e.code             || '—');
     console.error('  subcode    :', e.error_subcode    || '—');
+    console.error('  type       :', e.type             || '—');
+    console.error('  user_title :', e.error_user_title || '—');
+    console.error('  user_msg   :', e.error_user_msg   || '—');
     console.error('  fbtrace_id :', e.fbtrace_id       || '—');
     console.error('  full body  :', JSON.stringify(data));
-    const err       = new Error(msg);
-    err.metaCode    = e.code;
-    err.metaSubcode = e.error_subcode;
-    err.status      = res.status;
+    const err        = new Error(msg);
+    err.metaCode      = e.code;
+    err.metaSubcode   = e.error_subcode    || null;
+    err.metaType      = e.type             || null;
+    err.metaUserMsg   = e.error_user_msg   || null;
+    err.metaUserTitle = e.error_user_title || null;
+    err.status = _metaStatusForCode(e.code) || res.status || 503;
     throw err;
   }
   return data;
@@ -9436,13 +9519,22 @@ app.get('/api/meta/campaign/:id', async (req, res) => {
     if (!user) return res.status(401).json({ error: 'Authentication required' });
     const { accessToken, accountId } = await _getMetaAccess(user);
     console.log('[Meta Campaign Fetch] campaign:', req.params.id, '| user:', user.id, '| account:', accountId);
+    // account_id folded into the same fetch (rather than a separate
+    // ownership pre-check) -- one network call, not two. req.params.id is
+    // never trusted blindly: reject before returning anything if it
+    // belongs to a different Meta ad account than the one connected.
     const data = await _metaFetch('/' + req.params.id, accessToken, {
-      fields: 'id,name,status,objective,daily_budget,lifetime_budget,created_time'
+      fields: 'id,name,status,objective,daily_budget,lifetime_budget,created_time,account_id'
     });
+    const expectedBare = accountId.replace(/^act_/, '');
+    if (String(data.account_id) !== expectedBare) {
+      console.warn('[Meta Campaign Fetch] Rejected -- campaign', req.params.id, 'belongs to account', data.account_id, 'not the connected', expectedBare, '| user:', user.id);
+      return res.status(403).json({ error: 'This campaign does not belong to your currently connected Meta ad account.' });
+    }
     res.json({ campaign: data });
   } catch (err) {
     console.error('[Meta Campaign Fetch] FAILED campaign:', req.params.id, '|', err.message, '| metaCode:', err.metaCode || '—', '| metaSubcode:', err.metaSubcode || '—');
-    res.status(err.status || 500).json({ error: err.message });
+    res.status(err.status || 500).json({ error: _metaBuildUserError(err) });
   }
 });
 
@@ -9452,6 +9544,7 @@ app.patch('/api/meta/campaign/:id', async (req, res) => {
     const user = await getUserFromToken(req);
     if (!user) return res.status(401).json({ error: 'Authentication required' });
     const { accessToken, accountId } = await _getMetaAccess(user);
+    await _verifyMetaObjectOwnership(accessToken, req.params.id, accountId);
     const { name, daily_budget } = req.body || {};
     const params = {};
     if (name !== undefined && String(name).trim()) params.name = String(name).trim();
@@ -9467,7 +9560,7 @@ app.patch('/api/meta/campaign/:id', async (req, res) => {
     res.json({ ok: true });
   } catch (err) {
     console.error('[Meta Campaign Edit] FAILED campaign:', req.params.id, '| code:', err.metaCode || '—', '| subcode:', err.metaSubcode || '—', '|', err.message);
-    res.status(err.status || 500).json({ error: err.message });
+    res.status(err.status || 500).json({ error: _metaBuildUserError(err) });
   }
 });
 
@@ -9477,6 +9570,7 @@ app.post('/api/meta/campaign/:id/pause', async (req, res) => {
     const user = await getUserFromToken(req);
     if (!user) return res.status(401).json({ error: 'Authentication required' });
     const { accessToken, accountId } = await _getMetaAccess(user);
+    await _verifyMetaObjectOwnership(accessToken, req.params.id, accountId);
     console.log('[Meta Campaign Pause]');
     console.log('  campaign :', req.params.id);
     console.log('  user     :', user.id);
@@ -9486,7 +9580,7 @@ app.post('/api/meta/campaign/:id/pause', async (req, res) => {
     res.json({ ok: true, status: 'PAUSED' });
   } catch (err) {
     console.error('[Meta Campaign Pause] FAILED campaign:', req.params.id, '| code:', err.metaCode || '—', '| subcode:', err.metaSubcode || '—', '|', err.message);
-    res.status(err.status || 500).json({ error: err.message });
+    res.status(err.status || 500).json({ error: _metaBuildUserError(err) });
   }
 });
 
@@ -9496,6 +9590,7 @@ app.post('/api/meta/campaign/:id/resume', async (req, res) => {
     const user = await getUserFromToken(req);
     if (!user) return res.status(401).json({ error: 'Authentication required' });
     const { accessToken, accountId } = await _getMetaAccess(user);
+    await _verifyMetaObjectOwnership(accessToken, req.params.id, accountId);
     console.log('[Meta Campaign Resume]');
     console.log('  campaign :', req.params.id);
     console.log('  user     :', user.id);
@@ -9505,7 +9600,7 @@ app.post('/api/meta/campaign/:id/resume', async (req, res) => {
     res.json({ ok: true, status: 'ACTIVE' });
   } catch (err) {
     console.error('[Meta Campaign Resume] FAILED campaign:', req.params.id, '| code:', err.metaCode || '—', '| subcode:', err.metaSubcode || '—', '|', err.message);
-    res.status(err.status || 500).json({ error: err.message });
+    res.status(err.status || 500).json({ error: _metaBuildUserError(err) });
   }
 });
 
@@ -9515,6 +9610,7 @@ app.delete('/api/meta/campaign/:id', async (req, res) => {
     const user = await getUserFromToken(req);
     if (!user) return res.status(401).json({ error: 'Authentication required' });
     const { accessToken, accountId } = await _getMetaAccess(user);
+    await _verifyMetaObjectOwnership(accessToken, req.params.id, accountId);
     console.log('[Meta Campaign Delete]');
     console.log('  campaign :', req.params.id);
     console.log('  user     :', user.id);
@@ -9534,7 +9630,7 @@ app.delete('/api/meta/campaign/:id', async (req, res) => {
     res.json({ ok: true, deleted, archived });
   } catch (err) {
     console.error('[Meta Campaign Delete] FAILED campaign:', req.params.id, '| code:', err.metaCode || '—', '| subcode:', err.metaSubcode || '—', '|', err.message);
-    res.status(err.status || 500).json({ error: err.message });
+    res.status(err.status || 500).json({ error: _metaBuildUserError(err) });
   }
 });
 
