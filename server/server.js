@@ -4934,7 +4934,7 @@ function _buildCampaignBrandSection(bc) {
 // /api/creative/campaign-suite route (below) can call it once per platform
 // in parallel, without duplicating this prompt-building logic. Same
 // schemas, same rules, same behavior as the original inline version.
-async function _generateAdPackage({ user, product, goal, platform, brandCore, productImages, platformObjective, campaignType, metaStructure, campaignStructure }) {
+async function _generateAdPackage({ user, product, goal, platform, brandCore, productImages, platformObjective, campaignType, metaStructure, campaignStructure, metaPlacement }) {
   goal = campaignGoals.normalizeGoal(goal);
   const goalSection = `\n\n${campaignGoals.GOAL_CREATIVE_DIRECTION[goal]}`;
   // Final Polish (Part 19) — the platform-specific objective/campaign type
@@ -5099,6 +5099,18 @@ ${platformRules}
     pkg.googleAds = pkg.googleAds || {};
     pkg.googleAds.campaignType = campaignType;
   }
+  // Meta-only placement choice (Facebook + Instagram vs. Instagram only) --
+  // same force-write guarantee as platformObjective above, but deliberately
+  // NOT threaded into the AI prompt: placement is a delivery/targeting
+  // setting, not a creative-direction one, so it shouldn't change copy tone.
+  // Only force-written when explicitly 'instagram_only' -- 'both'/absent
+  // simply leaves pkg.metaAds.placement unset, which /api/publish/meta
+  // already treats as the default (automatic placements), so this never
+  // adds a field that changes behavior for the common case.
+  if (platform === 'meta' && metaPlacement === 'instagram_only') {
+    pkg.metaAds = pkg.metaAds || {};
+    pkg.metaAds.placement = 'instagram_only';
+  }
   if (platform === 'meta' && metaStructure) {
     pkg.metaStructure = {
       adSets: Math.max(1, Math.min(5, parseInt(metaStructure.adSets, 10) || 1)),
@@ -5132,7 +5144,7 @@ ${platformRules}
 app.post('/api/ai/create-ad', requireSubOrOnboardingGen, async (req, res) => {
   console.log('[create-ad] ← route handler entered');
   console.log('[create-ad] req.body keys:', Object.keys(req.body || {}));
-  const { product, goal, platforms, mode, brandCore, productImages, platformObjective, campaignType, metaStructure, campaignStructure } = req.body;
+  const { product, goal, platforms, mode, brandCore, productImages, platformObjective, campaignType, metaStructure, campaignStructure, metaPlacement } = req.body;
   console.log('[create-ad] product:', (product || '').slice(0, 60), '| mode:', mode, '| platform:', req.body.platform, '| platforms:', platforms);
   if (!product) {
     console.log('[create-ad] 400 — product missing');
@@ -5208,7 +5220,7 @@ Reply ONLY with valid JSON array (no markdown, no extra text):
   // logic, now shared with /api/creative/campaign-suite.
   console.log('[create-ad] → mode=full branch — delegating to _generateAdPackage for platform:', platform);
   try {
-    const pkg = await _generateAdPackage({ user: req.user, product, goal, platform, brandCore, productImages, platformObjective, campaignType, metaStructure, campaignStructure });
+    const pkg = await _generateAdPackage({ user: req.user, product, goal, platform, brandCore, productImages, platformObjective, campaignType, metaStructure, campaignStructure, metaPlacement });
     console.log(`[create-ad] Package ready — keys: ${Object.keys(pkg).join(', ')} | visualConcepts: ${(pkg.visualConcepts||[]).length}`);
     _consumeOnboardingFreeGen(req);
     if (reservation) creditManager.finalizeCreditLog(reservation, 'campaign_generation', { provider: 'aiml', success: true, route: req.path }).catch(() => {});
@@ -6349,6 +6361,16 @@ app.post('/api/publish/meta', requireSubscription, async (req, res) => {
     const objective = adSetConfig.objective;
     console.log('[publish/meta] goal:', goal, '| platformObjective:', m.objective || '(none)', '| resolved objective:', objective, '| optimization_goal:', adSetConfig.optimization_goal, '| needsPixel:', adSetConfig.needsPixel);
 
+    // Placement (Final Polish) — 'instagram_only' restricts delivery via
+    // Meta's targeting.publisher_platforms; anything else (unset/'both',
+    // including every campaign published before this field existed)
+    // leaves targeting exactly as before -- no publisher_platforms key at
+    // all, which is Meta's own automatic-placement default across
+    // Facebook + Instagram. Never fabricated: only ever read from what the
+    // package actually carries.
+    const placement = m.placement === 'instagram_only' ? 'instagram_only' : 'both';
+    console.log('[publish/meta] placement:', placement);
+
     // accountId from _getMetaAccess is already normalised to exactly one 'act_' prefix.
     console.log('[publish/meta] account:', accountId, '| page:', pageId);
 
@@ -6402,7 +6424,10 @@ app.post('/api/publish/meta', requireSubscription, async (req, res) => {
         optimization_goal: adSetConfig.optimization_goal,
         bid_strategy: 'LOWEST_COST_WITHOUT_CAP',
         is_adset_budget_sharing_enabled: false,
-        targeting: { age_min: 18, age_max: 65, geo_locations: { countries: ['US'] } },
+        targeting: Object.assign(
+          { age_min: 18, age_max: 65, geo_locations: { countries: ['US'] } },
+          placement === 'instagram_only' ? { publisher_platforms: ['instagram'] } : {}
+        ),
       };
       if (adSetConfig.needsPixel) {
         adSetPayload.promoted_object = { pixel_id: pixelId, custom_event_type: adSetConfig.customEventType };
@@ -11819,6 +11844,31 @@ app.patch('/api/intelligence/events/read-all', requireSubIfAuthed, async (req, r
   } catch (err) {
     console.error('[intelligence/events/read-all]', err.message);
     res.status(500).json({ error: 'Could not mark all read.' });
+  }
+});
+
+// PATCH /api/intelligence/events/dismiss-all -- "Clear inbox": bulk-dismiss
+// every currently-undismissed event for this user, same real persistence
+// mechanism as the single-item /dismiss route above (dismissed=true), not
+// a second delete/storage system. The notification panel's two GET calls
+// already filter dismissed=false, so this is what actually makes cleared
+// notifications stay gone after a refresh. Deliberately scoped to
+// intelligence_events only -- pending Autopilot approvals shown in the
+// same panel come from a different table (/api/autopilot/recommendations)
+// and are left untouched here, exactly as the single-item dismiss button
+// already never appears on those cards.
+app.patch('/api/intelligence/events/dismiss-all', requireSubIfAuthed, async (req, res) => {
+  try {
+    if (!req.user) return res.status(401).json({ error: 'Authentication required' });
+    const { error } = await supabaseAdmin.from('intelligence_events')
+      .update({ dismissed: true })
+      .eq('user_id', req.user.id)
+      .eq('dismissed', false);
+    if (error) throw error;
+    res.json({ ok: true });
+  } catch (err) {
+    console.error('[intelligence/events/dismiss-all]', err.message);
+    res.status(500).json({ error: 'Could not clear your inbox.' });
   }
 });
 
