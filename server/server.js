@@ -4934,7 +4934,7 @@ function _buildCampaignBrandSection(bc) {
 // /api/creative/campaign-suite route (below) can call it once per platform
 // in parallel, without duplicating this prompt-building logic. Same
 // schemas, same rules, same behavior as the original inline version.
-async function _generateAdPackage({ user, product, goal, platform, brandCore, productImages, platformObjective, campaignType, metaStructure, campaignStructure, metaPlacement }) {
+async function _generateAdPackage({ user, product, goal, platform, brandCore, productImages, platformObjective, campaignType, metaStructure, campaignStructure, metaPlacement, brandIdentityDisabled }) {
   goal = campaignGoals.normalizeGoal(goal);
   const goalSection = `\n\n${campaignGoals.GOAL_CREATIVE_DIRECTION[goal]}`;
   // Final Polish (Part 19) — the platform-specific objective/campaign type
@@ -4972,8 +4972,15 @@ async function _generateAdPackage({ user, product, goal, platform, brandCore, pr
     const totalAds = Math.max(1, Math.min(5, parseInt(campaignStructure.groups, 10) || 1)) * Math.max(1, Math.min(5, parseInt(campaignStructure.adsPerGroup, 10) || 1));
     objectiveSection += `\n\nCAMPAIGN STRUCTURE: This campaign will publish as ${campaignStructure.groups} Ad Group(s) × ${campaignStructure.adsPerGroup} Responsive Search Ad(s) per Ad Group (${totalAds} ads total). Oriven rotates your generated headlines/descriptions across ads as needed — you do not need to write ${totalAds} fully unique sets of headlines.`;
   }
+  // brandIdentityDisabled: brandCore itself is already omitted by the
+  // caller when the toggle is off (same "just don't send the field"
+  // convention as metaPlacement/platformObjective), so _buildCampaignBrandSection
+  // naturally no-ops on an empty brandCore -- no extra gating needed here.
+  // _gatherBusinessContext is different: it independently re-fetches brand
+  // data from the DB regardless of what was sent, so it needs the explicit
+  // flag (see skipBrandVoice inside that function).
   const brandSection = _buildCampaignBrandSection(brandCore);
-  const _bizCtx = user ? await _gatherBusinessContext(user.id).catch(() => null) : null;
+  const _bizCtx = user ? await _gatherBusinessContext(user.id, { skipBrandVoice: !!brandIdentityDisabled }).catch(() => null) : null;
   const businessSection = _bizCtx ? `\n\nBUSINESS KNOWLEDGE (real, stored data about this business — use it instead of generic copy; if competitor info is present, use it only for positioning, never copy competitor content):\n${_bizCtx.text}` : '';
   const productImageNote = (Array.isArray(productImages) && productImages.length)
     ? `\n\nPRODUCT ASSETS: The user has uploaded ${productImages.length} product image(s). Describe visual concepts that showcase the actual product photography — not stock imagery. Reference realistic product shots in imagePrompts.`
@@ -5084,6 +5091,11 @@ ${platformRules}
   // goal (per spec) — this line is what makes that a guarantee, not a hope.
   if (!pkg.strategy) pkg.strategy = {};
   pkg.strategy.goal = goal;
+  // Force-written the same way pkg.strategy.goal is above, so the Launch
+  // review screen has one authoritative field to read ("was Brand Identity
+  // actually used for this generation") rather than re-deriving it from
+  // whether brandSection happened to be non-empty.
+  pkg.brandIdentityEnabled = !brandIdentityDisabled;
   // Same guarantee as pkg.strategy.goal above, extended to the
   // platform-specific objective/campaign type (Part 19/22): the AI only
   // ever sees these as prompt context, never as an authoritative field to
@@ -5144,7 +5156,7 @@ ${platformRules}
 app.post('/api/ai/create-ad', requireSubOrOnboardingGen, async (req, res) => {
   console.log('[create-ad] ← route handler entered');
   console.log('[create-ad] req.body keys:', Object.keys(req.body || {}));
-  const { product, goal, platforms, mode, brandCore, productImages, platformObjective, campaignType, metaStructure, campaignStructure, metaPlacement } = req.body;
+  const { product, goal, platforms, mode, brandCore, productImages, platformObjective, campaignType, metaStructure, campaignStructure, metaPlacement, brandIdentityDisabled } = req.body;
   console.log('[create-ad] product:', (product || '').slice(0, 60), '| mode:', mode, '| platform:', req.body.platform, '| platforms:', platforms);
   if (!product) {
     console.log('[create-ad] 400 — product missing');
@@ -5220,7 +5232,7 @@ Reply ONLY with valid JSON array (no markdown, no extra text):
   // logic, now shared with /api/creative/campaign-suite.
   console.log('[create-ad] → mode=full branch — delegating to _generateAdPackage for platform:', platform);
   try {
-    const pkg = await _generateAdPackage({ user: req.user, product, goal, platform, brandCore, productImages, platformObjective, campaignType, metaStructure, campaignStructure, metaPlacement });
+    const pkg = await _generateAdPackage({ user: req.user, product, goal, platform, brandCore, productImages, platformObjective, campaignType, metaStructure, campaignStructure, metaPlacement, brandIdentityDisabled });
     console.log(`[create-ad] Package ready — keys: ${Object.keys(pkg).join(', ')} | visualConcepts: ${(pkg.visualConcepts||[]).length}`);
     _consumeOnboardingFreeGen(req);
     if (reservation) creditManager.finalizeCreditLog(reservation, 'campaign_generation', { provider: 'aiml', success: true, route: req.path }).catch(() => {});
@@ -12643,13 +12655,18 @@ app.get('/api/business/website', async (req, res) => {
 // â”€â”€ Context Engine V2 (Epic 11/12) â”€â”€ the actual "never repeat
 // yourself" mechanism. One compact text block, pulled into every AI
 // call that has a user â€” same style as _buildBrandSection (server.js:624).
-async function _gatherBusinessContext(userId) {
+async function _gatherBusinessContext(userId, opts) {
+  const skipBrandVoice = !!(opts && opts.skipBrandVoice);
   try {
     const [profileRes, productsRes, audiencesRes, competitorsRes, brandCore, websiteRes, memoryRes, learningsRes] = await Promise.all([
       supabaseAdmin.from('business_profile').select('*').eq('user_id', userId).maybeSingle(),
       supabaseAdmin.from('business_products').select('name,category,usp,target_audience').eq('user_id', userId).order('created_at', { ascending: false }).limit(8),
       supabaseAdmin.from('business_audiences').select('name,pain_points,goals').eq('user_id', userId).order('created_at', { ascending: false }).limit(5),
       supabaseAdmin.from('business_competitors').select('company,positioning').eq('user_id', userId).order('created_at', { ascending: false }).limit(3),
+      // Still fetched even when skipBrandVoice is true -- it's one leg of
+      // this same parallel Promise.all, so skipping the fetch itself saves
+      // nothing; only the INJECTION into `lines` below (tone/USP/words-to-
+      // avoid/colors) is actually gated by the flag.
       _getBrandCore(userId),
       supabaseAdmin.from('business_website_knowledge').select('products,services,positioning,tone').eq('user_id', userId).maybeSingle(),
       supabaseAdmin.from('business_memory').select('content,type').eq('user_id', userId).order('created_at', { ascending: false }).limit(5),
@@ -12681,7 +12698,15 @@ async function _gatherBusinessContext(userId) {
       if (profile.vision)       lines.push(`Vision: ${profile.vision}`);
       if (profile.primary_goals) lines.push(`Goals: ${profile.primary_goals}`);
     }
-    if (brandCore) {
+    // skipBrandVoice (Final Polish — Brand Identity toggle): without this
+    // gate, a user who explicitly turns Brand Identity OFF in Launch would
+    // still get their brand tone/USP/words-to-avoid/colors re-injected here
+    // regardless -- this function independently re-fetches brandCore from
+    // the DB rather than trusting what the caller's own request carried, so
+    // omitting brandCore from the /api/ai/create-ad payload alone is not
+    // sufficient to actually disable it. This is the one place that needed
+    // an explicit flag rather than just "don't send the field".
+    if (brandCore && !skipBrandVoice) {
       let usedBrand = false;
       if (brandCore.toneOfVoice) { lines.push(`Brand tone of voice: ${brandCore.toneOfVoice}`); usedBrand = true; }
       if (brandCore.usp)         { lines.push(`Brand USP: ${brandCore.usp}`); usedBrand = true; }

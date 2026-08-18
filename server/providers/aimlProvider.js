@@ -331,10 +331,23 @@ async function getVideoStatus(generationId) {
 
   console.log('[AIML/status] ←', generationId.slice(0, 16) + '...', '| raw:', raw, '→ normalised:', status);
 
+  // failureReason must always be a plain string -- data.error from the AIML
+  // API is frequently a nested object ({ message, code, type }), not a
+  // string. Passing that object straight through let it get implicitly
+  // stringified downstream as the literal text "[object Object]" wherever
+  // a caller didn't defensively unwrap it (some do, some don't), which is
+  // exactly the "(Object)" garbage that showed up in generated-video error
+  // states. Unwrap it here once, at the source, so every consumer gets a
+  // real string no matter what shape the provider returned.
+  const rawError = data?.error;
+  const failureReason = (rawError && typeof rawError === 'object')
+    ? (rawError.message || rawError.error || JSON.stringify(rawError))
+    : (rawError || data?.message || null);
+
   return {
     status,
-    videoUrl:      data?.video?.url || null,
-    failureReason: data?.error      || data?.message || null,
+    videoUrl: data?.video?.url || null,
+    failureReason,
   };
 }
 
