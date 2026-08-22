@@ -343,22 +343,38 @@ app.post('/api/stripe-webhook', express.raw({ type: 'application/json' }), async
   // 8. Attempt Supabase update
   console.log(`[Webhook] ðŸ”„ UPDATE profiles SET subscription_status = '${plan}' WHERE id = '${userId}'`);
 
+  // subscription_status/stripe_subscription_id/stripe_customer_id are safe
+  // to write unconditionally on a webhook retry (idempotent by nature -- a
+  // repeated identical write is a no-op). The credit grant is NOT safe to
+  // repeat this way, so it's split out into provisionCreditsForCycle below,
+  // which has its own idempotency check (skips if credits_cycle_end already
+  // matches) -- Stripe's documented at-least-once delivery means this
+  // handler can genuinely fire more than once for the same checkout.
   const { data: updateData, error: updateError } = await supabaseAdmin
     .from('profiles')
     .update({
       subscription_status: plan,
       stripe_subscription_id: session.subscription || null,
       stripe_customer_id: session.customer || null,
-      // First-activation credit grant -- immediately corrected to Stripe's
-      // real billing period by the invoice.payment_succeeded handler above,
-      // which fires right after checkout completes.
-      credits_balance: creditManager.PLAN_ALLOWANCES[plan] || 0,
-      credits_cycle_start: new Date().toISOString(),
-      credits_cycle_end: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString(),
-      credits_last_reset_source: 'signup',
     })
     .eq('id', userId)
     .select('id, subscription_status');
+
+  if (!updateError && updateData && updateData.length) {
+    try {
+      // First-activation credit grant -- immediately corrected to Stripe's
+      // real billing period by the invoice.payment_succeeded handler above,
+      // which fires right after checkout completes. Routed through
+      // provisionCreditsForCycle (not a direct field write) specifically so
+      // a duplicate delivery of this same event never re-grants the full
+      // allowance twice.
+      const cyc = { start: new Date().toISOString(), end: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString() };
+      const grant = await creditManager.provisionCreditsForCycle(userId, plan, cyc.start, cyc.end, 'signup');
+      console.log('[Webhook] Credit grant:', grant.provisioned ? `${grant.allowance} credits provisioned` : `skipped (${grant.reason})`);
+    } catch (err) {
+      console.error('[Webhook] Credit provisioning error:', err.message);
+    }
+  }
 
   // Log raw update result â€” never assume success without checking
   console.log('[Webhook] Raw update response:');
@@ -1293,10 +1309,14 @@ Reply ONLY with valid JSON (no markdown fences, no extra text):
 - body: benefit-led copy in brand voice (2-3 sentences, no filler, no generic phrases)
 - cta: action-driven, brand-appropriate (max 4 words)${_bizCtx ? `\n\nBUSINESS KNOWLEDGE (real, stored data about this business — use it instead of generic copy):\n${_bizCtx.text}` : ''}`;
 
+  // This is "Image Ad" generation (one complete ad: headline/body/CTA +
+  // image) — charged as image_generation ("Image Ad", 75cr), not
+  // campaign_generation (that bucket is for /api/generate-campaign's
+  // multi-variation adset builder, a different, separate feature).
   let reservation;
   if (req.user) {
     try {
-      reservation = await creditManager.reserveCredits(req.user, 'campaign_generation');
+      reservation = await creditManager.reserveCredits(req.user, 'image_generation');
     } catch (err) {
       if (err instanceof creditManager.InsufficientCreditsError) return res.status(402).json({ error: 'Out of credits', code: 'CREDITS_EXHAUSTED', balance: err.balance });
       return res.status(500).json({ error: 'Could not verify credits right now.' });
@@ -1322,7 +1342,7 @@ Reply ONLY with valid JSON (no markdown fences, no extra text):
     console.log('[Ads] Step 1+2 â€” copy and visual prompt ready');
   } catch (err) {
     console.error('[Ads] Anthropic error:', err.message);
-    if (reservation) creditManager.finalizeCreditLog(reservation, 'campaign_generation', { success: false, error: err.message, route: req.path }).catch(() => {});
+    if (reservation) creditManager.finalizeCreditLog(reservation, 'image_generation', { success: false, error: err.message, route: req.path }).catch(() => {});
     return res.status(500).json({ error: 'Failed to generate ad copy' });
   }
 
@@ -1335,7 +1355,7 @@ Reply ONLY with valid JSON (no markdown fences, no extra text):
     console.warn('[Ads] Step 3 â€” AIML image failed (non-fatal):', err.message);
   }
 
-  if (reservation) creditManager.finalizeCreditLog(reservation, 'campaign_generation', { provider: 'aiml', success: true, route: req.path }).catch(() => {});
+  if (reservation) creditManager.finalizeCreditLog(reservation, 'image_generation', { provider: 'aiml', success: true, route: req.path }).catch(() => {});
   _recordCreativeAsset(req.user && req.user.id, { kind: 'ad', title: adCopy.title || prompt.slice(0, 80), content: { headline: adCopy.headline, body: adCopy.body, cta: adCopy.cta, imageUrl }, source_route: '/api/generate-ad' });
   res.json({
     title:    adCopy.title    || '',
@@ -4229,6 +4249,18 @@ app.post('/api/autopilot/rules', async (req, res) => {
   try {
     const user = await getUserFromToken(req);
     if (!user) return res.status(401).json({ error: 'Authentication required' });
+
+    // Starter has no Autopilot at all (creditManager.PLAN_AUTOPILOT_LIMITS.starter
+    // === 0) -- a rule created here would just sit dormant, always blocked at
+    // execution time (_evaluateAutomationRules), which already fully prevents
+    // a Starter user from ever actually *running* Autopilot. This check adds
+    // a clear rejection at creation time too, so Starter users aren't left
+    // wondering why a rule they created never fires.
+    const { data: creatorProfile } = await supabaseAdmin.from('profiles').select('subscription_status').eq('id', user.id).maybeSingle();
+    if ((creatorProfile && creatorProfile.subscription_status) === 'starter') {
+      return res.status(403).json({ error: 'Autopilot requires Creator or higher.', code: 'AUTOPILOT_NOT_AVAILABLE' });
+    }
+
     const { name, trigger_metric, trigger_operator, trigger_value, platform, action_type, action_params } = req.body || {};
     const validationErr = _validateAutopilotRuleFields(req.body || {}, true);
     if (validationErr) return res.status(400).json({ error: validationErr });
@@ -13559,12 +13591,15 @@ async function _generateRecommendation({ userId, sourceEventId, platform, campai
 
     const system = `You are a senior marketing strategist explaining a detected issue to a business owner. Given the real, already-computed problem and evidence below, write: businessReason (why this matters to the business, 1 sentence), marketingReason (why this matters from a marketing/platform perspective, 1 sentence), estimatedImprovement (a qualitative, honest estimate, e.g. "could reduce wasted spend" â€” never invent a specific percentage unless it already appears in the evidence given), estimatedRoi (qualitative, same rule), suggestedAction (1 short, plain-English sentence). Reply ONLY with valid JSON: {"businessReason":"...","marketingReason":"...","estimatedImprovement":"...","estimatedRoi":"...","suggestedAction":"..."}.`;
     const userMsg = `Problem: ${problem}\nConfidence: ${confidence}%\nEvidence: ${evidence ? JSON.stringify(evidence) : 'n/a'}\nPlatform: ${platform || 'n/a'}\nCampaign: ${campaignName || 'n/a'}\nType: ${type}`;
-    // Background/cron-triggered AI call -- per the credit-economy design,
-    // this never deducts from the user's balance (charge:false), only logs
-    // to credit_transactions for cost observability. Reusing the
-    // 'campaign_improvement' featureKey rather than inventing a new price
-    // point: no separate "autopilot_recommendation" bucket exists in
-    // creditManager's canonical FEATURE_COSTS.
+    // This is the recommendation-narration step specifically (writing up
+    // human-readable copy for an already-detected issue), a separate,
+    // smaller AI call from the rule-firing charge -- this one stays
+    // charge:false (logged only, never deducted), same as before. The real
+    // per-rule-firing charge (FEATURE_COSTS.autopilot, 25cr) is reserved by
+    // the caller, _evaluateAutomationRules, before this function is even
+    // invoked. Reusing the 'campaign_improvement' featureKey here rather
+    // than inventing a new price point: no separate "autopilot_recommendation"
+    // bucket exists in creditManager's canonical FEATURE_COSTS.
     let reservation;
     let raw;
     try {
@@ -13801,11 +13836,14 @@ async function _evaluateAutomationRules(user, platform, campaigns) {
       });
       if (!matches.length) continue;
 
-      // Plan-based monthly Autopilot execution cap (separate from AI
-      // Credits -- see creditManager.PLAN_AUTOPILOT_LIMITS). Checked right
-      // before the rule is allowed to actually fire, not earlier, so a
-      // rule that wouldn't have matched anything today never counts
-      // against the allowance.
+      // Plan-based monthly Autopilot execution cap (separate from, and
+      // checked before, AI Credits -- see creditManager.PLAN_AUTOPILOT_LIMITS).
+      // Checked right before the rule is allowed to actually fire, not
+      // earlier, so a rule that wouldn't have matched anything today never
+      // counts against the allowance. This is a plan-tier gate (Starter has
+      // no Autopilot at all) -- credits are reserved only after this passes,
+      // so Starter never even attempts a reservation for a feature it
+      // doesn't have.
       try {
         await creditManager.checkAndIncrementAutopilotUsage(user.id, plan, profile && profile.credits_cycle_end);
       } catch (err) {
@@ -13817,13 +13855,36 @@ async function _evaluateAutomationRules(user, platform, campaigns) {
         console.warn(`[Autopilot] usage check failed for user ${user.id}, allowing this execution:`, err.message);
       }
 
+      // Autopilot executions now consume AI Credits (25cr each, same shared
+      // pool as every other AI feature) -- previously charge:false. Reserved
+      // here, right before the rule fires, so an exhausted balance stops
+      // this and every remaining rule this tick the same way hitting the
+      // execution-count cap above already does.
+      let creditReservation;
+      try {
+        creditReservation = await creditManager.reserveCredits({ id: user.id }, 'autopilot');
+      } catch (err) {
+        if (err instanceof creditManager.InsufficientCreditsError) {
+          console.log(`[Autopilot] insufficient credits for user ${user.id} -- skipping remaining rules this tick`);
+          autopilotBlocked = true;
+          break;
+        }
+        console.warn(`[Autopilot] credit reservation failed for user ${user.id}, allowing this execution:`, err.message);
+      }
+
       // At most once/day/rule, so only the first qualifying campaign is
       // acted on per tick even if several matched â€” prevents one noisy
       // metric from firing a dozen actions in a single pass.
       const match = matches[0];
       const mode = AUTOPILOT_RULE_MODES.includes(ap.mode) ? ap.mode : 'require_approval';
 
-      await _execRuleAction(user, platform, rule, match, mode);
+      let execSucceeded = false;
+      try {
+        await _execRuleAction(user, platform, rule, match, mode);
+        execSucceeded = true;
+      } finally {
+        if (creditReservation) creditManager.finalizeCreditLog(creditReservation, 'autopilot', { success: execSucceeded, route: '_evaluateAutomationRules' }).catch(() => {});
+      }
       await supabaseAdmin.from('automation_rules').update({ last_triggered_at: new Date().toISOString() }).eq('id', rule.id);
     }
   } catch (err) {

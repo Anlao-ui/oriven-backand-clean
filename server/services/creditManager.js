@@ -67,9 +67,14 @@ function init(sharedSupabaseAdmin) {
 
 // ── Feature costs — "suggested values" from the pricing brief, reflecting
 // user value delivered, not raw token cost. Change a price here, nowhere else.
+// image_generation/video_generation double as "Image Ad"/"Video Ad" in the
+// pricing brief's terms — the app doesn't distinguish "ad image" from
+// "logo image" at the cost-table level, so these two buckets are shared by
+// every image/video generation route (logo, product shoots, UGC video,
+// motion graphics, video ads, generic image/video).
 const FEATURE_COSTS = {
-  ai_chat:              1,
-  ai_analysis:           5,
+  ai_chat:              5,   // "AI Chat" — 5 credits / message
+  ai_analysis:          25,  // "Intelligence" — 25 credits / analysis
   campaign_improvement: 10,
   audience_generation:  10,   // registered — no dedicated AI endpoint yet, see server.js wiring notes
   product_analysis:     10,   // registered — no dedicated AI endpoint yet, see server.js wiring notes
@@ -77,39 +82,41 @@ const FEATURE_COSTS = {
   brand_voice:          20,
   campaign_generation:  25,
   website_analysis:     30,
-  image_generation:     40,
-  video_generation:    120,
+  image_generation:     75,   // "Image Ad" — 75 credits
+  video_generation:    200,   // "Video Ad" — 200 credits
+  autopilot:            25,   // "Autopilot" — 25 credits / execution (see _evaluateAutomationRules)
 };
 
 // ── Plan allowances / seats — the other half of the pricing brief's config.
-const PLAN_ALLOWANCES = { starter: 500, creator: 3000, professional: 12000 };
+const PLAN_ALLOWANCES = { starter: 1000, creator: 2500, professional: 4000 };
 const PLAN_TEAM_SEATS  = { starter: 1,   creator: 1,    professional: 10   };
 
 // ── Intelligence monthly analysis allowance — separate cap layered on top
-// of the existing FEATURE_COSTS.ai_analysis (5cr) credit charge, not a
+// of the existing FEATURE_COSTS.ai_analysis (25cr) credit charge, not a
 // replacement for it. Applies specifically to the explicit "Analyze with
 // AI" action (server.js POST /api/meta/analyze, /api/ads/analyze) — the
 // only two routes that actually charge ai_analysis credits; the read-only
 // /api/intelligence/* dashboard routes (home/briefing/opportunities/etc.)
 // are a different, already-unmetered concept (Live Feed/summary views) and
 // are not affected by this cap.
-const PLAN_INTELLIGENCE_LIMITS = { starter: 50, creator: 100, professional: Infinity };
+const PLAN_INTELLIGENCE_LIMITS = { starter: 40, creator: 100, professional: Infinity };
 
-// ── Autopilot monthly execution allowance — separate from AI Credits.
-// Autopilot is different: one rule firing a `suggest_only`/
-// `require_approval` action calls _generateRecommendation (a real AI call,
-// charge:false — background AI is never billed per the existing credit
-// architecture), so an unlimited rule count could otherwise generate
-// unbounded real AI cost with zero credit-balance signal to the user.
-// Starter has no Autopilot at all (existing autopilotEligible gate).
-// Creator: capped, not unlimited -- 10/mo, revised down from an earlier
-// 200/mo per explicit product decision to keep Creator's plan-card number
-// small and legible (10 executions is plenty for the "1-2 active rules"
-// realistic Creator usage pattern, still comfortably inside the "at most
-// once/day/rule" ceiling in server.js _evaluateAutomationRules).
-// Professional: Infinity -- no separate monthly cap, per the plan's
-// "Unlimited" positioning (the underlying per-operation credit economy
-// still applies wherever a route already charges credits).
+// ── Autopilot monthly execution allowance — separate from, and in addition
+// to, AI Credits. Autopilot executions now DO consume AI Credits
+// (FEATURE_COSTS.autopilot, reserved in server.js _evaluateAutomationRules
+// right before a rule is allowed to fire) — this cap is a second, harder
+// ceiling on top of the credit economy, not a replacement for it, because
+// an unlimited rule count could otherwise burn through a user's whole
+// credit balance via unattended background firings with no per-click
+// confirmation. Starter has no Autopilot at all (existing autopilotEligible
+// gate). Creator: capped, not unlimited -- 10/mo, revised down from an
+// earlier 200/mo per explicit product decision to keep Creator's plan-card
+// number small and legible (10 executions is plenty for the "1-2 active
+// rules" realistic Creator usage pattern, still comfortably inside the "at
+// most once/day/rule" ceiling in server.js _evaluateAutomationRules).
+// Professional: Infinity -- no separate monthly execution-count cap, per
+// the plan's "Unlimited" positioning, but Professional's shared credit
+// balance still gates real spend (FEATURE_COSTS.autopilot still applies).
 const PLAN_AUTOPILOT_LIMITS = { starter: 0, creator: 10, professional: Infinity };
 
 class InsufficientCreditsError extends Error {
