@@ -24,6 +24,7 @@ const PORT = parseInt(process.env.PORT || '5500', 10);
 const toolRouter = require('./services/toolRouter');
 require('./tools/campaignTools'); // registers Tool Router entries as a side effect
 require('./tools/businessTools'); // V7 Phase 1 — registers remember_business_fact
+require('./tools/adEditTools'); // Ad Editing Workspace — registers edit_ad_copy, update_campaign_budget, update_audience, generate_new_creative, convert_platform, select_concept_variant
 const creditManager = require('./services/creditManager'); // no client of its own -- initialized below, right after supabaseAdmin exists
 const campaignGoals = require('./services/campaignGoals'); // single source of truth for the 4 campaign goals across every platform
 
@@ -5376,6 +5377,14 @@ You are a senior marketing strategist, not a generic chatbot — assume responsi
     const MAX_TOOL_STEPS = 5;
     let reply = null;
     let pendingAction = null;
+    // Ad Editing Workspace — the last non-confirmation tool that actually
+    // executed this turn, echoed back so the frontend can apply the exact
+    // field/value it changed (headline, budget, image, ...) instead of
+    // re-parsing the plain-English reply. Undefined for every other tool/
+    // conversation turn — additive, no existing consumer of this response
+    // reads it.
+    let appliedEdit = null;
+    let creditsExhausted = false;
 
     for (let step = 0; step < MAX_TOOL_STEPS; step++) {
       const raw = await _aimlChat(messages, { max_tokens: 1200 });
@@ -5393,12 +5402,17 @@ You are a senior marketing strategist, not a generic chatbot — assume responsi
 
       const result = await toolRouter.resolveTool(intent.tool, intent.params || {}, toolCtx);
 
-      if (!result.ok) { reply = result.error; break; }
+      if (!result.ok) {
+        reply = result.error;
+        if (result.status === 402) creditsExhausted = true;
+        break;
+      }
       if (result.clarification) { reply = result.clarification; break; }
       if (result.unsupported) { reply = result.unsupported; break; }
       if (result.pendingAction) { pendingAction = result.pendingAction; break; }
 
       if (result.executed) {
+        appliedEdit = { tool: intent.tool, execResult: result.execResult };
         messages.push({ role: 'assistant', content: raw });
         messages.push({ role: 'user', content: `[Tool result for ${intent.tool}]: ${result.message}\n\nUse this to answer, or call another tool if you still need more information. Reply in plain conversational text once you have the final answer — do not show the user raw tool output.` });
         continue;
@@ -5408,9 +5422,13 @@ You are a senior marketing strategist, not a generic chatbot — assume responsi
       break;
     }
 
+    if (creditsExhausted) {
+      if (reservation) creditManager.finalizeCreditLog(reservation, 'ai_chat', { provider: 'aiml', success: true, route: req.path }).catch(() => {});
+      return res.status(402).json({ error: reply || 'Out of credits', code: 'CREDITS_EXHAUSTED' });
+    }
     if (reservation) creditManager.finalizeCreditLog(reservation, 'ai_chat', { provider: 'aiml', success: true, route: req.path }).catch(() => {});
     if (pendingAction) return res.json({ pendingAction });
-    res.json({ reply: reply || "I wasn't able to complete that — could you rephrase?", usedContext: businessContext ? businessContext.sources : undefined });
+    res.json({ reply: reply || "I wasn't able to complete that — could you rephrase?", usedContext: businessContext ? businessContext.sources : undefined, appliedEdit: appliedEdit || undefined });
   } catch (err) {
     console.error('[ai/chat] error:', err.message);
     if (reservation) creditManager.finalizeCreditLog(reservation, 'ai_chat', { success: false, error: err.message, route: req.path }).catch(() => {});

@@ -82,7 +82,11 @@ async function resolveTool(name, params, ctx) {
       return { ok: true, executed: true, resolved, execResult, message: tool.formatResult(execResult, resolved) };
     } catch (err) {
       console.error(`[ToolRouter] execute failed for ${name}:`, err.message);
-      return { ok: false, error: err.friendlyMessage || 'That action could not be completed. Please try again.' };
+      // Additive only — status/code let a caller (e.g. the ai/chat route)
+      // distinguish "out of credits" from a generic failure and show the
+      // real paywall instead of a bare error bubble. No existing caller
+      // reads these fields today, so nothing regresses.
+      return { ok: false, error: err.friendlyMessage || 'That action could not be completed. Please try again.', status: err.status, code: err.code };
     }
   }
 
