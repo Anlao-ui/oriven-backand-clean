@@ -7018,7 +7018,21 @@ async function _fetchGoogleAdsAccounts(accessToken) {
       status:      acctStatus
     });
 
-    // For manager accounts â€” fetch direct (level=1) non-manager sub-clients
+    // For manager accounts â€” fetch ALL non-manager descendant client
+    // accounts, at any depth under this MCC root. Previously restricted to
+    // `level = 1` (direct children only) -- a real, common agency/multi-
+    // brand setup nests a sub-manager account under the top-level MCC, and
+    // any client account one level below THAT (level 2+) was silently
+    // never discovered: not an error, just missing from the account
+    // selector, so a user in that structure could never pick the account
+    // holding their actual campaigns. `customer_client` already returns
+    // the account's resolved `level` for any depth in one query (Google
+    // Ads API does the tree-walk), so `level > 0` (excludes the root
+    // manager itself, already listed separately above) is all that's
+    // needed -- no per-level recursion required. login-customer-id stays
+    // the TOP-level manager for every discovered account regardless of
+    // its actual depth: MCC access cascades from the top, so it doesn't
+    // need to be the account's immediate parent to have visibility.
     if (isManager) {
       try {
         const subUrl = 'https://googleads.googleapis.com/v24/customers/' + customerId + '/googleAds:search';
@@ -7027,9 +7041,10 @@ async function _fetchGoogleAdsAccounts(accessToken) {
           headers: Object.assign({ 'Content-Type': 'application/json', 'login-customer-id': customerId }, headers),
           body:    JSON.stringify({
             query: `SELECT customer_client.id, customer_client.descriptive_name, customer_client.manager,
-                           customer_client.status, customer_client.currency_code, customer_client.time_zone
+                           customer_client.status, customer_client.currency_code, customer_client.time_zone,
+                           customer_client.level
                     FROM customer_client
-                    WHERE customer_client.level = 1 AND customer_client.manager = false`
+                    WHERE customer_client.level > 0 AND customer_client.manager = false`
           })
         });
         const subCT   = subRes.headers.get('content-type') || '';
@@ -7044,7 +7059,7 @@ async function _fetchGoogleAdsAccounts(accessToken) {
             const subId = String(cc.id);
             // Don't duplicate if already in the direct list
             if (accounts.some(function(a) { return a.customer_id === subId; })) return;
-            console.log('[Google Ads] sub-client', subId, '| name:', cc.descriptiveName, '| status:', cc.status);
+            console.log('[Google Ads] sub-client', subId, '| name:', cc.descriptiveName, '| status:', cc.status, '| level:', cc.level);
             accounts.push({
               customer_id:       subId,
               name:              cc.descriptiveName || subId,

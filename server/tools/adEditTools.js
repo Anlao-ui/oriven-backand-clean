@@ -93,7 +93,7 @@ function _getPath(obj, path) {
 
 toolRouter.register({
   name: 'edit_ad_copy',
-  description: "Change a text field (headline, description, primary text, or CTA) on the campaign currently open in the ad editing workspace. Pass `value` for an explicit replacement (e.g. a specific CTA), or `action` to have Oriven rewrite the current text (rewrite/improve/shorten/expand/premium/luxury/funny/professional/minimal/high_ctr/high_roas/high_engagement).",
+  description: "Modifies a text field (headline, description, primary text, or CTA) in place on the campaign the user ALREADY has open in the ad editing workspace — it never creates a new campaign. Pass `value` for an explicit replacement (e.g. a specific CTA), or `action` to have Oriven rewrite the current text (rewrite/improve/shorten/expand/premium/luxury/funny/professional/minimal/high_ctr/high_roas/high_engagement).",
   params: '{ field: "headline"|"description"|"primaryText"|"cta", value?: string, action?: string }',
   requiresConfirmation: false,
   resolve: async (params, ctx) => {
@@ -126,7 +126,7 @@ toolRouter.register({
 // ── update_campaign_budget — direct, local, no AI call ─────────────────
 toolRouter.register({
   name: 'update_campaign_budget',
-  description: "Change the daily budget of the campaign currently open in the ad editing workspace.",
+  description: "Changes the daily budget in place on the campaign the user ALREADY has open in the ad editing workspace — it never creates a new campaign.",
   params: '{ value: number }',
   requiresConfirmation: false,
   resolve: (params, ctx) => {
@@ -144,7 +144,7 @@ toolRouter.register({
 // ── update_audience — direct, local, no AI call ─────────────────────────
 toolRouter.register({
   name: 'update_audience',
-  description: "Change the target audience of the campaign currently open in the ad editing workspace.",
+  description: "Changes the target audience in place on the campaign the user ALREADY has open in the ad editing workspace — it never creates a new campaign.",
   params: '{ value: string }',
   requiresConfirmation: false,
   resolve: (params, ctx) => {
@@ -161,7 +161,7 @@ toolRouter.register({
 // ── generate_new_creative — proxies to the existing image route ────────
 toolRouter.register({
   name: 'generate_new_creative',
-  description: "Generate a brand-new ad visual for the campaign currently open in the ad editing workspace, replacing the existing one. Optionally pass an instruction (e.g. 'more minimal', 'brighter, more energetic') to steer the new visual.",
+  description: "Use this whenever the user asks for a new/different creative, image, or visual while a campaign is open in the ad editing workspace (e.g. 'give me a different creative', 'create a new creative', 'change the image') — it replaces ONLY the image on the campaign that is ALREADY open, in place. Optionally pass an instruction (e.g. 'more minimal', 'brighter, more energetic') to steer the new visual. Do NOT use create_campaign_package for this — that starts a brand new, separate campaign from scratch and must never be called just because the user's wording contains the word \"create\" while they are editing an existing open campaign.",
   params: '{ visualConceptIndex?: number, instruction?: string }',
   requiresConfirmation: false,
   resolve: (params, ctx) => {
