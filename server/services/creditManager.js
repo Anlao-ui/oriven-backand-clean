@@ -498,29 +498,16 @@ async function checkAndIncrementAutopilotUsage(userId, plan, cycleEndISO) {
 // cannot bypass this by manipulating frontend JS, since it's enforced here
 // before any AI provider call is made.
 //
-// Requires two columns on `profiles` (same convention as
-// autopilot_executions_used/autopilot_cycle_reset_at above) and this RPC:
-//
-//   ALTER TABLE profiles ADD COLUMN IF NOT EXISTS intelligence_analyses_used integer NOT NULL DEFAULT 0;
-//   ALTER TABLE profiles ADD COLUMN IF NOT EXISTS intelligence_cycle_reset_at timestamptz;
-//
-//   CREATE OR REPLACE FUNCTION increment_intelligence_usage(p_user_id uuid, p_limit integer, p_cycle_end timestamptz)
-//   RETURNS TABLE(ok boolean, used integer) LANGUAGE plpgsql AS $$
-//   DECLARE v_used integer; v_reset_at timestamptz;
-//   BEGIN
-//     SELECT intelligence_analyses_used, intelligence_cycle_reset_at INTO v_used, v_reset_at
-//       FROM profiles WHERE id = p_user_id FOR UPDATE;
-//     IF v_reset_at IS NULL OR v_reset_at < now() THEN
-//       v_used := 0;
-//       UPDATE profiles SET intelligence_analyses_used = 0, intelligence_cycle_reset_at = p_cycle_end WHERE id = p_user_id;
-//     END IF;
-//     IF v_used < p_limit THEN
-//       UPDATE profiles SET intelligence_analyses_used = intelligence_analyses_used + 1 WHERE id = p_user_id;
-//       RETURN QUERY SELECT true, v_used + 1;
-//     ELSE
-//       RETURN QUERY SELECT false, v_used;
-//     END IF;
-//   END; $$;
+// Requires two columns on `profiles` and this RPC, both defined in
+// docs/migrations/2026-08-intelligence-usage.sql -- this comment used to
+// carry the raw SQL inline (matching autopilot_executions_used/
+// autopilot_cycle_reset_at's own convention), but that copy was never
+// actually applied to the database (confirmed: PostgREST returns "Could
+// not find the function public.increment_intelligence_usage(...) in the
+// schema cache" on every call). Apply that migration file by hand via the
+// Supabase SQL editor -- see its header for the hardened version (adds an
+// auth.role()/auth.uid() guard matching spend_credits' own security
+// posture, which this inline comment predated).
 class IntelligenceLimitExceededError extends Error {
   constructor(limit) {
     super(`Intelligence monthly analysis limit reached (${limit})`);

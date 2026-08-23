@@ -9656,6 +9656,22 @@ ${adLines.length > 0 ? adLines.join('\n') : 'No ad-level data'}`;
   };
 }
 
+// Both /api/meta/analyze and /api/ads/analyze call
+// creditManager.checkAndIncrementIntelligenceUsage() before doing any real
+// work -- if its RPC call ever fails at the database level (missing
+// function, stale PostgREST schema cache, a broken migration, etc.) the
+// thrown error is a raw Postgres/PostgREST message, not one of this app's
+// own deliberately-written user-facing strings. Neither route should ever
+// let that reach the client verbatim (same principle campaignTools.js's
+// _looksRawProviderError already applies to platform API errors) --
+// everything else thrown in these two routes (Google/Meta connection
+// errors, credit/limit errors) is already a clean, intentional message and
+// passes through unchanged.
+function _looksLikeRawDbError(msg) {
+  if (!msg) return false;
+  return /schema cache|PGRST\d|violates|constraint|relation .* does not exist|function public\./i.test(msg);
+}
+
 app.post('/api/meta/analyze', async (req, res) => {
   let reservation;
   try {
@@ -9677,7 +9693,8 @@ app.post('/api/meta/analyze', async (req, res) => {
     if (err instanceof creditManager.InsufficientCreditsError) return res.status(402).json({ error: 'Out of credits', code: 'CREDITS_EXHAUSTED', balance: err.balance });
     if (err instanceof creditManager.IntelligenceLimitExceededError) return res.status(402).json({ error: 'Intelligence analysis limit reached for your plan this month', code: 'INTELLIGENCE_LIMIT_REACHED', limit: err.limit });
     console.error('[Meta/analyze]', err.message);
-    res.status(err.status || 500).json({ error: err.message || 'Internal server error', meta_code: err.metaCode || null });
+    const safeMsg = _looksLikeRawDbError(err.message) ? 'Analysis could not be completed right now. Please try again in a moment.' : (err.message || 'Internal server error');
+    res.status(err.status || 500).json({ error: safeMsg, meta_code: err.metaCode || null });
   }
 });
 
@@ -11235,7 +11252,8 @@ app.post('/api/ads/analyze', async (req, res) => {
     if (err instanceof creditManager.InsufficientCreditsError) return res.status(402).json({ error: 'Out of credits', code: 'CREDITS_EXHAUSTED', balance: err.balance });
     if (err instanceof creditManager.IntelligenceLimitExceededError) return res.status(402).json({ error: 'Intelligence analysis limit reached for your plan this month', code: 'INTELLIGENCE_LIMIT_REACHED', limit: err.limit });
     console.error('[Ads/analyze]', err.message);
-    res.status(err.status || 500).json({ error: err.message || 'Internal server error', gads_status: err.gadsStatus || null, gads_codes: err.gadsErrorCodes || null });
+    const safeMsg = _looksLikeRawDbError(err.message) ? 'Analysis could not be completed right now. Please try again in a moment.' : (err.message || 'Internal server error');
+    res.status(err.status || 500).json({ error: safeMsg, gads_status: err.gadsStatus || null, gads_codes: err.gadsErrorCodes || null });
   }
 });
 
