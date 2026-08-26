@@ -15,7 +15,10 @@
 // Key:    ALWAYS from process.env.AIML_API_KEY — never hardcoded or sent to frontend.
 // ════════════════════════════════════════════════════════════════
 
-const AIML_BASE          = 'https://api.aimlapi.com';
+// AIML_BASE_OVERRIDE lets tests/staging point this provider at a local
+// mock or sandbox endpoint without touching provider logic — unset in
+// every real environment, so production always uses the real API.
+const AIML_BASE          = process.env.AIML_BASE_OVERRIDE || 'https://api.aimlapi.com';
 const DEFAULT_VID_MODEL  = 'kling-video/v1/standard/text-to-video';
 const DEFAULT_TXT_MODEL  = 'gpt-4o';
 
@@ -100,7 +103,66 @@ function buildBrandContext(brandCore) {
   return lines.join('\n');
 }
 
+// ── Concurrency limiter ─────────────────────────────────────────
+// A single campaign generation can fan out many simultaneous
+// /api/generate-image calls (one per ad slot in the campaign structure --
+// up to 25 for a large ad set), each of which reaches this SAME shared
+// AIML account/key. Firing all of them at once needlessly multiplies the
+// odds of tripping AIML's own rate limit on ourselves, independent of
+// whatever headroom the account actually has. This caps how many AIML
+// HTTP calls are in flight at once, server-wide (across every request,
+// every user), queuing the rest in arrival order -- not a rate limiter
+// (no time window), just bounded concurrency, so ordinary sequential
+// traffic is never slowed down, only genuinely simultaneous bursts.
+// Tunable via AIML_MAX_CONCURRENT without a code change.
+const MAX_CONCURRENT_REQUESTS = parseInt(process.env.AIML_MAX_CONCURRENT, 10) || 5;
+let _activeRequests = 0;
+const _requestQueue = [];
+
+function _acquireSlot() {
+  if (_activeRequests < MAX_CONCURRENT_REQUESTS) {
+    _activeRequests++;
+    return Promise.resolve();
+  }
+  return new Promise((resolve) => _requestQueue.push(resolve));
+}
+function _releaseSlot() {
+  const next = _requestQueue.shift();
+  if (next) next(); // hand the slot straight to the next queued caller
+  else _activeRequests--;
+}
+
+// ── Retry/backoff ────────────────────────────────────────────────
+// Retries only genuinely transient failures -- 429 (rate limit) and 5xx
+// (provider-side outage/overload) -- never 4xx client errors (bad
+// request, auth failure), where retrying can't help and only delays the
+// real error reaching the caller. Honors the provider's own Retry-After
+// header when present (429 responses commonly include one); otherwise
+// falls back to exponential backoff with jitter so many concurrent
+// retries don't all re-hit the provider on the same tick.
+const RETRYABLE_STATUS = new Set([429, 500, 502, 503, 504]);
+const MAX_ATTEMPTS      = parseInt(process.env.AIML_MAX_RETRIES, 10) || 3;
+const BASE_DELAY_MS     = 1500;
+const MAX_DELAY_MS      = 8000;
+const MAX_RETRY_AFTER_MS = 15000; // never honor a provider Retry-After beyond this
+
+function _sleep(ms) { return new Promise((resolve) => setTimeout(resolve, ms)); }
+
+function _retryDelay(attempt, retryAfterHeader) {
+  if (retryAfterHeader) {
+    const sec = Number(retryAfterHeader);
+    if (!Number.isNaN(sec) && sec > 0) return Math.min(sec * 1000, MAX_RETRY_AFTER_MS);
+  }
+  const exp    = Math.min(BASE_DELAY_MS * Math.pow(2, attempt - 1), MAX_DELAY_MS);
+  const jitter = exp * 0.25 * Math.random();
+  return Math.round(exp + jitter);
+}
+
 // ── Internal HTTP helper ──────────────────────────────────────
+// err.status / err.retryable are set on every thrown error so callers
+// (server.js route handlers) can tell "the provider is genuinely
+// unavailable after retries" apart from every other kind of failure --
+// that distinction is what drives the refund + clear-user-message path.
 
 async function _request(method, path, body) {
   const key  = _key();
@@ -114,21 +176,60 @@ async function _request(method, path, body) {
   };
   if (body !== undefined) opts.body = JSON.stringify(body);
 
-  const response = await fetch(url, opts);
-
-  let data;
+  await _acquireSlot();
   try {
-    data = await response.json();
-  } catch (_) {
-    const text = await response.text().catch(() => '(empty)');
-    throw new Error(`AIML API non-JSON (HTTP ${response.status}): ${text.slice(0, 300)}`);
-  }
+    let lastErr;
+    for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+      let response;
+      try {
+        response = await fetch(url, opts);
+      } catch (netErr) {
+        lastErr = new Error(`AIML API network error: ${netErr.message}`);
+        lastErr.retryable = true;
+        if (attempt < MAX_ATTEMPTS) {
+          const delay = _retryDelay(attempt);
+          console.warn(`[AIML] network error on attempt ${attempt}/${MAX_ATTEMPTS} (${path}) — retrying in ${delay}ms:`, netErr.message);
+          await _sleep(delay);
+          continue;
+        }
+        throw lastErr;
+      }
 
-  if (!response.ok) {
-    throw new Error(_friendlyError(data, response.status));
-  }
+      let data;
+      try {
+        data = await response.json();
+      } catch (_) {
+        const text = await response.text().catch(() => '(empty)');
+        lastErr = new Error(`AIML API non-JSON (HTTP ${response.status}): ${text.slice(0, 300)}`);
+        lastErr.status = response.status;
+        lastErr.retryable = RETRYABLE_STATUS.has(response.status);
+        if (lastErr.retryable && attempt < MAX_ATTEMPTS) {
+          const delay = _retryDelay(attempt, response.headers.get('retry-after'));
+          console.warn(`[AIML] non-JSON HTTP ${response.status} on attempt ${attempt}/${MAX_ATTEMPTS} (${path}) — retrying in ${delay}ms`);
+          await _sleep(delay);
+          continue;
+        }
+        throw lastErr;
+      }
 
-  return data;
+      if (response.ok) return data;
+
+      lastErr = new Error(_friendlyError(data, response.status));
+      lastErr.status = response.status;
+      lastErr.retryable = RETRYABLE_STATUS.has(response.status);
+
+      if (lastErr.retryable && attempt < MAX_ATTEMPTS) {
+        const delay = _retryDelay(attempt, response.headers.get('retry-after'));
+        console.warn(`[AIML] HTTP ${response.status} on attempt ${attempt}/${MAX_ATTEMPTS} (${path}) — retrying in ${delay}ms`);
+        await _sleep(delay);
+        continue;
+      }
+      throw lastErr;
+    }
+    throw lastErr;
+  } finally {
+    _releaseSlot();
+  }
 }
 
 // ── Friendly error mapping ────────────────────────────────────

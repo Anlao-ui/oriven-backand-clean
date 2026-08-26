@@ -172,6 +172,28 @@ async function reserveCredits(user, featureKey, opts) {
   return { requestId, cost, charged: true, userId: user.id };
 }
 
+// Called when a charged operation ultimately fails after the provider
+// stays unavailable through _request()'s own retries (see aimlProvider.js)
+// -- gives the reserved credits back via the symmetric refund_credits RPC
+// (see docs/migrations/2026-08-refund-credits.sql) rather than silently
+// keeping them for work that never happened. A no-op (returns false,
+// throws nothing extra) for a reservation that was never actually
+// charged (charge:false background calls, or one that already failed to
+// reserve) -- callers should still wrap this in try/catch since the RPC
+// itself can throw (e.g. not yet migrated -- same defensive pattern as
+// every other RPC call in this file).
+async function refundCredits(reservation) {
+  if (!reservation || !reservation.charged || !reservation.userId) return false;
+  _assertInitialized();
+  const { data, error } = await supabaseAdmin.rpc('refund_credits', {
+    p_user_id: reservation.userId,
+    p_amount: reservation.cost,
+  });
+  if (error) throw error;
+  const row = Array.isArray(data) ? data[0] : data;
+  return !!(row && row.ok);
+}
+
 // Called AFTER the AI call (success or failure), via try/finally. Always
 // writes one row to credit_transactions regardless of charge outcome.
 async function finalizeCreditLog(reservation, featureKey, info) {
@@ -549,6 +571,7 @@ module.exports = {
   AutopilotLimitExceededError,
   IntelligenceLimitExceededError,
   reserveCredits,
+  refundCredits,
   finalizeCreditLog,
   getCreditStatus,
   checkAndIncrementAutopilotUsage,

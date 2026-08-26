@@ -1279,6 +1279,7 @@ app.post('/api/generate-image', requireSubIfAuthed, async (req, res) => {
     res.json({ imageUrl });
   } catch (err) {
     console.error('[Image] AIML error:', err.message);
+    if (_isProviderUnavailable(err)) return _handleProviderUnavailable(reservation, 'image_generation', err, req, res);
     if (reservation) creditManager.finalizeCreditLog(reservation, 'image_generation', { success: false, error: err.message, route: req.path }).catch(() => {});
     res.status(500).json({ error: 'Could not generate that image right now. Please try again.' });
   }
@@ -5186,6 +5187,59 @@ ${platformRules}
   return pkg;
 }
 
+// ── Provider-unavailable handling ──────────────────────────────────────
+// Shared by every AIML-backed, credit-charged route in the generation
+// flow (create-ad, generate-image). aimlProvider._request() already
+// retries a 429 (rate limit) or 5xx a few times with backoff before ever
+// throwing -- if it's STILL throwing here, the provider is genuinely
+// unavailable right now, not a bug in this app. That's a materially
+// different situation from every other failure this route can hit (a bad
+// AI response, a real code error), so it gets its own status code
+// (503, not 500), its own code ('PROVIDER_UNAVAILABLE', not
+// 'GENERATION_FAILED'), a plain user-facing explanation instead of the
+// generic "unable to generate" message, and — since credits were already
+// reserved before the provider call ran — a refund of whatever was
+// actually charged, so a temporary provider limit never quietly costs the
+// user credits for work that never happened.
+function _isProviderUnavailable(err) {
+  return !!(err && (err.status === 429 || (err.retryable && typeof err.status === 'number' && err.status >= 500)));
+}
+async function _handleProviderUnavailable(reservation, featureKey, err, req, res) {
+  let refunded = false;
+  if (reservation && reservation.charged) {
+    try {
+      refunded = await creditManager.refundCredits(reservation);
+    } catch (refundErr) {
+      // Most likely refund_credits isn't migrated yet (see
+      // docs/migrations/2026-08-refund-credits.sql) -- log loudly so it's
+      // visible, but never let a refund failure block the error response
+      // the user is waiting on.
+      console.error(`[${featureKey}] Credit refund failed:`, refundErr.message);
+    }
+  }
+  if (reservation) {
+    creditManager.finalizeCreditLog(reservation, featureKey, { success: false, error: err.message, route: req.path }).catch(() => {});
+    if (refunded) {
+      // A separate, additive audit row rather than mutating the original
+      // one — credit_transactions is append-only by design (see
+      // 2026-08-credit-economy.sql's own comment on that table).
+      creditManager.finalizeCreditLog(
+        { requestId: crypto.randomUUID(), cost: reservation.cost, charged: false, userId: reservation.userId },
+        featureKey + '_refund',
+        { success: true, route: req.path }
+      ).catch(() => {});
+    }
+  }
+  return res.status(503).json({
+    ok: false,
+    error: refunded
+      ? 'Our AI provider is temporarily at capacity. Your credits were not charged — please try again in a moment.'
+      : 'Our AI provider is temporarily at capacity right now. Please try again in a moment.',
+    code: 'PROVIDER_UNAVAILABLE',
+    refunded,
+  });
+}
+
 app.post('/api/ai/create-ad', requireSubOrOnboardingGen, async (req, res) => {
   console.log('[create-ad] ← route handler entered');
   console.log('[create-ad] req.body keys:', Object.keys(req.body || {}));
@@ -5255,6 +5309,7 @@ Reply ONLY with valid JSON array (no markdown, no extra text):
       // Full detail server-side only — the client never sees provider/billing internals.
       console.error('[create-ad concepts] provider error:', err.message);
       if (err.stack) console.error(err.stack);
+      if (_isProviderUnavailable(err)) return _handleProviderUnavailable(reservation, 'campaign_generation', err, req, res);
       if (reservation) creditManager.finalizeCreditLog(reservation, 'campaign_generation', { success: false, error: err.message, route: req.path }).catch(() => {});
       return res.status(500).json({ ok: false, error: "We're unable to generate your campaign right now. Please try again later.", code: 'GENERATION_FAILED' });
     }
@@ -5274,6 +5329,7 @@ Reply ONLY with valid JSON array (no markdown, no extra text):
     // Full detail server-side only — the client never sees provider/billing internals.
     console.error('[create-ad full] provider error:', err.message);
     if (err.stack) console.error(err.stack);
+    if (_isProviderUnavailable(err)) return _handleProviderUnavailable(reservation, 'campaign_generation', err, req, res);
     if (reservation) creditManager.finalizeCreditLog(reservation, 'campaign_generation', { success: false, error: err.message, route: req.path }).catch(() => {});
     return res.status(500).json({ ok: false, error: "We're unable to generate your campaign right now. Please try again later.", code: 'GENERATION_FAILED' });
   }
