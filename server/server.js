@@ -673,14 +673,20 @@ async function requireSubIfAuthed(req, res, next) {
 
 // â”€â”€ Shared SMTP transporter factory â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 // requireSubOrOnboardingGen -- used ONLY on /api/ai/create-ad, nowhere else.
-// Identical to requireSubIfAuthed, with exactly one addition: a user who
-// hasn't finished onboarding yet AND hasn't already used their one free
-// generation gets waved through for a single real generation instead of
-// a 403. The onboarding tour's own Publish step (client-side, unchanged)
-// is what actually shows the paywall next -- this middleware only stops
-// the tour from dying one step too early. Marks free_campaign_used=true
-// server-side on successful generation (see the route handler) so the
-// exception can never be reused -- not a standing bypass, one-shot only.
+// Identical to requireSubIfAuthed, with exactly one addition: a non-paid
+// user whose free_campaign_used_at is null or more than 24h old gets waved
+// through for one real, uncounted generation instead of a 403 -- this is
+// the Free plan's "experience the core workflow" mechanism (campaign
+// generation + image generation together cost far more than the Free
+// plan's 20-credit/day balance, so this daily bypass is what actually lets
+// a Free user generate a full ad once/day; the 20 credits/day cover
+// smaller metered actions between generations, see PLAN_ALLOWANCES.free in
+// creditManager.js). Originally a lifetime-once exception (bound to
+// onboarding_completed/free_campaign_used); now a rolling 24h window bound
+// to free_campaign_used_at so it also serves returning Free users, not just
+// first-time onboarding. Marks free_campaign_used_at=now() server-side on
+// successful generation (see _consumeOnboardingFreeGen) so it can't be
+// reused within the same 24h by refreshing/retrying.
 async function requireSubOrOnboardingGen(req, res, next) {
   const auth = req.headers.authorization || '';
   if (!auth) { console.log('[middleware] requireSubOrOnboardingGen - no auth, guest pass-through'); return next(); }
@@ -688,21 +694,21 @@ async function requireSubOrOnboardingGen(req, res, next) {
   if (!user) return next();
   try {
     const { data, error: dbErr } = await supabaseAdmin
-      .from('profiles').select('subscription_status, onboarding_completed, free_campaign_used').eq('id', user.id).maybeSingle();
+      .from('profiles').select('subscription_status, free_campaign_used_at').eq('id', user.id).maybeSingle();
     if (dbErr) console.warn('[middleware] requireSubOrOnboardingGen query error:', dbErr.message);
     const status = (data && data.subscription_status) || 'none';
     if (PAID_PLANS.includes(status)) { req.user = user; return next(); }
 
-    const onboardingDone = data ? data.onboarding_completed === true : false;
-    const freeGenUsed = data ? data.free_campaign_used === true : false;
-    if (!onboardingDone && !freeGenUsed) {
-      console.log('[middleware] Onboarding free-generation exception granted for', user.id);
+    const lastUsedAt = data ? data.free_campaign_used_at : null;
+    const dayElapsed = !lastUsedAt || (Date.now() - new Date(lastUsedAt).getTime()) >= 24 * 60 * 60 * 1000;
+    if (dayElapsed) {
+      console.log('[middleware] Free daily generation granted for', user.id, '| lastUsedAt:', lastUsedAt || '(never)');
       req.user = user;
       req._onboardingFreeGen = true;
       return next();
     }
 
-    console.log('[middleware] 403 - subscription required for', user.id, '| onboardingDone:', onboardingDone, '| freeGenUsed:', freeGenUsed);
+    console.log('[middleware] 403 - subscription required for', user.id, '| free_campaign_used_at:', lastUsedAt);
     return res.status(403).json({ error: 'Active subscription required', code: 'SUBSCRIPTION_REQUIRED' });
   } catch (err) {
     console.warn('[middleware] requireSubOrOnboardingGen threw - fail open:', err.message);
@@ -724,13 +730,53 @@ function _consumeOnboardingFreeGen(req) {
   // rows and "succeeds" while writing nothing, which would let the
   // exception be used more than once. Same fix already applied to the
   // preferences route for the same underlying timing issue.
-  supabaseAdmin.from('profiles').upsert({ id: req.user.id, free_campaign_used: true }, { onConflict: 'id' })
+  // free_campaign_used (boolean) keeps its original meaning -- "has this
+  // account ever generated anything" -- for any other reader (e.g. the
+  // client's _isFreeUser()/_freeCampaignUsed() helpers). free_campaign_used_at
+  // is the new field requireSubOrOnboardingGen's rolling-24h check actually
+  // reads; both are written from the same successful-generation moment.
+  supabaseAdmin.from('profiles').upsert({ id: req.user.id, free_campaign_used: true, free_campaign_used_at: new Date().toISOString() }, { onConflict: 'id' })
     .then((r) => {
       if (r && r.error) console.warn('[middleware] Could not persist free_campaign_used:', r.error.message);
-      else console.log('[middleware] free_campaign_used=true persisted for', req.user.id, '(onboarding exception consumed)');
+      else console.log('[middleware] free_campaign_used/free_campaign_used_at persisted for', req.user.id, '(daily onboarding-generation exception consumed)');
     })
     .catch((e) => console.warn('[middleware] _consumeOnboardingFreeGen threw:', e.message));
 }
+
+// requireAutopilotAccess -- applied to every /api/autopilot/* route.
+// Previously only POST /api/autopilot/rules had a plan check at all, and it
+// was a narrow `=== 'starter'` string comparison (now removed in favor of
+// this shared middleware) -- the other 13 Autopilot routes, including
+// POST /api/autopilot/workflows (which executes real AI generation steps),
+// had no server-side gate whatsoever. Reuses creditManager.PLAN_AUTOPILOT_LIMITS
+// (the same map _evaluateAutomationRules already enforces at execution
+// time) as the single source of truth for "does this plan include
+// Autopilot at all" -- a plan is eligible if its limit is greater than 0.
+// This is what makes Autopilot's rejection real at the API layer for Free
+// (and, as a direct, unavoidable consequence of using the existing
+// allowance map instead of a one-off '=== free' check, for Starter too,
+// closing a pre-existing gap rather than adding a new inconsistent one).
+async function requireAutopilotAccess(req, res, next) {
+  const auth = req.headers.authorization || '';
+  if (!auth) return res.status(401).json({ error: 'Authentication required', code: 'AUTH_REQUIRED' });
+  const user = await getUserFromToken(req);
+  if (!user) return res.status(401).json({ error: 'Invalid or expired session', code: 'AUTH_INVALID' });
+  try {
+    const { data } = await supabaseAdmin
+      .from('profiles').select('subscription_status').eq('id', user.id).maybeSingle();
+    const status = (data && data.subscription_status) || 'free';
+    const limit = creditManager.PLAN_AUTOPILOT_LIMITS[status] || 0;
+    if (!(limit > 0)) {
+      return res.status(403).json({ error: 'Autopilot requires a Creator or Professional plan.', code: 'AUTOPILOT_NOT_AVAILABLE' });
+    }
+    req.user = user;
+    next();
+  } catch (err) {
+    console.error('[Auth] Autopilot access check error:', err.message);
+    return res.status(500).json({ error: 'Could not verify Autopilot access' });
+  }
+}
+
 function _smtpTransporter() {
   return nodemailer.createTransport({
     host:   SMTP_HOST,
@@ -1883,6 +1929,56 @@ app.post('/api/create-checkout-session', async (req, res) => {
     console.error('           plan:   ', plan);
     console.error('           priceId:', priceId);
     res.status(500).json({ error: 'Could not create checkout session. Please try again.' });
+  }
+});
+
+// â”€â”€ POST /api/select-free-plan â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// The Free plan's equivalent of /api/create-checkout-session -- deliberately
+// never touches Stripe. Most callers are already on subscription_status
+// 'free' by default (every new signup starts there, auth.js:1222), so this
+// is usually an idempotent no-op that just confirms the plan and ensures a
+// fresh daily credit cycle exists before the client re-reads status. The
+// one real guard: refuse to flip an ACTIVE paid Stripe subscriber back to
+// 'free' from here -- that must go through real subscription cancellation
+// (Settings), not a client-side "Continue Free" click, so a stray/forged
+// call here can't silently stop their billing from the account's point of
+// view while Stripe keeps charging them.
+app.post('/api/select-free-plan', async (req, res) => {
+  const user = await getUserFromToken(req);
+  if (!user) return res.status(401).json({ error: 'Authentication required', code: 'AUTH_REQUIRED' });
+  try {
+    const { data: profile, error: profErr } = await supabaseAdmin
+      .from('profiles').select('subscription_status, stripe_subscription_id').eq('id', user.id).maybeSingle();
+    if (profErr) throw profErr;
+
+    const currentlyPaid = profile && PAID_PLANS.includes(profile.subscription_status) && !!profile.stripe_subscription_id;
+    if (currentlyPaid) {
+      return res.status(409).json({
+        error: 'You already have an active paid subscription. Manage or cancel it from Settings.',
+        code: 'ALREADY_PAID',
+      });
+    }
+
+    if (!profile || profile.subscription_status !== 'free') {
+      const { error: updErr } = await supabaseAdmin.from('profiles').update({ subscription_status: 'free' }).eq('id', user.id);
+      if (updErr) throw updErr;
+    }
+
+    try {
+      await supabaseAdmin.rpc('ensure_free_daily_cycle', {
+        p_user_id: user.id,
+        p_allowance: creditManager.PLAN_ALLOWANCES.free,
+        p_cycle_days: creditManager.FREE_PLAN_CYCLE_DAYS,
+      });
+    } catch (e) {
+      console.warn('[select-free-plan] ensure_free_daily_cycle failed:', e.message);
+    }
+
+    const credits = await creditManager.getCreditStatus(user.id);
+    res.json({ ok: true, plan: 'free', credits });
+  } catch (err) {
+    console.error('[select-free-plan] error:', err.message);
+    res.status(500).json({ error: 'Could not switch to the Free plan. Please try again.' });
   }
 });
 
@@ -4082,7 +4178,7 @@ async function _nudgeRelatedLearning(userId, rec, delta) {
 
 const AUTOPILOT_GENERATIVE_TOOLS = ['generate_headlines', 'generate_ctas', 'generate_email', 'generate_landing_page', 'refresh_campaign_creative'];
 
-app.get('/api/autopilot/recommendations', async (req, res) => {
+app.get('/api/autopilot/recommendations', requireAutopilotAccess, async (req, res) => {
   try {
     const user = await getUserFromToken(req);
     if (!user) return res.status(401).json({ error: 'Authentication required' });
@@ -4101,7 +4197,7 @@ app.get('/api/autopilot/recommendations', async (req, res) => {
   }
 });
 
-app.patch('/api/autopilot/recommendations/:id', async (req, res) => {
+app.patch('/api/autopilot/recommendations/:id', requireAutopilotAccess, async (req, res) => {
   try {
     const user = await getUserFromToken(req);
     if (!user) return res.status(401).json({ error: 'Authentication required' });
@@ -4117,7 +4213,7 @@ app.patch('/api/autopilot/recommendations/:id', async (req, res) => {
   }
 });
 
-app.post('/api/autopilot/recommendations/:id/approve', async (req, res) => {
+app.post('/api/autopilot/recommendations/:id/approve', requireAutopilotAccess, async (req, res) => {
   try {
     const user = await getUserFromToken(req);
     if (!user) return res.status(401).json({ error: 'Authentication required' });
@@ -4165,7 +4261,7 @@ app.post('/api/autopilot/recommendations/:id/approve', async (req, res) => {
   }
 });
 
-app.post('/api/autopilot/recommendations/:id/reject', async (req, res) => {
+app.post('/api/autopilot/recommendations/:id/reject', requireAutopilotAccess, async (req, res) => {
   try {
     const user = await getUserFromToken(req);
     if (!user) return res.status(401).json({ error: 'Authentication required' });
@@ -4182,7 +4278,7 @@ app.post('/api/autopilot/recommendations/:id/reject', async (req, res) => {
 });
 
 // Epic 6 â€” Automation Rules CRUD.
-app.get('/api/autopilot/rules', async (req, res) => {
+app.get('/api/autopilot/rules', requireAutopilotAccess, async (req, res) => {
   try {
     const user = await getUserFromToken(req);
     if (!user) return res.status(401).json({ error: 'Authentication required' });
@@ -4246,21 +4342,9 @@ function _validateAutopilotRuleFields(b, full) {
   return null;
 }
 
-app.post('/api/autopilot/rules', async (req, res) => {
+app.post('/api/autopilot/rules', requireAutopilotAccess, async (req, res) => {
   try {
-    const user = await getUserFromToken(req);
-    if (!user) return res.status(401).json({ error: 'Authentication required' });
-
-    // Starter has no Autopilot at all (creditManager.PLAN_AUTOPILOT_LIMITS.starter
-    // === 0) -- a rule created here would just sit dormant, always blocked at
-    // execution time (_evaluateAutomationRules), which already fully prevents
-    // a Starter user from ever actually *running* Autopilot. This check adds
-    // a clear rejection at creation time too, so Starter users aren't left
-    // wondering why a rule they created never fires.
-    const { data: creatorProfile } = await supabaseAdmin.from('profiles').select('subscription_status').eq('id', user.id).maybeSingle();
-    if ((creatorProfile && creatorProfile.subscription_status) === 'starter') {
-      return res.status(403).json({ error: 'Autopilot requires Creator or higher.', code: 'AUTOPILOT_NOT_AVAILABLE' });
-    }
+    const user = req.user;
 
     const { name, trigger_metric, trigger_operator, trigger_value, platform, action_type, action_params } = req.body || {};
     const validationErr = _validateAutopilotRuleFields(req.body || {}, true);
@@ -4278,7 +4362,7 @@ app.post('/api/autopilot/rules', async (req, res) => {
   }
 });
 
-app.patch('/api/autopilot/rules/:id', async (req, res) => {
+app.patch('/api/autopilot/rules/:id', requireAutopilotAccess, async (req, res) => {
   try {
     const user = await getUserFromToken(req);
     if (!user) return res.status(401).json({ error: 'Authentication required' });
@@ -4299,7 +4383,7 @@ app.patch('/api/autopilot/rules/:id', async (req, res) => {
   }
 });
 
-app.delete('/api/autopilot/rules/:id', async (req, res) => {
+app.delete('/api/autopilot/rules/:id', requireAutopilotAccess, async (req, res) => {
   try {
     const user = await getUserFromToken(req);
     if (!user) return res.status(401).json({ error: 'Authentication required' });
@@ -4316,7 +4400,7 @@ app.delete('/api/autopilot/rules/:id', async (req, res) => {
 // against real, freshly-fetched campaign data right now, and reports
 // whether it would trigger and against which campaign(s). Read-only: never
 // executes the action, never updates last_triggered_at.
-app.post('/api/autopilot/rules/:id/test', async (req, res) => {
+app.post('/api/autopilot/rules/:id/test', requireAutopilotAccess, async (req, res) => {
   try {
     const user = await getUserFromToken(req);
     if (!user) return res.status(401).json({ error: 'Authentication required' });
@@ -4361,7 +4445,7 @@ app.post('/api/autopilot/rules/:id/test', async (req, res) => {
 // Epic 8 â€” Smart Task Manager. Tasks are generated during the monitoring
 // pass (see _generateAutopilotTasks, called from _runIntelligenceMonitoring
 // below) from sources that already exist â€” this is read/update only.
-app.get('/api/autopilot/tasks', async (req, res) => {
+app.get('/api/autopilot/tasks', requireAutopilotAccess, async (req, res) => {
   try {
     const user = await getUserFromToken(req);
     if (!user) return res.status(401).json({ error: 'Authentication required' });
@@ -4378,7 +4462,7 @@ app.get('/api/autopilot/tasks', async (req, res) => {
   }
 });
 
-app.patch('/api/autopilot/tasks/:id', async (req, res) => {
+app.patch('/api/autopilot/tasks/:id', requireAutopilotAccess, async (req, res) => {
   try {
     const user = await getUserFromToken(req);
     if (!user) return res.status(401).json({ error: 'Authentication required' });
@@ -4395,7 +4479,7 @@ app.patch('/api/autopilot/tasks/:id', async (req, res) => {
 });
 
 // Epic 12 â€” Autopilot History. Same fan-out pattern as /api/creative/search.
-app.get('/api/autopilot/history', async (req, res) => {
+app.get('/api/autopilot/history', requireAutopilotAccess, async (req, res) => {
   try {
     const user = await getUserFromToken(req);
     if (!user) return res.status(401).json({ error: 'Authentication required' });
@@ -4429,7 +4513,7 @@ app.get('/api/autopilot/history', async (req, res) => {
 // Epic 14 â€” Predictive Autopilot. Reuses _computeForecast/_linearTrend
 // (V6 Final) â€” same deterministic mechanism /api/intelligence/forecast
 // already uses, just composed per-platform for the Autopilot Center.
-app.get('/api/autopilot/predictions', requireSubIfAuthed, async (req, res) => {
+app.get('/api/autopilot/predictions', requireAutopilotAccess, async (req, res) => {
   try {
     if (!req.user) return res.status(401).json({ error: 'Authentication required' });
     const days = Math.min(90, Math.max(7, parseInt(req.query.days, 10) || 30));
@@ -4546,7 +4630,7 @@ async function _advanceWorkflow(workflow, authHeader) {
   return workflow;
 }
 
-app.post('/api/autopilot/workflows', async (req, res) => {
+app.post('/api/autopilot/workflows', requireAutopilotAccess, async (req, res) => {
   try {
     const user = await getUserFromToken(req);
     if (!user) return res.status(401).json({ error: 'Authentication required' });
@@ -4566,7 +4650,7 @@ app.post('/api/autopilot/workflows', async (req, res) => {
   }
 });
 
-app.get('/api/autopilot/workflows', async (req, res) => {
+app.get('/api/autopilot/workflows', requireAutopilotAccess, async (req, res) => {
   try {
     const user = await getUserFromToken(req);
     if (!user) return res.status(401).json({ error: 'Authentication required' });
@@ -4579,7 +4663,7 @@ app.get('/api/autopilot/workflows', async (req, res) => {
   }
 });
 
-app.post('/api/autopilot/workflows/:id/advance', async (req, res) => {
+app.post('/api/autopilot/workflows/:id/advance', requireAutopilotAccess, async (req, res) => {
   try {
     const user = await getUserFromToken(req);
     if (!user) return res.status(401).json({ error: 'Authentication required' });

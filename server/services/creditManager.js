@@ -88,7 +88,17 @@ const FEATURE_COSTS = {
 };
 
 // ── Plan allowances / seats — the other half of the pricing brief's config.
-const PLAN_ALLOWANCES = { starter: 1000, creator: 2500, professional: 4000 };
+// free: 20 credits, resetting every 24h (not a monthly cycle like the paid
+// plans) — see ensure_free_daily_cycle in docs/migrations/2026-08-free-plan.sql
+// and FREE_PLAN_CYCLE_DAYS below. The one-time onboarding-generation bypass
+// (requireSubOrOnboardingGen, server.js) is what actually lets a Free user
+// complete a full campaign generation once/day — campaign_generation (25cr)
+// and image_generation (75cr) both individually exceed this 20-credit
+// allowance, so it is deliberately NOT meant to cover a full generation on
+// its own; it covers smaller metered actions (chat, copy rewrites, audience/
+// competitor analysis) between generations.
+const PLAN_ALLOWANCES = { free: 20, starter: 1000, creator: 2500, professional: 4000 };
+const FREE_PLAN_CYCLE_DAYS = 1;
 const PLAN_TEAM_SEATS  = { starter: 1,   creator: 1,    professional: 10   };
 
 // ── Intelligence monthly analysis allowance — separate cap layered on top
@@ -99,7 +109,11 @@ const PLAN_TEAM_SEATS  = { starter: 1,   creator: 1,    professional: 10   };
 // /api/intelligence/* dashboard routes (home/briefing/opportunities/etc.)
 // are a different, already-unmetered concept (Live Feed/summary views) and
 // are not affected by this cap.
-const PLAN_INTELLIGENCE_LIMITS = { starter: 40, creator: 100, professional: Infinity };
+// free: 1 analysis/day — the cap resets on the same daily cycle boundary as
+// AI Credits (credits_cycle_end), kept fresh by ensure_free_daily_cycle
+// inside checkAndIncrementIntelligenceUsage below. Reuses the exact same
+// increment_intelligence_usage RPC as the paid plans — no second counter.
+const PLAN_INTELLIGENCE_LIMITS = { free: 1, starter: 40, creator: 100, professional: Infinity };
 
 // ── Autopilot monthly execution allowance — separate from, and in addition
 // to, AI Credits. Autopilot executions now DO consume AI Credits
@@ -117,7 +131,11 @@ const PLAN_INTELLIGENCE_LIMITS = { starter: 40, creator: 100, professional: Infi
 // Professional: Infinity -- no separate monthly execution-count cap, per
 // the plan's "Unlimited" positioning, but Professional's shared credit
 // balance still gates real spend (FEATURE_COSTS.autopilot still applies).
-const PLAN_AUTOPILOT_LIMITS = { starter: 0, creator: 10, professional: Infinity };
+// free: 0 -- Autopilot is not included at all, same as Starter. Written
+// explicitly (rather than relying on the `|| 0` fallback in
+// checkAndIncrementAutopilotUsage/requireAutopilotAccess) so it's documented
+// alongside every other plan's real number, not implied by an absence.
+const PLAN_AUTOPILOT_LIMITS = { free: 0, starter: 0, creator: 10, professional: Infinity };
 
 class InsufficientCreditsError extends Error {
   constructor(cost, balance) {
@@ -160,9 +178,16 @@ async function reserveCredits(user, featureKey, opts) {
     throw new Error('[creditManager] reserveCredits requires an authenticated user when charge=true');
   }
 
+  // p_free_allowance/p_free_cycle_days are only ever acted on by the RPC
+  // when this user's own subscription_status is 'free' (see
+  // ensure_free_daily_cycle) -- passed on every call, harmless no-op for
+  // paid plans, so PLAN_ALLOWANCES.free stays the single source of truth
+  // instead of duplicating "20" as a SQL-side default nobody updates.
   const { data, error } = await supabaseAdmin.rpc('spend_credits', {
     p_user_id: user.id,
     p_amount: cost,
+    p_free_allowance: PLAN_ALLOWANCES.free,
+    p_free_cycle_days: FREE_PLAN_CYCLE_DAYS,
   });
   if (error) throw error;
   const row = Array.isArray(data) ? data[0] : data;
@@ -311,6 +336,35 @@ async function getCreditStatus(userId) {
   let balance = data ? data.credits_balance : 0;
   let resetDate = data ? data.credits_cycle_end : null;
 
+  // Free plan: reset atomically in Postgres (ensure_free_daily_cycle, see
+  // docs/migrations/2026-08-free-plan.sql), not the paid-plan self-heal
+  // block below -- that block calls provisionCreditsForCycle, a non-atomic
+  // Node read-then-write with a 30-day placeholder cycle, wrong on both
+  // counts for a plan that resets daily and must stay concurrency-safe.
+  // Calling this here (not just inside spend_credits) means a returning
+  // Free user sees their fresh 20 credits the moment the dashboard loads,
+  // not only after their next spend. Falls through to the same
+  // lifetimeUsed/savedAssets computation every other plan gets below --
+  // Free users get the same real status payload, just a different balance
+  // source.
+  if (plan === 'free') {
+    try {
+      const { data: freshRows, error: freshErr } = await supabaseAdmin.rpc('ensure_free_daily_cycle', {
+        p_user_id: userId,
+        p_allowance: PLAN_ALLOWANCES.free,
+        p_cycle_days: FREE_PLAN_CYCLE_DAYS,
+      });
+      if (freshErr) throw freshErr;
+      const freshRow = Array.isArray(freshRows) ? freshRows[0] : freshRows;
+      if (freshRow) {
+        balance = freshRow.balance;
+        resetDate = freshRow.cycle_end;
+      }
+    } catch (err) {
+      console.warn('[creditManager] ensure_free_daily_cycle failed for', userId, ':', err.message);
+    }
+  }
+
   // Self-heal: reprovision when either (a) there's no cycle_end at all
   // (subscription_status was written by a path that never provisioned a
   // cycle), or (b) credits_provisioned_plan doesn't match the CURRENT
@@ -322,10 +376,12 @@ async function getCreditStatus(userId) {
   // limiting: once provisioned, credits_provisioned_plan matches
   // subscription_status and cycle_end is non-null, so neither condition
   // fires again until a real plan/cycle change happens -- this does NOT
-  // reset credits on every Settings open or page load.
+  // reset credits on every Settings open or page load. Scoped to
+  // plan !== 'free' -- Free's own reset lives entirely in
+  // ensure_free_daily_cycle above, not this Node-side repair path.
   const neverProvisioned = data && !data.credits_cycle_end;
   const provisionedForWrongPlan = data && data.credits_cycle_end && data.credits_provisioned_plan && data.credits_provisioned_plan !== plan;
-  if ((neverProvisioned || provisionedForWrongPlan) && allowance > 0) {
+  if (plan !== 'free' && (neverProvisioned || provisionedForWrongPlan) && allowance > 0) {
     try {
       const cyc = _placeholderCycle();
       const result = await provisionCreditsForCycle(userId, plan, cyc.startISO, cyc.endISO, 'repair', { previousPlan: data.credits_provisioned_plan });
@@ -540,19 +596,43 @@ class IntelligenceLimitExceededError extends Error {
 
 async function checkAndIncrementIntelligenceUsage(userId, plan, cycleEndISO) {
   _assertInitialized();
-  // Only the three real paid plans have a defined cap here -- 'free' (or
-  // any other value) is not this function's concern and is left to the
-  // existing credit-balance check (reserveCredits) to gate exactly as it
-  // already did before this cap existed, unchanged behavior for free users.
+  // Any plan without a defined cap here is not this function's concern and
+  // is left to the existing credit-balance check (reserveCredits) to gate
+  // exactly as it already did before this cap existed.
   if (!(plan in PLAN_INTELLIGENCE_LIMITS)) return { ok: true, used: null, limit: null };
   const limit = PLAN_INTELLIGENCE_LIMITS[plan];
   if (limit === Infinity) return { ok: true, used: null, limit: null }; // Professional -- unlimited
   if (!limit || limit <= 0) throw new IntelligenceLimitExceededError(0);
 
+  // Free's cap resets on the same daily cycle boundary as AI Credits. The
+  // caller (server.js) fetches credits_cycle_end BEFORE this function runs,
+  // so on the first request of a new day that value can still be
+  // yesterday's already-expired cycle_end -- passing it straight to
+  // increment_intelligence_usage would reset the counter against the wrong
+  // boundary. Ensuring the cycle here first (same atomic RPC spend_credits
+  // already relies on) guarantees a correct, fresh cycle_end for free users
+  // specifically; paid plans are untouched (ensure_free_daily_cycle no-ops
+  // for any non-'free' profile).
+  let effectiveCycleEnd = cycleEndISO;
+  if (plan === 'free') {
+    try {
+      const { data: freshRows, error: freshErr } = await supabaseAdmin.rpc('ensure_free_daily_cycle', {
+        p_user_id: userId,
+        p_allowance: PLAN_ALLOWANCES.free,
+        p_cycle_days: FREE_PLAN_CYCLE_DAYS,
+      });
+      if (freshErr) throw freshErr;
+      const freshRow = Array.isArray(freshRows) ? freshRows[0] : freshRows;
+      if (freshRow) effectiveCycleEnd = freshRow.cycle_end;
+    } catch (err) {
+      console.warn('[creditManager] ensure_free_daily_cycle (intelligence) failed for', userId, ':', err.message);
+    }
+  }
+
   const { data, error } = await supabaseAdmin.rpc('increment_intelligence_usage', {
     p_user_id: userId,
     p_limit: limit,
-    p_cycle_end: cycleEndISO || new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString(),
+    p_cycle_end: effectiveCycleEnd || new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString(),
   });
   if (error) throw error;
   const row = Array.isArray(data) ? data[0] : data;
@@ -564,6 +644,7 @@ module.exports = {
   init,
   FEATURE_COSTS,
   PLAN_ALLOWANCES,
+  FREE_PLAN_CYCLE_DAYS,
   PLAN_TEAM_SEATS,
   PLAN_AUTOPILOT_LIMITS,
   PLAN_INTELLIGENCE_LIMITS,
