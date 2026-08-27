@@ -2299,9 +2299,17 @@ app.post('/api/increment-usage', requireSubscription, async (req, res) => {
 // -- GET /api/credits/status ------------------------------------
 // Real, backend-authoritative credit balance -- the single source of truth
 // consumed by usage.js (sidebar badge) and settings.js (Subscription panel).
-app.get('/api/credits/status', requireSubscription, async (req, res) => {
+// requireSubscription (paid-only) was the wrong gate here -- it made this
+// route 403 for every Free user, meaning a Free account could never see
+// its own credit balance anywhere in the app (Settings > Subscription's
+// Usage section, or anywhere else reading this endpoint). getCreditStatus()
+// itself already handles every plan correctly, including 'free' -- this
+// route only ever needed real authentication, not an active paid plan.
+app.get('/api/credits/status', async (req, res) => {
+  const user = await getUserFromToken(req);
+  if (!user) return res.status(401).json({ error: 'Authentication required', code: 'AUTH_REQUIRED' });
   try {
-    const status = await creditManager.getCreditStatus(req.user.id);
+    const status = await creditManager.getCreditStatus(user.id);
     res.json(status);
   } catch (err) {
     console.error('[CreditsStatus] Error:', err.message);
@@ -9821,8 +9829,17 @@ app.post('/api/meta/analyze', async (req, res) => {
     // ai_analysis credit charge below, server-authoritative (checked here,
     // before any AI call, not just displayed in the frontend).
     const { data: _intelProfile } = await supabaseAdmin.from('profiles').select('subscription_status, credits_cycle_end').eq('id', user.id).maybeSingle();
-    await creditManager.checkAndIncrementIntelligenceUsage(user.id, (_intelProfile && _intelProfile.subscription_status) || 'free', _intelProfile && _intelProfile.credits_cycle_end);
-    reservation = await creditManager.reserveCredits(user, 'ai_analysis');
+    const _intelPlan = (_intelProfile && _intelProfile.subscription_status) || 'free';
+    await creditManager.checkAndIncrementIntelligenceUsage(user.id, _intelPlan, _intelProfile && _intelProfile.credits_cycle_end);
+    // Free's Intelligence use is already gated by the 1/day check above --
+    // it cannot ALSO be charged the normal 25-credit ai_analysis cost,
+    // which alone exceeds Free's entire 20-credit/day balance (same reason
+    // campaign generation gets its own uncounted daily bypass rather than
+    // being charged from the pool). Without this, a Free user would pass
+    // the 1/day check and then unconditionally fail on insufficient
+    // credits -- "1 Intelligence use/day" would be advertised but never
+    // actually usable.
+    reservation = await creditManager.reserveCredits(user, 'ai_analysis', { charge: _intelPlan !== 'free' });
     // Explicit "Analyze with AI" click -- always bypasses the shared cache.
     const dr = resolveDateRange(req.body && req.body.date_range, req.body && req.body.date_since, req.body && req.body.date_until);
     const result = await getOrRefreshAnalysis(user, 'meta', dr.key, { forceRefresh: true });
@@ -11380,8 +11397,13 @@ app.post('/api/ads/analyze', async (req, res) => {
     // for the identical pattern; server-authoritative, checked before any
     // AI call runs, not merely displayed in the frontend.
     const { data: _intelProfile } = await supabaseAdmin.from('profiles').select('subscription_status, credits_cycle_end').eq('id', user.id).maybeSingle();
-    await creditManager.checkAndIncrementIntelligenceUsage(user.id, (_intelProfile && _intelProfile.subscription_status) || 'free', _intelProfile && _intelProfile.credits_cycle_end);
-    reservation = await creditManager.reserveCredits(user, 'ai_analysis');
+    const _intelPlan = (_intelProfile && _intelProfile.subscription_status) || 'free';
+    await creditManager.checkAndIncrementIntelligenceUsage(user.id, _intelPlan, _intelProfile && _intelProfile.credits_cycle_end);
+    // Free's Intelligence use is already gated by the 1/day check above --
+    // see the matching comment in /api/meta/analyze for why it must not
+    // also be charged the 25-credit ai_analysis cost (more than Free's
+    // entire daily balance).
+    reservation = await creditManager.reserveCredits(user, 'ai_analysis', { charge: _intelPlan !== 'free' });
     // Explicit "Analyze with AI" click -- always bypasses the shared cache.
     const dr = resolveDateRange(req.body && req.body.date_range, req.body && req.body.date_since, req.body && req.body.date_until);
     const result = await getOrRefreshAnalysis(user, 'google', dr.key, { forceRefresh: true });

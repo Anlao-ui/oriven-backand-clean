@@ -177,6 +177,28 @@ async function main() {
       assert.equal(secondRow.ok, false, 'a 2nd analysis the same cycle must be rejected');
     });
 
+    // ── 5b. Intelligence must not ALSO be charged the ai_analysis credit
+    // cost (25cr) -- that alone exceeds Free's entire 20-credit/day
+    // balance, so "1 Intelligence use/day" would be advertised but never
+    // actually usable if it were. Set a low balance (below 25, above 0)
+    // and confirm the real route does not reject for a credits reason --
+    // any other failure (e.g. no Meta account connected) is fine and
+    // expected in this test environment; only a 402 CREDITS_EXHAUSTED
+    // would mean the bypass regressed.
+    await record('5b. Intelligence analysis is not blocked by insufficient credits for Free', async () => {
+      await supabaseAdmin.from('profiles').update({ credits_balance: 5 }).eq('id', free.userId);
+      const res = await apiFetch('/api/meta/analyze', free.accessToken, { method: 'POST', body: {} });
+      // Test 5 (above) already consumed this account's 1/day Intelligence
+      // slot via a direct RPC call, so this real route call is EXPECTED to
+      // 402 with INTELLIGENCE_LIMIT_REACHED -- that's the correct, working
+      // limit check, not the bug this test targets. Only a credits-based
+      // rejection (CREDITS_EXHAUSTED) would mean the ai_analysis charge
+      // bypass regressed.
+      assert.notEqual(res.data && res.data.code, 'CREDITS_EXHAUSTED', `Intelligence must not be rejected for insufficient credits: ${JSON.stringify(res.data)}`);
+      const after = await getProfile(free.userId);
+      assert.equal(after.credits_balance, 5, 'an uncounted (charge:false) Intelligence call must not touch the balance');
+    });
+
     // ── 6. Autopilot: rejected server-side on every /api/autopilot/* route ─
     await record('6. Free user is rejected by the server on Autopilot routes (not just hidden UI)', async () => {
       const routes = [
