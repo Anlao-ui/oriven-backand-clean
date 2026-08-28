@@ -88,16 +88,20 @@ const FEATURE_COSTS = {
 };
 
 // ── Plan allowances / seats — the other half of the pricing brief's config.
-// free: 20 credits, resetting every 24h (not a monthly cycle like the paid
+// free: 10 credits, resetting every 24h (not a monthly cycle like the paid
 // plans) — see ensure_free_daily_cycle in docs/migrations/2026-08-free-plan.sql
-// and FREE_PLAN_CYCLE_DAYS below. The one-time onboarding-generation bypass
-// (requireSubOrOnboardingGen, server.js) is what actually lets a Free user
-// complete a full campaign generation once/day — campaign_generation (25cr)
-// and image_generation (75cr) both individually exceed this 20-credit
-// allowance, so it is deliberately NOT meant to cover a full generation on
-// its own; it covers smaller metered actions (chat, copy rewrites, audience/
-// competitor analysis) between generations.
-const PLAN_ALLOWANCES = { free: 20, starter: 1000, creator: 2500, professional: 4000 };
+// and FREE_PLAN_CYCLE_DAYS below. Free is an in-app exploration/trial state
+// (not a public pricing tier, see plans.js) meant to let a new user explore
+// the product and accumulate enough credits for an occasional full
+// generation, not to sustain daily full-campaign generation — campaign_
+// generation (25cr) and image_generation (75cr) both individually exceed
+// this 10-credit allowance, so it is deliberately NOT meant to cover a full
+// generation on its own; it covers smaller metered actions (chat, copy
+// rewrites, audience/competitor analysis) between generations, which build
+// up toward one over a few days. The one-time onboarding-generation bypass
+// (requireSubOrOnboardingGen, server.js) still separately covers the very
+// first campaign, right after onboarding.
+const PLAN_ALLOWANCES = { free: 10, starter: 1000, creator: 2500, professional: 4000 };
 const FREE_PLAN_CYCLE_DAYS = 1;
 const PLAN_TEAM_SEATS  = { starter: 1,   creator: 1,    professional: 10   };
 
@@ -109,10 +113,17 @@ const PLAN_TEAM_SEATS  = { starter: 1,   creator: 1,    professional: 10   };
 // /api/intelligence/* dashboard routes (home/briefing/opportunities/etc.)
 // are a different, already-unmetered concept (Live Feed/summary views) and
 // are not affected by this cap.
-// free: 1 analysis/day — the cap resets on the same daily cycle boundary as
-// AI Credits (credits_cycle_end), kept fresh by ensure_free_daily_cycle
-// inside checkAndIncrementIntelligenceUsage below. Reuses the exact same
-// increment_intelligence_usage RPC as the paid plans — no second counter.
+// free: 1 analysis/MONTH — deliberately its own, independent cycle, not
+// tied to the daily AI-credit cycle (a daily Intelligence allowance would
+// be far more generous than Free's exploration positioning intends). The
+// profiles table already tracks Intelligence's reset boundary in its own
+// column (intelligence_cycle_reset_at, entirely separate from credits_
+// cycle_end), so no schema change was needed to make this monthly while
+// credits stay daily — see checkAndIncrementIntelligenceUsage below, which
+// hands the RPC a rolling ~30-day boundary for the 'free' plan specifically
+// instead of reusing ensure_free_daily_cycle's daily cycle_end. Reuses the
+// exact same increment_intelligence_usage RPC as the paid plans — no
+// second counter.
 const PLAN_INTELLIGENCE_LIMITS = { free: 1, starter: 40, creator: 100, professional: Infinity };
 
 // ── Autopilot monthly execution allowance — separate from, and in addition
@@ -604,29 +615,19 @@ async function checkAndIncrementIntelligenceUsage(userId, plan, cycleEndISO) {
   if (limit === Infinity) return { ok: true, used: null, limit: null }; // Professional -- unlimited
   if (!limit || limit <= 0) throw new IntelligenceLimitExceededError(0);
 
-  // Free's cap resets on the same daily cycle boundary as AI Credits. The
-  // caller (server.js) fetches credits_cycle_end BEFORE this function runs,
-  // so on the first request of a new day that value can still be
-  // yesterday's already-expired cycle_end -- passing it straight to
-  // increment_intelligence_usage would reset the counter against the wrong
-  // boundary. Ensuring the cycle here first (same atomic RPC spend_credits
-  // already relies on) guarantees a correct, fresh cycle_end for free users
-  // specifically; paid plans are untouched (ensure_free_daily_cycle no-ops
-  // for any non-'free' profile).
+  // Free's Intelligence cap is monthly -- deliberately independent of the
+  // daily AI-credit cycle, so it must NOT reuse ensure_free_daily_cycle's
+  // daily cycle_end here. increment_intelligence_usage only actually
+  // consumes p_cycle_end when profiles.intelligence_cycle_reset_at is null
+  // or already expired (i.e. exactly when it's about to reset the counter);
+  // an unexpired cycle just increments and ignores this value. So a fresh
+  // ~30-day boundary computed on every call is enough to give the RPC the
+  // right "next reset" date whenever a reset actually happens, without any
+  // extra read -- paid plans are untouched, they keep using the
+  // billing-cycle cycleEndISO the caller already passed in.
   let effectiveCycleEnd = cycleEndISO;
   if (plan === 'free') {
-    try {
-      const { data: freshRows, error: freshErr } = await supabaseAdmin.rpc('ensure_free_daily_cycle', {
-        p_user_id: userId,
-        p_allowance: PLAN_ALLOWANCES.free,
-        p_cycle_days: FREE_PLAN_CYCLE_DAYS,
-      });
-      if (freshErr) throw freshErr;
-      const freshRow = Array.isArray(freshRows) ? freshRows[0] : freshRows;
-      if (freshRow) effectiveCycleEnd = freshRow.cycle_end;
-    } catch (err) {
-      console.warn('[creditManager] ensure_free_daily_cycle (intelligence) failed for', userId, ':', err.message);
-    }
+    effectiveCycleEnd = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString();
   }
 
   const { data, error } = await supabaseAdmin.rpc('increment_intelligence_usage', {

@@ -4,7 +4,8 @@
   "description": "",
   "main": "server.js",
   "scripts": {
-    "test": "node tests/free-plan.test.js",
+    "test": "node tests/free-plan.test.js && node tests/brand-identity.test.js",
+    "test:brand-identity": "node tests/brand-identity.test.js",
     "start": "node server.js"
   },
   "keywords": [],

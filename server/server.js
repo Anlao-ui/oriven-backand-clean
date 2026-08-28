@@ -453,8 +453,8 @@ app.use(express.urlencoded({ limit: '20mb', extended: true }));
 // helper. Every existing generator route stays exactly as it was, plus
 // these small additions.
 // â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
-async function _creativeContext(userId) {
-  return userId ? _gatherBusinessContext(userId).catch(() => null) : null;
+async function _creativeContext(userId, opts) {
+  return userId ? _gatherBusinessContext(userId, opts).catch(() => null) : null;
 }
 
 const CREATIVE_KINDS = {
@@ -634,6 +634,56 @@ async function requireSubscription(req, res, next) {
     next();
   } catch (err) {
     console.error('[Auth] Subscription check error:', err.message);
+    return res.status(500).json({ error: 'Could not verify subscription' });
+  }
+}
+
+// requireSubOrFree / requireSubOrFreeStrict -- same two tiers as above, but
+// also let a real 'free' plan through (not just paid). Free is a legitimate,
+// server-enforced plan with its own credit/Intelligence/Autopilot limits
+// (creditManager.js) -- it must be able to reach the routes it's actually
+// entitled to use (creative generation funded by its own credit balance,
+// and publishing a generated ad), which requireSubscription/requireSubIfAuthed
+// deliberately do NOT allow (those two stay strictly paid-only for routes
+// that should remain paid-only, e.g. account/plan-management). Kept as
+// separate functions rather than editing the two above so every other
+// route's behavior is completely unaffected.
+async function requireSubOrFree(req, res, next) {
+  const auth = req.headers.authorization || '';
+  if (!auth) return next(); // guest pass-through, same as requireSubIfAuthed
+  const user = await getUserFromToken(req);
+  if (!user) return next();
+  try {
+    const { data } = await supabaseAdmin
+      .from('profiles').select('subscription_status').eq('id', user.id).maybeSingle();
+    const status = (data && data.subscription_status) || 'none';
+    if (!PAID_PLANS.includes(status) && status !== 'free') {
+      return res.status(403).json({ error: 'Active subscription required', code: 'SUBSCRIPTION_REQUIRED' });
+    }
+    req.user = user;
+    next();
+  } catch (err) {
+    console.warn('[Auth] requireSubOrFree check threw — fail open:', err.message);
+    next();
+  }
+}
+
+async function requireSubOrFreeStrict(req, res, next) {
+  const auth = req.headers.authorization || '';
+  if (!auth) return res.status(401).json({ error: 'Authentication required', code: 'AUTH_REQUIRED' });
+  const user = await getUserFromToken(req);
+  if (!user) return res.status(401).json({ error: 'Invalid or expired session', code: 'AUTH_INVALID' });
+  try {
+    const { data } = await supabaseAdmin
+      .from('profiles').select('subscription_status').eq('id', user.id).maybeSingle();
+    const status = (data && data.subscription_status) || '';
+    if (!PAID_PLANS.includes(status) && status !== 'free') {
+      return res.status(403).json({ error: 'Active subscription required', code: 'SUBSCRIPTION_REQUIRED' });
+    }
+    req.user = user;
+    next();
+  } catch (err) {
+    console.error('[Auth] requireSubOrFreeStrict check error:', err.message);
     return res.status(500).json({ error: 'Could not verify subscription' });
   }
 }
@@ -1243,8 +1293,8 @@ INFOGRAPHIC MUST INCLUDE ALL OF THESE:
 // Receives: { prompt, size, imageType, imageFormat, refImageData? }
 // If refImageData is provided, Anthropic vision extracts style cues
 // which are appended to the DALL-E prompt as a style guide.
-app.post('/api/generate-image', requireSubIfAuthed, async (req, res) => {
-  const { prompt, size, imageType, imageFormat, refImageData, uploadType } = req.body;
+app.post('/api/generate-image', requireSubOrFree, async (req, res) => {
+  const { prompt, size, imageType, imageFormat, refImageData, uploadType, brandColors, brandIdentityDisabled } = req.body;
   if (!prompt) return res.status(400).json({ error: 'prompt is required' });
 
   // This is the real image-generation route the main Launch creative flow
@@ -1305,7 +1355,22 @@ app.post('/api/generate-image', requireSubIfAuthed, async (req, res) => {
     }
   }
 
-  const _bizCtx = await _creativeContext(req.user && req.user.id);
+  // Brand Identity colors (Primary/Accent/Text/Secondary) — sent explicitly
+  // by the client (_cgrBrandColorFields, app.html) as {role,hex} pairs, so
+  // the instruction reaching the image model is always correctly formatted
+  // regardless of _gatherBusinessContext's own (separately fixed) color
+  // serialization. Gated by the same brandIdentityDisabled flag the client
+  // sends when the user has switched Brand Identity off.
+  if (!brandIdentityDisabled && Array.isArray(brandColors) && brandColors.length) {
+    const colorLines = brandColors
+      .filter(c => c && c.hex && /^#[0-9A-Fa-f]{6}$/.test(c.hex))
+      .map(c => `${c.role || 'Color'}: ${c.hex}`);
+    if (colorLines.length) {
+      finalPrompt = finalPrompt + '\n\nBRAND COLOR PALETTE (use tastefully where appropriate — e.g. backgrounds, buttons/CTAs, accent elements, typography/color hierarchy. Use good visual judgment; do not force every color into the image):\n' + colorLines.join('\n');
+    }
+  }
+
+  const _bizCtx = await _creativeContext(req.user && req.user.id, { skipBrandVoice: !!brandIdentityDisabled });
   if (_bizCtx) finalPrompt = finalPrompt + '\n\nBRAND CONTEXT (reflect this business\'s real identity, not generic stock imagery): ' + _bizCtx.text;
 
   // Hard safety clamp before DALL-E â€” API limit is 4000 chars
@@ -5046,7 +5111,12 @@ function _buildCampaignBrandSection(bc) {
   if (bc.usp)         lines.push(`Unique Selling Proposition: ${bc.usp}`);
   if (bc.toneOfVoice) lines.push(`Tone of Voice: ${bc.toneOfVoice}`);
   if (bc.competitors) lines.push(`Competitors: ${bc.competitors}`);
-  if (bc.colors)      lines.push(`Brand Colours: ${bc.colors}`);
+  if (bc.colors && bc.colors.length) {
+    const colorList = Array.isArray(bc.colors)
+      ? bc.colors.map(c => (c && c.hex) ? `${c.name || c.role || 'Color'} ${c.hex}` : null).filter(Boolean).join(', ')
+      : String(bc.colors);
+    if (colorList) lines.push(`Brand Colours: ${colorList}`);
+  }
   lines.push(`\nIMPORTANT RULES:`);
   lines.push(`- Use "${bc.name}" as the brand name throughout all copy`);
   if (bc.toneOfVoice) lines.push(`- Match tone exactly: ${bc.toneOfVoice}`);
@@ -5343,7 +5413,7 @@ app.post('/api/ai/create-ad', requireSubOrOnboardingGen, async (req, res) => {
   }
 
   const brandSection = _buildCampaignBrandSection(brandCore);
-  const _bizCtx = req.user ? await _gatherBusinessContext(req.user.id).catch(() => null) : null;
+  const _bizCtx = req.user ? await _gatherBusinessContext(req.user.id, { skipBrandVoice: !!brandIdentityDisabled }).catch(() => null) : null;
   const businessSection = _bizCtx ? `\n\nBUSINESS KNOWLEDGE (real, stored data about this business — use it instead of generic copy; if competitor info is present, use it only for positioning, never copy competitor content):\n${_bizCtx.text}` : '';
   const productImageNote = (Array.isArray(productImages) && productImages.length)
     ? `\n\nPRODUCT ASSETS: The user has uploaded ${productImages.length} product image(s). Describe visual concepts that showcase the actual product photography â€” not stock imagery. Reference realistic product shots in imagePrompts.`
@@ -5664,7 +5734,7 @@ function _normalizeCampaignStructure(pkg) {
 // POST /api/publish/google
 // Creates a paused Google Ads campaign with ad groups, keywords, and RSAs.
 // Receives: { pkg } where pkg is the full campaign package from /api/ai/create-ad
-app.post('/api/publish/google', requireSubscription, async (req, res) => {
+app.post('/api/publish/google', requireSubOrFreeStrict, async (req, res) => {
   // Tracks whether the Campaign has been created so a failure partway
   // through (ad group / keywords / RSA) can roll it back instead of
   // leaving an orphaned paused campaign behind -- mirrors the rollback
@@ -6439,7 +6509,7 @@ app.post('/api/publish/google', requireSubscription, async (req, res) => {
 // POST /api/publish/meta
 // Creates a paused Meta Ads campaign with ad set.
 // Receives: { pkg } where pkg is the full campaign package from /api/ai/create-ad
-app.post('/api/publish/meta', requireSubscription, async (req, res) => {
+app.post('/api/publish/meta', requireSubOrFreeStrict, async (req, res) => {
   // Tracks what's actually been created on Meta's side so a failure partway
   // through can roll everything back -- the publish operation must behave
   // transaction-like and never leave an orphaned Campaign/Ad Set/Creative/Ad.
@@ -6748,7 +6818,7 @@ app.post('/api/publish/meta', requireSubscription, async (req, res) => {
 // re-confirmed against a live TikTok account this session (no TikTok Ads
 // credentials were available anywhere in this environment); if TikTok
 // rejects a field, that error is surfaced to the user rather than masked.
-app.post('/api/publish/tiktok', requireSubscription, async (req, res) => {
+app.post('/api/publish/tiktok', requireSubOrFreeStrict, async (req, res) => {
   const created = { campaignId: null, adGroupIds: [], adIds: [] };
   let rbAccessToken, rbAdvertiserId;
 
@@ -12960,7 +13030,12 @@ async function _gatherBusinessContext(userId, opts) {
       // reached any AI prompt -- phrased as available context to respect
       // "where applicable", not a hard instruction to force them into
       // every single output.
-      if (brandCore.colors)     { lines.push(`Brand colors (use where visually relevant): ${Array.isArray(brandCore.colors) ? brandCore.colors.join(', ') : brandCore.colors}`); usedBrand = true; }
+      if (brandCore.colors && brandCore.colors.length) {
+        const colorList = Array.isArray(brandCore.colors)
+          ? brandCore.colors.map(c => (c && c.hex) ? `${c.name || c.role || 'Color'} ${c.hex}` : null).filter(Boolean).join(', ')
+          : brandCore.colors;
+        if (colorList) { lines.push(`Brand colors (use where visually relevant): ${colorList}`); usedBrand = true; }
+      }
       if (usedBrand) sources.push('Brand voice');
     }
     // Official logo -- informational only ("this exists and belongs to the
