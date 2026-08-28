@@ -8751,6 +8751,153 @@ app.get('/api/tiktok/campaigns', async (req, res) => {
   }
 });
 
+// â”€â”€ TikTok date range â”€â”€ TikTok's Reporting API always wants explicit
+// start_date/end_date (no named-preset shortcut like Meta's date_preset),
+// unlike resolveDateRange() above whose since/until stay null for the
+// "native" GAQL-preset keys (TODAY/LAST_7_DAYS/etc, since Google doesn't
+// need concrete dates for those). This computes concrete YYYY-MM-DD dates
+// for every one of the same ORV_DATE_RANGE_KEYS so the same range selector
+// UI works identically across all three platforms.
+function _tiktokDateRange(rawKey, customSince, customUntil) {
+  const key = ORV_DATE_RANGE_KEYS.includes(rawKey) ? rawKey : 'LAST_30_DAYS';
+  const today = new Date();
+  const daysAgo = n => { const d = new Date(today); d.setDate(d.getDate() - n); return _orvFmtDate(d); };
+  if (key === 'CUSTOM') {
+    return {
+      since: /^\d{4}-\d{2}-\d{2}$/.test(customSince || '') ? customSince : daysAgo(29),
+      until: /^\d{4}-\d{2}-\d{2}$/.test(customUntil || '') ? customUntil : _orvFmtDate(today),
+    };
+  }
+  if (key === 'TODAY')          return { since: _orvFmtDate(today), until: _orvFmtDate(today) };
+  if (key === 'YESTERDAY')      return { since: daysAgo(1), until: daysAgo(1) };
+  if (key === 'LAST_7_DAYS')    return { since: daysAgo(6), until: _orvFmtDate(today) };
+  if (key === 'LAST_90_DAYS')   return { since: daysAgo(89), until: _orvFmtDate(today) };
+  if (key === 'LAST_12_MONTHS') return { since: daysAgo(365), until: _orvFmtDate(today) };
+  if (key === 'LIFETIME')       return { since: '2005-01-01', until: _orvFmtDate(today) };
+  if (key === 'THIS_MONTH') {
+    const first = new Date(today.getFullYear(), today.getMonth(), 1);
+    return { since: _orvFmtDate(first), until: _orvFmtDate(today) };
+  }
+  if (key === 'LAST_MONTH') {
+    const firstThis = new Date(today.getFullYear(), today.getMonth(), 1);
+    const lastPrev  = new Date(firstThis.getTime() - 86400000);
+    const firstPrev = new Date(lastPrev.getFullYear(), lastPrev.getMonth(), 1);
+    return { since: _orvFmtDate(firstPrev), until: _orvFmtDate(lastPrev) };
+  }
+  return { since: daysAgo(29), until: _orvFmtDate(today) }; // LAST_30_DAYS + fallback
+}
+
+// GET /api/tiktok/overview -- Campaign Overview / Customize Metrics feed for
+// TikTok. Same {account, date_range, overview, campaigns} response shape as
+// GET /api/ads/overview (Google) so the frontend can treat all three
+// platforms uniformly. TikTok previously had zero performance-metrics
+// integration in this codebase (only campaign status/budget via
+// /campaign/get/, no /report/integrated/get/ call anywhere) -- this adds
+// TikTok's real Basic report endpoint. The metrics fetch is deliberately
+// wrapped separately from the campaign-list fetch (which already works,
+// unchanged): if TikTok's reporting call fails for any reason, campaigns
+// still come back with their real status/budget and simply keep spend/
+// impressions/etc. as null (the existing honest "not available" convention
+// used throughout this feature), never a fabricated number.
+// NOTE: this route could not be exercised against a live TikTok Ads account
+// in this environment (no TikTok Ads credentials available) -- verify
+// against a real account before relying on it in production.
+app.get('/api/tiktok/overview', async (req, res) => {
+  try {
+    const user = await getUserFromToken(req);
+    if (!user) return res.status(401).json({ error: 'Authentication required' });
+
+    const { accessToken, advertiserId, accountName } = await _getTikTokAccess(user);
+    const dr = resolveDateRange(req.query.date_range, req.query.date_since, req.query.date_until);
+    const { since, until } = _tiktokDateRange(req.query.date_range, req.query.date_since, req.query.date_until);
+
+    const campData = await _tiktokFetch('/campaign/get/', accessToken, {
+      advertiser_id: advertiserId,
+      fields:        JSON.stringify(['campaign_id','campaign_name','status','operation_status','objective_type','budget','budget_mode','create_time']),
+      page_size:     '100'
+    });
+    const campaignMeta = {};
+    ((campData && campData.list) || []).forEach(function(c) {
+      campaignMeta[String(c.campaign_id)] = {
+        name:   c.campaign_name || 'Unnamed',
+        status: c.operation_status || c.status || 'UNKNOWN',
+        objective: c.objective_type || '',
+        budget: c.budget || 0,
+        budget_mode: c.budget_mode || '',
+      };
+    });
+
+    const metricsByCampaign = {};
+    try {
+      const reportData = await _tiktokFetch('/report/integrated/get/', accessToken, {
+        advertiser_id: advertiserId,
+        report_type:   'BASIC',
+        dimensions:    JSON.stringify(['campaign_id']),
+        metrics:       JSON.stringify(['spend','impressions','clicks','ctr','cpc','cpm','reach','frequency','conversion','cost_per_conversion','conversion_rate']),
+        data_level:    'AUCTION_CAMPAIGN',
+        start_date:    since,
+        end_date:      until,
+        page_size:     '100'
+      });
+      ((reportData && reportData.list) || []).forEach(function(row) {
+        const dims = row.dimensions || {};
+        const m = row.metrics || {};
+        const id = String(dims.campaign_id || '');
+        if (!id) return;
+        metricsByCampaign[id] = {
+          spend:              m.spend != null ? parseFloat(m.spend) : 0,
+          impressions:        m.impressions != null ? parseInt(m.impressions, 10) : 0,
+          clicks:             m.clicks != null ? parseInt(m.clicks, 10) : 0,
+          ctr:                m.ctr != null ? parseFloat(m.ctr) : 0,
+          cpc:                m.cpc != null ? parseFloat(m.cpc) : null,
+          cpm:                m.cpm != null ? parseFloat(m.cpm) : null,
+          reach:              m.reach != null ? parseInt(m.reach, 10) : null,
+          frequency:          m.frequency != null ? parseFloat(m.frequency) : null,
+          conversions:        m.conversion != null ? parseFloat(m.conversion) : 0,
+          cpa:                m.cost_per_conversion != null ? parseFloat(m.cost_per_conversion) : null,
+          conversionRate:     m.conversion_rate != null ? parseFloat(m.conversion_rate) : null,
+        };
+      });
+    } catch (reportErr) {
+      // Honest degrade, per the comment above -- log for diagnosis, but
+      // still return campaign status/budget rather than failing the whole
+      // route over a metrics-only problem.
+      console.warn('[tiktok/overview] reporting call failed, returning status/budget only:', reportErr.message);
+    }
+
+    let totalSpend = 0, totalImpr = 0, totalClicks = 0, totalConv = 0;
+    const campaigns = Object.keys(campaignMeta).map(function(id) {
+      const meta = campaignMeta[id];
+      const m = metricsByCampaign[id] || null;
+      if (m) { totalSpend += m.spend; totalImpr += m.impressions; totalClicks += m.clicks; totalConv += m.conversions; }
+      return Object.assign({
+        id: id,
+        name: meta.name,
+        status: meta.status,
+        type: meta.objective,
+        budget: meta.budget,
+        budget_mode: meta.budget_mode,
+      }, m || { spend: null, impressions: null, clicks: null, ctr: null, cpc: null, cpm: null, reach: null, frequency: null, conversions: null, cpa: null, conversionRate: null });
+    });
+
+    const hasMetrics = Object.keys(metricsByCampaign).length > 0;
+    console.log('[tiktok/overview] Returned', campaigns.length, 'campaigns | metrics available:', hasMetrics, '| advertiser:', advertiserId);
+    res.json({
+      account: { id: advertiserId, name: accountName },
+      date_range: dr.key,
+      overview: hasMetrics ? {
+        spend: totalSpend, impressions: totalImpr, clicks: totalClicks,
+        ctr: totalImpr > 0 ? (totalClicks / totalImpr) * 100 : 0,
+        conversions: totalConv, cpa: totalConv > 0 ? totalSpend / totalConv : 0,
+      } : null,
+      campaigns
+    });
+  } catch (err) {
+    console.error('[tiktok/overview]', err.message);
+    res.status(err.status || 500).json({ error: err.message, tiktok_code: err.tikTokCode || null });
+  }
+});
+
 // POST /api/tiktok/campaign/:id/pause
 app.post('/api/tiktok/campaign/:id/pause', async (req, res) => {
   try {
@@ -9263,6 +9410,51 @@ function _metaConversions(actions) {
     .reduce(function(sum, a) { return sum + Number(a.value || 0); }, 0);
 }
 
+// â”€â”€ Campaign Overview metrics (Customize Metrics feature) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// Meta's `actions`/`action_values` arrays already carry every conversion
+// event type in one response (no extra API call needed) -- this just reads
+// more of what's already being fetched. action_type naming varies by
+// integration method (Pixel vs Conversions API vs on-platform), so each
+// bucket checks the handful of real, documented variants Meta actually
+// uses, same defensive pattern _metaConversions already established above.
+// Unmatched action_types simply don't count toward that bucket -- never
+// fabricated, just possibly incomplete for an unusual event-naming setup.
+const _META_ACTION_TYPES = {
+  purchase:          ['purchase', 'offsite_conversion.fb_pixel_purchase', 'omni_purchase'],
+  addToCart:         ['add_to_cart', 'offsite_conversion.fb_pixel_add_to_cart', 'omni_add_to_cart'],
+  checkoutInitiated: ['initiate_checkout', 'offsite_conversion.fb_pixel_initiate_checkout', 'omni_initiated_checkout'],
+};
+function _metaSumActionType(list, types) {
+  const set = new Set(types);
+  return (list || []).filter(function(a) { return set.has(a.action_type); }).reduce(function(sum, a) { return sum + Number(a.value || 0); }, 0);
+}
+// Reads one Meta insights row (the object already returned by the existing
+// `insights.{...}` field expansion) into every additional Delivery/Traffic/
+// Conversion metric Customize Metrics can offer for Meta, beyond the
+// spend/impressions/clicks/ctr/conversions already computed by callers.
+function _metaExtraMetrics(ins, spend) {
+  const actions = ins.actions || [];
+  const actionValues = ins.action_values || [];
+  const addToCart = _metaSumActionType(actions, _META_ACTION_TYPES.addToCart);
+  const checkoutInitiated = _metaSumActionType(actions, _META_ACTION_TYPES.checkoutInitiated);
+  const purchases = _metaSumActionType(actions, _META_ACTION_TYPES.purchase);
+  const conversionValue = _metaSumActionType(actionValues, _META_ACTION_TYPES.purchase);
+  return {
+    reach:             ins.reach != null ? parseInt(ins.reach, 10) : null,
+    frequency:         ins.frequency != null ? parseFloat(ins.frequency) : null,
+    cpm:               ins.cpm != null ? parseFloat(ins.cpm) : null,
+    cpc:               ins.cpc != null ? parseFloat(ins.cpc) : null,
+    linkClicks:        ins.inline_link_clicks != null ? parseInt(ins.inline_link_clicks, 10) : null,
+    purchases:         purchases || null,
+    conversionValue:   conversionValue || null,
+    roas:              (conversionValue > 0 && spend > 0) ? conversionValue / spend : null,
+    addToCart:          addToCart || null,
+    costPerAddToCart:   addToCart > 0 ? spend / addToCart : null,
+    checkoutInitiated:  checkoutInitiated || null,
+    costPerCheckout:    checkoutInitiated > 0 ? spend / checkoutInitiated : null,
+  };
+}
+
 // GET /api/meta/auth-url -- returns Meta OAuth URL as JSON (matches Google/TikTok pattern)
 // Frontend calls: apiFetch('/api/meta/auth-url').then(r => window.location.href = r.data.url)
 app.get('/api/meta/auth-url', async (req, res) => {
@@ -9662,7 +9854,7 @@ app.get('/api/meta/campaigns', async (req, res) => {
     const range = dr.key;
 
     const campData = await _metaFetch('/' + accountId + '/campaigns', accessToken, {
-      fields:           'id,name,status,objective,daily_budget,lifetime_budget,created_time,insights.' + dr.metaFieldFragment + '{spend,impressions,clicks,ctr,actions}',
+      fields:           'id,name,status,objective,daily_budget,lifetime_budget,created_time,insights.' + dr.metaFieldFragment + '{spend,impressions,clicks,ctr,actions,reach,frequency,cpm,cpc,inline_link_clicks,action_values}',
       limit:            '100',
       effective_status: '["ACTIVE","PAUSED","ARCHIVED"]'
     });
@@ -9674,7 +9866,8 @@ app.get('/api/meta/campaigns', async (req, res) => {
       const clicks      = parseInt(ins.clicks || 0, 10);
       const ctr         = parseFloat(ins.ctr || 0);
       const conversions = _metaConversions(ins.actions);
-      return {
+      const extra       = _metaExtraMetrics(ins, spend);
+      return Object.assign({
         campaign_id:   c.id,
         campaign_name: c.name      || 'Unnamed',
         status:        c.status    || 'UNKNOWN',
@@ -9687,7 +9880,7 @@ app.get('/api/meta/campaigns', async (req, res) => {
         daily_budget:   c.daily_budget   ? parseInt(c.daily_budget,   10) : null,
         lifetime_budget: c.lifetime_budget ? parseInt(c.lifetime_budget, 10) : null,
         created_time:   c.created_time  || null
-      };
+      }, extra);
     });
 
     // V6 Phase 2 â€” Campaign Priority (calculated, not AI-assigned) â€” same
@@ -10707,7 +10900,7 @@ app.get('/api/ads/overview', async (req, res) => {
     const dr    = resolveDateRange(req.query.date_range, req.query.date_since, req.query.date_until);
     const range = dr.key;
 
-    _diagQuery = `SELECT campaign.id, campaign.name, campaign.status, campaign.advertising_channel_type, metrics.cost_micros, metrics.impressions, metrics.clicks, metrics.ctr, metrics.conversions, metrics.cost_per_conversion, metrics.conversions_value FROM campaign WHERE segments.date ${dr.gaqlWhere} AND campaign.status != 'REMOVED' ORDER BY metrics.cost_micros DESC LIMIT 100`;
+    _diagQuery = `SELECT campaign.id, campaign.name, campaign.status, campaign.advertising_channel_type, metrics.cost_micros, metrics.impressions, metrics.clicks, metrics.ctr, metrics.conversions, metrics.cost_per_conversion, metrics.conversions_value, metrics.average_cpc, metrics.average_cpm, metrics.search_impression_share, metrics.search_budget_lost_impression_share, metrics.search_rank_lost_impression_share, metrics.search_top_impression_share, metrics.search_absolute_top_impression_share FROM campaign WHERE segments.date ${dr.gaqlWhere} AND campaign.status != 'REMOVED' ORDER BY metrics.cost_micros DESC LIMIT 100`;
 
     const results = await _gadsQuery(accessToken, customerId, `
       SELECT
@@ -10721,7 +10914,14 @@ app.get('/api/ads/overview', async (req, res) => {
         metrics.ctr,
         metrics.conversions,
         metrics.cost_per_conversion,
-        metrics.conversions_value
+        metrics.conversions_value,
+        metrics.average_cpc,
+        metrics.average_cpm,
+        metrics.search_impression_share,
+        metrics.search_budget_lost_impression_share,
+        metrics.search_rank_lost_impression_share,
+        metrics.search_top_impression_share,
+        metrics.search_absolute_top_impression_share
       FROM campaign
       WHERE segments.date ${dr.gaqlWhere}
         AND campaign.status != 'REMOVED'
@@ -10730,6 +10930,11 @@ app.get('/api/ads/overview', async (req, res) => {
     `, loginCustomerId);
 
     let totalCostMicros = 0, totalImpr = 0, totalClicks = 0, totalConv = 0, totalConvVal = 0;
+    // Search-only auction-insight fields (only populated for Search
+    // campaigns; null for Display/Video/PMax) -- averaged across whichever
+    // campaigns actually report them, never fabricated for campaign types
+    // Google doesn't compute them for.
+    let _sisSum = 0, _sisN = 0;
 
     const campaigns = results.map(r => {
       const c  = r.campaign || {};
@@ -10740,6 +10945,10 @@ app.get('/api/ads/overview', async (req, res) => {
       const cv = m.conversions    ? Number(m.conversions)    : 0;
       const vl = m.conversionsValue ? Number(m.conversionsValue) : 0;
       const sp = cm / 1e6;
+      // Google returns these auction-insight fractions as 0-1; UI expects a
+      // percentage (matches ctr's convention below, already *100 elsewhere).
+      const sis = m.searchImpressionShare != null ? Number(m.searchImpressionShare) * 100 : null;
+      if (sis != null) { _sisSum += sis; _sisN++; }
 
       totalCostMicros += cm;
       totalImpr       += im;
@@ -10759,7 +10968,14 @@ app.get('/api/ads/overview', async (req, res) => {
         conversions:      cv,
         cpa:              cv > 0 ? sp / cv : 0,
         roas:             sp > 0 ? vl / sp : 0,
-        conversions_value: vl
+        conversions_value: vl,
+        avgCpc:           m.averageCpc != null ? Number(m.averageCpc) / 1e6 : null,
+        avgCpm:           m.averageCpm != null ? Number(m.averageCpm) / 1e6 : null,
+        searchImpressionShare:      sis,
+        searchLostISBudget:         m.searchBudgetLostImpressionShare != null ? Number(m.searchBudgetLostImpressionShare) * 100 : null,
+        searchLostISRank:           m.searchRankLostImpressionShare != null ? Number(m.searchRankLostImpressionShare) * 100 : null,
+        searchTopImpressionRate:    m.searchTopImpressionShare != null ? Number(m.searchTopImpressionShare) * 100 : null,
+        searchAbsTopImpressionRate: m.searchAbsoluteTopImpressionShare != null ? Number(m.searchAbsoluteTopImpressionShare) * 100 : null,
       };
     });
 
@@ -10782,7 +10998,10 @@ app.get('/api/ads/overview', async (req, res) => {
         conversions:       totalConv,
         cpa:               totalConv > 0 ? totalSpend / totalConv : 0,
         roas:              totalSpend > 0 ? totalConvVal / totalSpend : 0,
-        conversions_value: totalConvVal
+        conversions_value: totalConvVal,
+        avgCpc:            totalClicks > 0 ? totalSpend / totalClicks : null,
+        avgCpm:            totalImpr > 0 ? (totalSpend / totalImpr) * 1000 : null,
+        searchImpressionShare: _sisN > 0 ? _sisSum / _sisN : null,
       },
       campaigns
     });
