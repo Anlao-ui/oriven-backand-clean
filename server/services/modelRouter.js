@@ -18,6 +18,40 @@ const MODELS = {
     code:  'Qwen3-Coder-480B-A35B-Instruct',      // web pages, HTML/CSS, structured output
     image: 'gpt-image-1',                         // all image generation via AIML proxy
     video: 'kling-video/v1.6/pro/text-to-video',  // video ads, motion graphics, UGC
+
+    // GPT-6 Astra (configuration-ready, NOT active) — confirmed identifier
+    // per AIML API docs is 'openai/gpt-6-astra' via this same
+    // /v1/chat/completions endpoint (providers/aimlProvider.js). As of the
+    // last connectivity test, every model on this AIML account — including
+    // the working 'claude-opus-4-8' above and Astra itself — returned
+    // HTTP 403 { kind: 'err_insufficent_credits' }: an AIML account
+    // billing/balance issue, not a model-permission or availability issue
+    // specific to Astra. Do NOT point 'text' at this until a live
+    // provider.generateText(..., { model: MODELS.aiml.astra }) call has
+    // actually succeeded — swap TASKS.chat / TASKS['research-query']
+    // below to use MODELS.aiml.astra once that's confirmed; no other
+    // code changes are needed to activate it.
+    astra: 'openai/gpt-6-astra',
+
+    // Real web search (Research Production Sprint) — verified against
+    // AIMLAPI's own documentation (docs.aimlapi.com/capabilities/
+    // web-search), NOT live-tested (this account currently has zero
+    // funds — every AIML call 403s regardless of model or endpoint, and
+    // no live/paid testing is in scope for this change). Their
+    // documented list of web-search-capable models is: gpt-4o-search-
+    // preview, gpt-4o-mini-search-preview, perplexity/sonar,
+    // perplexity/sonar-pro, alibaba/qwen3.6-{flash,plus,max-preview},
+    // moonshot/kimi-k2-{preview,0905-preview} — openai/gpt-6-astra is
+    // confirmed NOT on that list, despite Astra supporting web search
+    // natively on OpenAI's own platform; AIMLAPI's proxy for this model
+    // does not expose it. perplexity/sonar is chosen here because
+    // Perplexity's sonar models are natively grounded (no `tools` array
+    // needed — a plain chat completion returns real `citations` +
+    // `search_results` with title/url/date, confirmed via AIMLAPI's own
+    // documented example request/response), matching this codebase's
+    // existing plain-fetch, no-SDK Chat Completions pattern with zero
+    // new request-shape complexity.
+    webSearch: 'perplexity/sonar',
   },
 
 };
@@ -44,7 +78,7 @@ const TASKS = {
   'chat': {
     provider: 'aiml',
     type:     'text',
-    model:    MODELS.aiml.text,
+    model:    MODELS.aiml.text, // swap to MODELS.aiml.astra once a live Astra call succeeds (see MODELS.aiml.astra comment)
     label:    'Oriven Chat',
   },
 
@@ -114,6 +148,24 @@ const TASKS = {
     type:     'text',
     model:    MODELS.aiml.text,
     label:    'Daily Brief',
+  },
+  'research-query': {
+    provider: 'aiml',
+    type:     'text',
+    model:    MODELS.aiml.text, // swap to MODELS.aiml.astra once a live Astra call succeeds (see MODELS.aiml.astra comment)
+    label:    'Advertising Research',
+  },
+  // Real web search stage (Research Production Sprint) — the ONLY task
+  // routed to a genuinely web-search-capable model (see MODELS.aiml.
+  // webSearch comment). Kept separate from 'research-query' above
+  // (which stays the text-only synthesis/mapping stage) because they are
+  // different models with different jobs, not because this needed a new
+  // provider abstraction.
+  'research-web-search': {
+    provider: 'aiml',
+    type:     'text',
+    model:    MODELS.aiml.webSearch,
+    label:    'Research Web Search',
   },
   'opportunities': {
     provider: 'aiml',

@@ -146,7 +146,14 @@ const PLAN_INTELLIGENCE_LIMITS = { free: 1, starter: 40, creator: 100, professio
 // explicitly (rather than relying on the `|| 0` fallback in
 // checkAndIncrementAutopilotUsage/requireAutopilotAccess) so it's documented
 // alongside every other plan's real number, not implied by an absence.
-const PLAN_AUTOPILOT_LIMITS = { free: 0, starter: 0, creator: 10, professional: Infinity };
+// Marketing/Pricing Redesign — final plan positioning: "Professional =
+// Creator + Autopilot" (spec, repeated and explicit — Autopilot is a
+// Professional-only differentiator, Creator gets Business+Research
+// instead). Creator's limit changed from 10 -> 0 to match; Professional's
+// real Infinity (no separate monthly cap beyond the credit economy) is
+// unchanged. This is a real, deliberate product-access change, not a
+// copy-only update — see the final report for the full disclosure.
+const PLAN_AUTOPILOT_LIMITS = { free: 0, starter: 0, creator: 0, professional: Infinity };
 
 class InsufficientCreditsError extends Error {
   constructor(cost, balance) {

@@ -65,6 +65,10 @@ Three ways a tool call resolves:
 
 Three more cron jobs (8am/1pm/6pm UTC) generate Morning/Midday/Evening briefs by reusing `/api/business/reflection`'s exact mechanism with a 1-day window, logging the result as an `intelligence_events` row (`type: 'daily_brief'`) instead of new storage.
 
+## The Universal Advertising Setup Engine
+
+Connecting a platform (OAuth) and being *ready to publish* on it are different states — an ad account or Page can still be missing after a valid token exists. `services/platformCapabilities.js` (what's really API-doable per platform, `A`/`API_GATED`/`HYBRID`/`MANUAL`/`UNSUPPORTED`, each with an honest `implemented` flag), `services/setupStateEngine.js` (the real per-platform state machine, `not_started` → ... → `ready_limited_verification`), and `services/adapters/*SetupAdapter.js` (idempotent create-or-reuse logic for Pixel/Tag/Conversion-Action resources, injected with thin wrappers around the existing `_metaFetch`/`_gadsQuery`/`_pinterestApiRequest`/`_tiktokPost` helpers — no new HTTP client code) together back the Connections page's readiness UI and the pre-publish check in `cgrPublishTo`. See `docs/SETUP_ENGINE.md` for the full breakdown, including what's genuinely implemented vs. still `MANUAL`/unimplemented.
+
 ## Frontend page/nav model
 
 Every top-level page is a `<div class="page" id="page-X">`; `navigate(page)` (`app.js`) toggles `.active` on the matching `#page-X` and highlights the matching `.ni[data-page="X"]` nav button. Several features wrap `window.navigate` in a layered chain (each feature file captures the previous `navigate`, checks for its own page, then calls through) — `workspace.js` and `autopilot.js` both do this to run their page-specific init function, following the same pattern already established for `integrations`/`ads`/`performance`/`connect`.

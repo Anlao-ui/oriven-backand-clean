@@ -197,6 +197,73 @@ const GOOGLE_DEMANDGEN_GOAL_CONFIG = {
   Awareness: { biddingField: 'maximizeConversions', biddingValue: {}, label: 'Demand Gen — Awareness' },
 };
 
+// ── Pinterest Ads — campaign objective_type + ad-group billable_event per
+// goal (Final Polish, Pinterest Launch integration). Pinterest's objective
+// model was recently simplified; these are the CURRENT, non-legacy
+// objectives (verified against Pinterest's own OpenAPI v5 spec,
+// ObjectiveType/CampaignObjectiveType enums) — WEB_CONVERSION and
+// CATALOG_SALES are the legacy objectives being deprecated (available
+// until 2027-02-01) and are deliberately not used for new campaigns here.
+// billable_event pairs with Pinterest's real ActionType enum
+// (CLICKTHROUGH | IMPRESSION | VIDEO_V_50_MRC) — AWARENESS bills on
+// impressions, CONSIDERATION/SALES/LEADS on clickthrough (no conversion-tag
+// pixel management UI exists in Oriven yet, so these stay click-optimized
+// rather than fabricating a conversion_tag_id the advertiser hasn't
+// configured — same honest limitation already disclosed for Meta's
+// needsPixel-gated Sales/Leads config above).
+const PINTEREST_GOAL_CONFIG = {
+  Sales:     { objective_type: 'SALES',         billable_event: 'CLICKTHROUGH', label: 'Sales' },
+  Leads:     { objective_type: 'LEADS',         billable_event: 'CLICKTHROUGH', label: 'Leads' },
+  Traffic:   { objective_type: 'CONSIDERATION', billable_event: 'CLICKTHROUGH', label: 'Consideration' },
+  Awareness: { objective_type: 'AWARENESS',     billable_event: 'IMPRESSION',   label: 'Awareness' },
+};
+
+// ── Pinterest Ads — platform-specific objective beyond the universal 4
+// (mirrors Meta/TikTok's extra-objective pattern above). Video Completion
+// has no clean 1:1 mapping onto Sales/Leads/Traffic/Awareness, so it's
+// offered as an explicit opt-in rather than folded into one of them.
+// Pinterest's API requires AUTOMATIC_BID (Performance+ bidding) for every
+// Video Completion ad group — no Custom bidding option exists for it
+// (confirmed in Pinterest's BidStrategyType schema description) — the
+// publish route and Launch UI must both respect that, not just this config.
+const PINTEREST_EXTENDED_OBJECTIVES = {
+  VideoCompletion: { objective_type: 'VIDEO_COMPLETION', billable_event: 'VIDEO_V_50_MRC', forcedBidStrategy: 'AUTOMATIC_BID', label: 'Video Completion', aiGoal: 'Awareness' },
+};
+
+function getPinterestObjective(goal, platformObjective) {
+  const slug = _slug(platformObjective);
+  if (slug === 'video_completion') return PINTEREST_EXTENDED_OBJECTIVES.VideoCompletion;
+  return PINTEREST_GOAL_CONFIG[normalizeGoal(goal)];
+}
+
+// ── Pinterest Ads — map Oriven's freeform AI-generated CTA text to one of
+// Pinterest's real customizable_cta_type enum values. Mirrors TIKTOK_CTA_MAP/
+// tiktokCtaType exactly. Falls back to LEARN_MORE (a real Pinterest CTA
+// value, confirmed in Pinterest's CustomizableCTAType schema).
+const PINTEREST_CTA_MAP = [
+  [/shop|buy now/i,                           'SHOP_NOW'],
+  [/buy/i,                                    'BUY_NOW'],
+  [/order/i,                                  'ORDER_NOW'],
+  [/sign\s*up|register|join/i,                'SIGN_UP'],
+  [/quote|estimate/i,                         'GET_QUOTE'],
+  [/contact|call|reach out|enquire|inquire/i, 'CONTACT_US'],
+  [/subscribe/i,                              'SUBSCRIBE'],
+  [/download/i,                               'DOWNLOAD'],
+  [/apply/i,                                  'APPLY_NOW'],
+  [/book/i,                                   'BOOK_NOW'],
+  [/watch/i,                                  'WATCH_NOW'],
+  [/donate/i,                                 'DONATE_NOW'],
+  [/explore/i,                                'EXPLORE_MORE'],
+  [/add to cart/i,                            'ADD_TO_CART'],
+];
+function pinterestCtaType(ctaText) {
+  const text = String(ctaText || '');
+  for (const [re, type] of PINTEREST_CTA_MAP) {
+    if (re.test(text)) return type;
+  }
+  return 'LEARN_MORE';
+}
+
 // ── Intelligence — which KPIs actually matter for each goal, so a
 // briefing reports on what the campaign was built to achieve instead of
 // a fixed, one-size-fits-all metric set. ──
@@ -278,6 +345,11 @@ module.exports = {
   getTikTokObjective,
   TIKTOK_CTA_MAP,
   tiktokCtaType,
+  PINTEREST_GOAL_CONFIG,
+  PINTEREST_EXTENDED_OBJECTIVES,
+  getPinterestObjective,
+  PINTEREST_CTA_MAP,
+  pinterestCtaType,
   GOAL_KPIS,
   GOAL_AUTOPILOT_HINTS,
 };

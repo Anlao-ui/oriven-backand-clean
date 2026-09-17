@@ -272,12 +272,43 @@ async function generateText(systemOrMessages, userPrompt, options = {}) {
   if (!model.startsWith('claude') && options.temperature !== undefined) {
     body.temperature = options.temperature;
   }
+  // Optional OpenAI-compatible function/tool-calling passthrough
+  // (configuration-ready for GPT-6 Astra or any future model that supports
+  // it via this same /v1/chat/completions endpoint — standard Chat
+  // Completions tool-calling, NOT the separate Responses-API computer-use/
+  // browser tool, which this endpoint does not expose). Purely additive:
+  // untouched unless a caller explicitly passes options.tools, so every
+  // existing call site (which never does) is byte-for-byte unaffected.
+  if (Array.isArray(options.tools) && options.tools.length) {
+    body.tools = options.tools;
+    if (options.tool_choice !== undefined) body.tool_choice = options.tool_choice;
+  }
+  // web_search_options passthrough (Research Production Sprint — Real
+  // Retrieval) — AIMLAPI's native web-search models (confirmed via their
+  // docs: perplexity/sonar, perplexity/sonar-pro, gpt-4o-search-preview,
+  // gpt-4o-mini-search-preview, and a few others — verified NOT to include
+  // openai/gpt-6-astra) return grounding automatically for a plain chat
+  // completion; this option is only forwarded when a caller explicitly
+  // sets it, so every other call site is unaffected.
+  if (options.web_search_options !== undefined) {
+    body.web_search_options = options.web_search_options;
+  }
 
   const masked = _readRaw().slice(0, 5) + '[...]';
   console.log('[AIML/txt] → POST /v1/chat/completions | model:', model, '| key prefix:', masked);
 
   const data = await _request('POST', '/v1/chat/completions', body);
-  return data?.choices?.[0]?.message?.content || '';
+  // options.returnFull: the entire raw response body, needed for
+  // web-search-native models — citations/search_results (real source
+  // metadata: title/url/date) come back as TOP-LEVEL siblings of
+  // `choices`, not nested inside message, so returnMessage alone can't
+  // see them. Additive — only returned when a caller explicitly opts in.
+  if (options.returnFull) return data || {};
+  const message = data?.choices?.[0]?.message || {};
+  // options.returnMessage: opt-in full message object (content + tool_calls)
+  // for callers that need to see whether the model asked to call a tool.
+  // Default stays a plain string — identical to every existing call site.
+  return options.returnMessage ? message : (message.content || '');
 }
 
 // ── Text + Vision ─────────────────────────────────────────────
@@ -342,6 +373,99 @@ async function generateImage(prompt, options = {}) {
 
   if (!urls.length) throw new Error('AIML API returned no image URLs for model ' + model + '.');
   return urls;
+}
+
+// ── Image editing (image-to-image) via AIML proxy ──────────────
+// Calls /v1/images/edits — takes a real source image (not just a text
+// prompt) so the model edits/reinterprets it rather than inventing a
+// new image from scratch. Used for the business icon's "3D" transform:
+// the user's own uploaded logo goes in, a dimensional reinterpretation
+// of the SAME mark comes out.
+//
+// This is a genuinely different wire format from generateImage() above:
+// OpenAI-compatible /images/edits is multipart/form-data (a real file
+// upload), not a JSON body, so it needs its own minimal request helper
+// rather than reusing _request(). Everything else — base URL, auth,
+// retry/backoff, error shaping — is shared with the rest of this file.
+
+async function _requestForm(path, form) {
+  const key = _key();
+  const url = `${AIML_BASE}${path}`;
+  // Deliberately no Content-Type header: fetch sets
+  // "multipart/form-data; boundary=..." itself from the FormData body,
+  // and hand-setting it here would drop the boundary and break the request.
+  const opts = { method: 'POST', headers: { 'Authorization': `Bearer ${key}` }, body: form };
+
+  const masked = _readRaw().slice(0, 5) + '[...]';
+  console.log('[AIML/img-edit] → POST', path, '| key prefix:', masked);
+
+  await _acquireSlot();
+  try {
+    let lastErr;
+    for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+      let response;
+      try {
+        response = await fetch(url, opts);
+      } catch (netErr) {
+        lastErr = new Error(`AIML API network error: ${netErr.message}`);
+        lastErr.retryable = true;
+        if (attempt < MAX_ATTEMPTS) { await _sleep(_retryDelay(attempt)); continue; }
+        throw lastErr;
+      }
+
+      let data;
+      try {
+        data = await response.json();
+      } catch (_) {
+        const text = await response.text().catch(() => '(empty)');
+        lastErr = new Error(`AIML API non-JSON (HTTP ${response.status}): ${text.slice(0, 300)}`);
+        lastErr.status = response.status;
+        lastErr.retryable = RETRYABLE_STATUS.has(response.status);
+        if (lastErr.retryable && attempt < MAX_ATTEMPTS) { await _sleep(_retryDelay(attempt, response.headers.get('retry-after'))); continue; }
+        throw lastErr;
+      }
+
+      if (response.ok) return data;
+
+      lastErr = new Error(_friendlyError(data, response.status));
+      lastErr.status = response.status;
+      lastErr.retryable = RETRYABLE_STATUS.has(response.status);
+      if (lastErr.retryable && attempt < MAX_ATTEMPTS) { await _sleep(_retryDelay(attempt, response.headers.get('retry-after'))); continue; }
+      throw lastErr;
+    }
+    throw lastErr;
+  } finally {
+    _releaseSlot();
+  }
+}
+
+// imageBuffer: Buffer of the source image bytes. mimeType: e.g. 'image/png'.
+// options: { model, size }
+// Returns: string (a directly usable image URL, or a data: URI if the
+// provider only returns base64 — callers should never have to care which).
+
+async function editImage(imageBuffer, mimeType, prompt, options = {}) {
+  const model = options.model || 'gpt-image-1';
+  const size  = options.size || '1024x1024';
+
+  const form = new FormData();
+  form.append('model', model);
+  form.append('prompt', prompt);
+  form.append('size', size);
+  const ext = (mimeType || 'image/png').split('/')[1] || 'png';
+  form.append('image', new Blob([imageBuffer], { type: mimeType || 'image/png' }), `source.${ext}`);
+
+  console.log('[AIML/img-edit] model:', model, '| size:', size, '| source bytes:', imageBuffer.length);
+  console.log('[AIML/img-edit]   prompt:', prompt.slice(0, 150));
+
+  const data = await _requestForm('/v1/images/edits', form);
+  console.log('[AIML/img-edit] ← response keys:', Object.keys(data || {}).join(', '));
+
+  const item = (data?.data || [])[0];
+  if (!item) throw new Error('AIML API returned no image for model ' + model + '.');
+  if (item.url) return item.url;
+  if (item.b64_json) return `data:image/png;base64,${item.b64_json}`;
+  throw new Error('AIML API returned an image in an unrecognized format.');
 }
 
 // ── Kling duration validator ──────────────────────────────────
@@ -459,6 +583,7 @@ module.exports = {
   generateText,
   generateTextWithVision,
   generateImage,
+  editImage,
   generateVideo,
   generateVideoFromImage,
   getVideoStatus,
