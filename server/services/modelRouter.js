@@ -16,7 +16,20 @@ const MODELS = {
   aiml: {
     text:  'claude-opus-4-8',                     // copy, campaigns, brand, scripts, prompts
     code:  'Qwen3-Coder-480B-A35B-Instruct',      // web pages, HTML/CSS, structured output
-    image: 'gpt-image-1',                         // all image generation via AIML proxy
+    // GPT Image 2.5 Sunburst (production image model) — identifier
+    // confirmed directly from AIML API's own "All Model IDs" documentation
+    // (docs.aimlapi.com/api-references/model-database and the model's own
+    // doc page, docs.aimlapi.com/api-references/image-models/openai/
+    // gpt-image-2.5-sunburst), NOT guessed from the Playground display
+    // name. Generation: POST /v1/images/generations, same endpoint/auth/
+    // OpenAI-compatible body shape already used below. Edit (image-to-
+    // image): POST /v1/images/edits, same as the previous model. Verified
+    // supported sizes are exactly {auto, 1024x1024, 1024x1536, 1536x1024}
+    // — identical to the three values _RATIO_TO_SIZE below already
+    // produces for 1:1/16:9/9:16, so no aspect-ratio mapping changed.
+    // Verified n must be 1 for generation, matching every existing caller
+    // (none ever requests more than one image).
+    image: 'openai/gpt-image-2.5-sunburst',       // all image generation via AIML proxy
     video: 'kling-video/v1.6/pro/text-to-video',  // video ads, motion graphics, UGC
 
     // GPT-6 Astra (configuration-ready, NOT active) — confirmed identifier

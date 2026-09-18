@@ -3748,7 +3748,7 @@ app.get('/api/motion-graphics/status/:generationId', async (req, res) => {
 });
 
 // â”€â”€ POST /api/product-shoots/generate â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-// Professional product photography via gpt-image-1 (same stack as Visuals/Logos).
+// Professional product photography via GPT Image 2.5 Sunburst (same stack as Visuals/Logos).
 // Anthropic builds the photography prompt from product + style + goal.
 app.post('/api/product-shoots/generate', requireSubIfAuthed, async (req, res) => {
   const user = await getUserFromToken(req);
@@ -3798,7 +3798,7 @@ app.post('/api/product-shoots/generate', requireSubIfAuthed, async (req, res) =>
   } else {
     try {
       const system = `You are a professional product photographer and creative director.
-Write a single image generation prompt for gpt-image-1 to create commercial product photography.
+Write a single image generation prompt for a professional AI image-generation model to create commercial product photography.
 The image must look like a real photograph â€” not a render, illustration, or CGI.
 Include: lighting setup, camera angle, depth of field, surface, and background.
 Keep the product as the clear hero of the frame.

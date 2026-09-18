@@ -339,7 +339,12 @@ async function generateTextWithVision(system, user, imageDataUrl, options = {}) 
 
 // ── Image generation via AIML proxy ──────────────────────────
 // Calls /v1/images/generations on AIML using AIML_API_KEY.
-// Uses OpenAI-compatible body format (size, n) since AIML proxies gpt-image-1.
+// Uses OpenAI-compatible body format (size, n) — AIML proxies several
+// OpenAI-compatible image models this way (production default is
+// GPT Image 2.5 Sunburst, set centrally in services/modelRouter.js;
+// options.model always arrives already populated from there for every
+// real call site — the 'gpt-image-1' literal below is only a defensive
+// fallback for a call that omits options.model entirely).
 // options: { model, aspect_ratio, size, n }
 // Returns: string[]  (array of image URLs)
 
