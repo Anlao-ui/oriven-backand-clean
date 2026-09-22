@@ -4000,6 +4000,83 @@ app.post('/api/creative/campaign-suite', requireSubIfAuthed, async (req, res) =>
   }
 });
 
+// â”€â”€ Manual Campaigns â€” creative upload â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// Supports "Add existing campaign" (Campaigns hub, app.html): a user
+// manually adds an advertisement they already run outside Oriven and
+// uploads its real creative. No AI call, no credit charge â€” this is a
+// deterministic file upload, not a generation route, so it deliberately
+// does not go through creditManager or any AIML provider call. The
+// campaign RECORD itself needs no new table â€” it lives in the same
+// client-side localStorage array (_campaigns[]) every OrivenAI-generated
+// campaign already uses; this endpoint exists only because the actual
+// creative FILE can't safely live in localStorage (browser storage-quota
+// risk). See docs/migrations/2026-09-manual-campaigns-creative-bucket.sql
+// for the bucket this writes to and why it's public-read/service-role-write.
+const MANUAL_CREATIVE_BUCKET     = 'manual-campaign-creatives';
+const MANUAL_CREATIVE_MIME_EXT   = {
+  'image/jpeg': 'jpg', 'image/png': 'png', 'image/webp': 'webp', 'image/gif': 'gif',
+  'video/mp4': 'mp4', 'video/quicktime': 'mov', 'video/webm': 'webm',
+};
+// Video cap (12MB) is sized to fit safely inside the existing global
+// express.json({ limit: '20mb' }) body parser (base64 adds ~33% overhead,
+// so 12MB raw is ~16MB encoded) â€” deliberately NOT raising that global
+// limit or adding multer/streaming upload infrastructure for this one
+// route; if a real video-upload need outgrows this, that's a separate,
+// bigger infrastructure decision, not something to smuggle in here.
+const MANUAL_CREATIVE_MAX_BYTES  = { image: 8 * 1024 * 1024, video: 12 * 1024 * 1024 };
+
+app.post('/api/manual-campaigns/upload-creative', async (req, res) => {
+  try {
+    const user = await getUserFromToken(req);
+    if (!user) return res.status(401).json({ error: 'Authentication required' });
+
+    const { dataUrl } = req.body || {};
+    if (!dataUrl || typeof dataUrl !== 'string') return res.status(400).json({ error: 'No file provided.' });
+
+    const match = dataUrl.match(/^data:([a-zA-Z0-9.+/-]+);base64,(.+)$/s);
+    if (!match) return res.status(400).json({ error: 'That file could not be read. Please try a different file.' });
+
+    const mimeType = match[1].toLowerCase();
+    const ext = MANUAL_CREATIVE_MIME_EXT[mimeType];
+    if (!ext) return res.status(400).json({ error: 'Unsupported file type. Use JPG, PNG, WEBP or GIF for images, or MP4, MOV or WEBM for video.' });
+
+    let buffer;
+    try { buffer = Buffer.from(match[2], 'base64'); } catch (_) { return res.status(400).json({ error: 'That file could not be read. Please try a different file.' }); }
+    if (!buffer.length) return res.status(400).json({ error: 'That file appears to be empty.' });
+
+    const isVideo  = mimeType.startsWith('video/');
+    const maxBytes = isVideo ? MANUAL_CREATIVE_MAX_BYTES.video : MANUAL_CREATIVE_MAX_BYTES.image;
+    if (buffer.length > maxBytes) {
+      return res.status(400).json({ error: `File is too large. Please use a file under ${Math.round(maxBytes / (1024 * 1024))}MB for ${isVideo ? 'video' : 'images'}.` });
+    }
+
+    const path = `${user.id}/${crypto.randomUUID()}.${ext}`;
+    const { error: uploadErr } = await supabaseAdmin.storage
+      .from(MANUAL_CREATIVE_BUCKET)
+      .upload(path, buffer, { contentType: mimeType, upsert: false });
+    if (uploadErr) {
+      console.error('[manual-campaigns/upload-creative] storage error:', uploadErr.message);
+      return res.status(502).json({ error: 'Could not upload that file right now. Please try again.' });
+    }
+
+    const { data: pub } = supabaseAdmin.storage.from(MANUAL_CREATIVE_BUCKET).getPublicUrl(path);
+    const url = pub && pub.publicUrl;
+    if (!url) return res.status(502).json({ error: 'Upload succeeded but no file URL was returned. Please try again.' });
+
+    _recordCreativeAsset(user.id, {
+      kind: isVideo ? 'manual_video' : 'manual_image',
+      title: 'Manually added campaign creative',
+      content: { url },
+      source_route: '/api/manual-campaigns/upload-creative',
+    });
+
+    res.json({ url });
+  } catch (err) {
+    console.error('[manual-campaigns/upload-creative]', err.message);
+    res.status(500).json({ error: 'Could not upload that file right now. Please try again.' });
+  }
+});
+
 // â”€â”€ Asset Library (Epic 10, extended V8 Phase 2 Epics 8/9) â”€â”€ the first
 // real persistent storage for generated creative in this codebase. Every
 // generator route writes here via _recordCreativeAsset (fire-and-forget).
