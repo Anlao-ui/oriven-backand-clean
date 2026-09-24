@@ -4077,6 +4077,351 @@ app.post('/api/manual-campaigns/upload-creative', async (req, res) => {
   }
 });
 
+// ══════════════════════════════════════════════════════════════════════
+// Durable Campaigns (Task 3 Part 2) — the first server-side, cross-device
+// persistent representation of an OrivenAI campaign. Depends on the
+// `campaigns` table created by docs/migrations/2026-09-campaigns-durable-
+// persistence.sql, which has NOT been applied to the live Supabase project
+// as of writing this (no DDL-execution mechanism exists in this
+// environment — verified, not assumed). Every route below therefore fails
+// closed with a clean DB_UNAVAILABLE error (same honest pattern already
+// used by the pre-existing autopilot_recommendations routes) until a human
+// runs that migration — it never silently no-ops or fabricates success.
+//
+// Design: this does NOT replace the Campaigns page's own live provider
+// reads (unchanged, still the authoritative source for real performance).
+// This table is OrivenAI's own workflow memory — drafts, launch mapping,
+// manually-tracked campaigns, and a normalized copy of imported campaigns —
+// exactly the scope the Task 3 audit identified as missing.
+//
+// Every route enforces ownership server-side via .eq('user_id', user.id)
+// on every read/write — supabaseAdmin (service-role) bypasses RLS, so the
+// RLS policies in the migration are defense-in-depth only, never the real
+// enforcement boundary, matching this codebase's own documented convention.
+// ══════════════════════════════════════════════════════════════════════
+
+const CAMPAIGN_SOURCES = ['oriven_generated', 'platform_imported', 'manual'];
+const CAMPAIGN_STATUSES = ['draft', 'ready', 'published', 'paused', 'active', 'archived', 'failed'];
+
+// The frontend's real local campaign objects use a richer/older status
+// vocabulary than this table's own enum (confirmed by grepping app.html
+// for every literal status string actually assigned to a campaign object:
+// 'generated', 'ready-to-publish', 'publishing', 'draft', 'published',
+// 'active', 'paused', 'archived', 'failed') — normalizing here (lenient)
+// rather than rejecting unknown-but-real local values keeps this route
+// usable by the existing frontend without requiring every local status
+// string to be renamed just to match a new backend enum.
+const CAMPAIGN_STATUS_ALIASES = { generated: 'draft', 'ready-to-publish': 'ready', publishing: 'ready' };
+function _normalizeCampaignStatus(raw) {
+  if (CAMPAIGN_STATUSES.includes(raw)) return raw;
+  if (raw && CAMPAIGN_STATUS_ALIASES[raw]) return CAMPAIGN_STATUS_ALIASES[raw];
+  return 'draft';
+}
+
+function _campaignDbUnavailable(err, res, action) {
+  const code = _looksLikeRawDbError(err.message) ? 'DB_UNAVAILABLE' : 'UNKNOWN_ERROR';
+  console.error('[campaigns/' + action + ']', err.message);
+  const msg = code === 'DB_UNAVAILABLE'
+    ? 'Durable campaign storage isn\'t set up yet on this server. Your data is safe in this browser — nothing was lost.'
+    : 'Could not ' + action + ' right now. Please try again.';
+  res.status(code === 'DB_UNAVAILABLE' ? 503 : 500).json({ error: msg, code });
+}
+
+// List — filters mirror the localStorage-era filtering Dashboard/Launch
+// already do client-side (status/source/platform), just server-side now.
+app.get('/api/campaigns', async (req, res) => {
+  try {
+    const user = await getUserFromToken(req);
+    if (!user) return res.status(401).json({ error: 'Authentication required' });
+    const { status, source, platform, limit } = req.query || {};
+    let q = supabaseAdmin.from('campaigns').select('*').eq('user_id', user.id);
+    if (status && CAMPAIGN_STATUSES.includes(status)) q = q.eq('status', status);
+    if (source && CAMPAIGN_SOURCES.includes(source)) q = q.eq('source', source);
+    if (platform) q = q.eq('platform', platform);
+    q = q.order('updated_at', { ascending: false }).limit(Math.min(parseInt(limit, 10) || 200, 500));
+    const { data, error } = await q;
+    if (error) throw error;
+    res.json({ campaigns: data || [] });
+  } catch (err) { _campaignDbUnavailable(err, res, 'load your campaigns'); }
+});
+
+app.get('/api/campaigns/:id', async (req, res) => {
+  try {
+    const user = await getUserFromToken(req);
+    if (!user) return res.status(401).json({ error: 'Authentication required' });
+    const { data, error } = await supabaseAdmin.from('campaigns').select('*').eq('id', req.params.id).eq('user_id', user.id).maybeSingle();
+    if (error) throw error;
+    if (!data) return res.status(404).json({ error: 'Campaign not found.' });
+    res.json({ campaign: data });
+  } catch (err) { _campaignDbUnavailable(err, res, 'load that campaign'); }
+});
+
+// Create-or-update — the single write path for: Create saving a generated
+// draft, the manual "Add existing campaign" flow, and Launch recording a
+// real publish result. All three are semantically "save/update MY OWN
+// campaign record"; client_ref_id (the same id window._orvStoreCampaign
+// already assigns locally) is the idempotency key, matching the `campaigns`
+// table's UNIQUE(user_id, client_ref_id) constraint — calling this twice
+// with the same client_ref_id updates the same row rather than duplicating
+// it, which is what makes the localStorage migration route (below) and a
+// retried Launch-confirmation call both safe to repeat.
+app.post('/api/campaigns', async (req, res) => {
+  try {
+    const user = await getUserFromToken(req);
+    if (!user) return res.status(401).json({ error: 'Authentication required' });
+    const b = req.body || {};
+    if (!b.client_ref_id || typeof b.client_ref_id !== 'string') return res.status(400).json({ error: 'client_ref_id is required.' });
+    if (!b.source || !CAMPAIGN_SOURCES.includes(b.source)) return res.status(400).json({ error: 'source must be one of: ' + CAMPAIGN_SOURCES.join(', ') });
+    if (!b.name || typeof b.name !== 'string') return res.status(400).json({ error: 'name is required.' });
+
+    // Ownership on the pre-check: if a row with this client_ref_id already
+    // exists, it MUST belong to this user — .eq('user_id', user.id) below
+    // means a foreign client_ref_id simply won't match (404-equivalent:
+    // upsert then creates a NEW row instead of ever touching someone
+    // else's, since Postgres upsert-on-conflict only fires within the
+    // actual unique index, which is itself (user_id, client_ref_id) — a
+    // different user_id can never collide with another user's row here).
+    const row = {
+      user_id: user.id,
+      client_ref_id: b.client_ref_id,
+      source: b.source,
+      name: b.name,
+      status: _normalizeCampaignStatus(b.status),
+      platform: b.platform || null,
+      objective: b.objective || null,
+      budget_amount: (b.budget_amount === undefined || b.budget_amount === null) ? null : Number(b.budget_amount),
+      budget_currency: b.budget_currency || null,
+      external_account_id: b.external_account_id || null,
+      external_campaign_id: b.external_campaign_id || null,
+      external_ad_set_ids: b.external_ad_set_ids || null,
+      external_ad_ids: b.external_ad_ids || null,
+      package: b.package || null,
+      updated_at: new Date().toISOString(),
+    };
+    const { data, error } = await supabaseAdmin
+      .from('campaigns')
+      .upsert(row, { onConflict: 'user_id,client_ref_id' })
+      .select()
+      .maybeSingle();
+    if (error) throw error;
+    res.json({ campaign: data });
+  } catch (err) { _campaignDbUnavailable(err, res, 'save that campaign'); }
+});
+
+app.patch('/api/campaigns/:id', async (req, res) => {
+  try {
+    const user = await getUserFromToken(req);
+    if (!user) return res.status(401).json({ error: 'Authentication required' });
+    const b = req.body || {};
+    const patch = { updated_at: new Date().toISOString() };
+    ['name', 'objective', 'budget_amount', 'budget_currency', 'package'].forEach(k => {
+      if (b[k] !== undefined) patch[k] = b[k];
+    });
+    if (b.status !== undefined) patch.status = _normalizeCampaignStatus(b.status);
+    const { data, error } = await supabaseAdmin.from('campaigns').update(patch).eq('id', req.params.id).eq('user_id', user.id).select().maybeSingle();
+    if (error) throw error;
+    if (!data) return res.status(404).json({ error: 'Campaign not found.' });
+    res.json({ campaign: data });
+  } catch (err) { _campaignDbUnavailable(err, res, 'update that campaign'); }
+});
+
+// Soft-delete only — never touches the real provider campaign (this row is
+// OrivenAI's own record of it, not the campaign itself). Real platform
+// deletion, where supported, already exists as its own per-platform route
+// and is untouched by this.
+app.delete('/api/campaigns/:id', async (req, res) => {
+  try {
+    const user = await getUserFromToken(req);
+    if (!user) return res.status(401).json({ error: 'Authentication required' });
+    const { data, error } = await supabaseAdmin.from('campaigns').update({ status: 'archived', updated_at: new Date().toISOString() }).eq('id', req.params.id).eq('user_id', user.id).select().maybeSingle();
+    if (error) throw error;
+    if (!data) return res.status(404).json({ error: 'Campaign not found.' });
+    res.json({ ok: true, campaign: data });
+  } catch (err) { _campaignDbUnavailable(err, res, 'archive that campaign'); }
+});
+
+// ── Platform import/sync ───────────────────────────────────────────────
+// Reuses the EXISTING, already-battle-tested campaign-read logic for each
+// platform (_getGadsAccess/_gadsQuery, _getMetaAccess/_metaFetch,
+// _getTikTokAccess/_tiktokFetch, _getPinterestAccess/_pinterestApiRequest)
+// — no new provider HTTP client code. Normalizes into the durable shape and
+// upserts on UNIQUE(user_id, platform, external_account_id,
+// external_campaign_id), so repeated syncs update existing rows instead of
+// duplicating them, and two different connected accounts on the same
+// platform can never collide even if their campaign IDs happen to match.
+// A sync failure never deletes/zeroes existing rows — see the catch below.
+async function _syncGoogleCampaigns(user) {
+  const { accessToken, customerId, loginCustomerId, activeAccount } = await _getGadsAccess(user);
+  const results = await _gadsQuery(accessToken, customerId, [
+    'SELECT campaign.id, campaign.name, campaign.status, campaign.advertising_channel_type,',
+    'campaign_budget.amount_micros',
+    'FROM campaign', "WHERE campaign.status != 'REMOVED'", 'ORDER BY campaign.id DESC', 'LIMIT 200'
+  ].join(' '), loginCustomerId);
+  const currency = (activeAccount && activeAccount.currency) || 'USD';
+  return results.map(r => {
+    const c = r.campaign || {}, cb = r.campaignBudget || {};
+    return {
+      external_account_id: String(customerId),
+      external_campaign_id: String(c.id || ''),
+      name: c.name || 'Unnamed',
+      status: (c.status || 'UNKNOWN').toLowerCase(),
+      objective: c.advertisingChannelType || null,
+      budget_amount: cb.amountMicros ? Number(cb.amountMicros) / 1e6 : null,
+      budget_currency: currency,
+    };
+  }).filter(c => c.external_campaign_id);
+}
+
+async function _syncMetaCampaigns(user) {
+  const { accessToken, accountId } = await _getMetaAccess(user);
+  let currency = null;
+  try {
+    const acct = await _metaFetch('/' + accountId, accessToken, { fields: 'currency' });
+    currency = acct && acct.currency || null;
+  } catch (_) { /* honest null if the lookup fails — never guessed */ }
+  const campData = await _metaFetch('/' + accountId + '/campaigns', accessToken, {
+    fields: 'id,name,status,objective,daily_budget,lifetime_budget', limit: '200',
+    effective_status: '["ACTIVE","PAUSED","ARCHIVED"]'
+  });
+  return (campData.data || []).map(c => ({
+    external_account_id: accountId,
+    external_campaign_id: String(c.id),
+    name: c.name || 'Unnamed',
+    status: (c.status || 'UNKNOWN').toLowerCase(),
+    objective: c.objective || null,
+    budget_amount: c.daily_budget ? parseInt(c.daily_budget, 10) / 100 : (c.lifetime_budget ? parseInt(c.lifetime_budget, 10) / 100 : null),
+    budget_currency: currency,
+  })).filter(c => c.external_campaign_id);
+}
+
+async function _syncTikTokCampaigns(user) {
+  const { accessToken, advertiserId } = await _getTikTokAccess(user);
+  const data = await _tiktokFetch('/campaign/get/', accessToken, {
+    advertiser_id: advertiserId,
+    fields: JSON.stringify(['campaign_id', 'campaign_name', 'status', 'operation_status', 'objective_type', 'budget']),
+    page_size: '200'
+  });
+  return ((data && data.list) || []).map(c => ({
+    external_account_id: advertiserId,
+    external_campaign_id: String(c.campaign_id),
+    name: c.campaign_name || 'Unnamed',
+    status: (c.operation_status || c.status || 'UNKNOWN').toLowerCase(),
+    objective: c.objective_type || null,
+    budget_amount: c.budget != null ? Number(c.budget) : null,
+    budget_currency: null, // not resolvable from _getTikTokAccess today — honest null, never guessed
+  })).filter(c => c.external_campaign_id);
+}
+
+async function _syncPinterestCampaigns(user) {
+  const { accessToken, adAccountId, activeAccount } = await _getPinterestAccess(user);
+  const data = await _pinterestApiRequest(accessToken, 'GET', '/ad_accounts/' + adAccountId + '/campaigns?page_size=200');
+  const currency = (activeAccount && activeAccount.currency) || 'USD';
+  return (data.items || []).map(c => ({
+    external_account_id: adAccountId,
+    external_campaign_id: String(c.id || ''),
+    name: c.name || 'Unnamed',
+    status: (c.status || 'UNKNOWN').toLowerCase(),
+    objective: c.objective_type || null,
+    // daily_spend_cap is micro-currency (confirmed against the existing
+    // Pinterest publish route's own conversion, same 1e6 unit family as
+    // Google's micros — not a fresh guess).
+    budget_amount: c.daily_spend_cap != null ? Number(c.daily_spend_cap) / 1e6 : (c.lifetime_spend_cap != null ? Number(c.lifetime_spend_cap) / 1e6 : null),
+    budget_currency: currency,
+  })).filter(c => c.external_campaign_id);
+}
+
+const CAMPAIGN_SYNC_FN = { google: _syncGoogleCampaigns, meta: _syncMetaCampaigns, tiktok: _syncTikTokCampaigns, pinterest: _syncPinterestCampaigns };
+
+app.post('/api/campaigns/sync/:platform', async (req, res) => {
+  const platform = req.params.platform;
+  try {
+    const user = await getUserFromToken(req);
+    if (!user) return res.status(401).json({ error: 'Authentication required' });
+    const syncFn = CAMPAIGN_SYNC_FN[platform];
+    if (!syncFn) return res.status(400).json({ error: 'Unknown or unsupported platform: ' + platform });
+
+    let normalized;
+    try {
+      normalized = await syncFn(user);
+    } catch (providerErr) {
+      // Sync failure MUST NOT touch existing rows — just report it and
+      // stop. No zeroing, no deleting, no marking anything stale here.
+      console.error('[campaigns/sync/' + platform + '] provider fetch failed:', providerErr.message);
+      return res.status(providerErr.status || 502).json({ error: providerErr.message || 'Could not fetch campaigns from ' + platform + ' right now.' });
+    }
+
+    const now = new Date().toISOString();
+    const rows = normalized.map(c => Object.assign({
+      user_id: user.id, source: 'platform_imported', platform, synced_at: now, updated_at: now,
+    }, c));
+
+    let upserted = [];
+    if (rows.length) {
+      const { data, error } = await supabaseAdmin
+        .from('campaigns')
+        .upsert(rows, { onConflict: 'user_id,platform,external_account_id,external_campaign_id' })
+        .select();
+      if (error) throw error;
+      upserted = data || [];
+    }
+    // Never delete a row just because this sync response omitted it — a
+    // campaign the provider didn't return this time (pagination, transient
+    // filter, momentary API hiccup) keeps its last known valid state.
+    res.json({ ok: true, synced: upserted.length, campaigns: upserted, synced_at: now });
+  } catch (err) { _campaignDbUnavailable(err, res, 'sync ' + platform + ' campaigns'); }
+});
+
+// ── localStorage → server migration ────────────────────────────────────
+// Takes the CALLING USER's own already-loaded localStorage campaign array
+// (the frontend reads it via window._orvGetCampaigns() and posts it here —
+// this route never reaches into browser storage itself, and never accepts
+// records for any user other than the authenticated caller). Idempotent:
+// every record is upserted on (user_id, client_ref_id), so calling this
+// repeatedly with the same local array never creates duplicates. Records
+// missing an id or name are skipped (reported back, not silently dropped
+// and not corrupted) rather than guessed into a shape they don't have.
+app.post('/api/campaigns/migrate-local', async (req, res) => {
+  try {
+    const user = await getUserFromToken(req);
+    if (!user) return res.status(401).json({ error: 'Authentication required' });
+    const records = Array.isArray(req.body && req.body.campaigns) ? req.body.campaigns : null;
+    if (!records) return res.status(400).json({ error: 'campaigns array is required.' });
+    if (records.length > 200) return res.status(400).json({ error: 'Too many records in one migration batch (max 200).' });
+
+    const now = new Date().toISOString();
+    const rows = [], skipped = [];
+    for (const c of records) {
+      if (!c || typeof c !== 'object' || !c.id || !c.name) { skipped.push((c && c.id) || '(no id)'); continue; }
+      const source = c.source === 'manual' ? 'manual' : 'oriven_generated';
+      rows.push({
+        user_id: user.id,
+        client_ref_id: String(c.id),
+        source,
+        platform: c.platform || null,
+        name: c.name,
+        objective: c.goal || null,
+        status: c.status ? _normalizeCampaignStatus(c.status) : (c.platformCampaignId ? 'published' : 'draft'),
+        budget_amount: (c.pkg && c.pkg.strategy && (c.pkg.strategy.dailyBudget || c.pkg.strategy.budget)) || c.manual && c.manual.budget || null,
+        budget_currency: null,
+        external_account_id: null,
+        external_campaign_id: c.platformCampaignId ? String(c.platformCampaignId) : (c.manual && c.manual.externalIds && c.manual.externalIds.campaignId) || null,
+        external_ad_set_ids: c.platformAdSetId ? [String(c.platformAdSetId)] : null,
+        external_ad_ids: Array.isArray(c.platformAdIds) ? c.platformAdIds.map(String) : null,
+        package: c,  // the whole original local record, preserved as-is — never lossy
+        updated_at: now,
+      });
+    }
+    if (!rows.length) return res.json({ ok: true, migrated: 0, skipped });
+
+    const { data, error } = await supabaseAdmin
+      .from('campaigns')
+      .upsert(rows, { onConflict: 'user_id,client_ref_id' })
+      .select();
+    if (error) throw error;
+    res.json({ ok: true, migrated: (data || []).length, skipped });
+  } catch (err) { _campaignDbUnavailable(err, res, 'migrate your local campaigns'); }
+});
+
 // â”€â”€ Asset Library (Epic 10, extended V8 Phase 2 Epics 8/9) â”€â”€ the first
 // real persistent storage for generated creative in this codebase. Every
 // generator route writes here via _recordCreativeAsset (fire-and-forget).
@@ -4554,7 +4899,14 @@ app.post('/api/autopilot/recommendations/:id/approve', requireAutopilotAccess, a
       if (rec.platform && platformCapabilities.PLATFORMS.includes(rec.platform)) {
         const setupStatus = await setupStateEngine.getSetupStatus(supabaseAdmin, user.id, rec.platform);
         if (!setupStatus.ready) {
-          await supabaseAdmin.from('autopilot_recommendations').update({ status: 'failed', resolved_at: new Date().toISOString() }).eq('id', rec.id);
+          // Task 3 hardening — defense-in-depth: `rec` was already fetched
+          // scoped to this user (.eq('id', ...).eq('user_id', user.id))
+          // above, so this was never exploitable, but the .update() calls
+          // in this handler didn't independently re-assert ownership —
+          // a future refactor that reordered/removed that earlier select
+          // could silently reopen a cross-user write. Chaining .eq('user_id', ...)
+          // here too costs nothing and removes the dependency on call order.
+          await supabaseAdmin.from('autopilot_recommendations').update({ status: 'failed', resolved_at: new Date().toISOString() }).eq('id', rec.id).eq('user_id', user.id);
           return res.status(400).json({
             error: `${rec.platform[0].toUpperCase() + rec.platform.slice(1)} Ads setup isn't finished — Autopilot can't act on it yet. Finish setup in Connections first.`,
             code: 'ACCOUNT_REQUIRED',
@@ -4565,7 +4917,7 @@ app.post('/api/autopilot/recommendations/:id/approve', requireAutopilotAccess, a
       execResult = await toolRouter.executeDirect(rec.tool_name, rec.tool_params || {}, ctx);
     }
     const newStatus = execResult.ok ? 'executed' : 'failed';
-    await supabaseAdmin.from('autopilot_recommendations').update({ status: newStatus, resolved_at: new Date().toISOString() }).eq('id', rec.id);
+    await supabaseAdmin.from('autopilot_recommendations').update({ status: newStatus, resolved_at: new Date().toISOString() }).eq('id', rec.id).eq('user_id', user.id);
     await _nudgeRelatedLearning(user.id, rec, 5);
 
     // "Approve & Remember" â€” only for the same purely generative action
@@ -4606,7 +4958,7 @@ app.post('/api/autopilot/recommendations/:id/reject', requireAutopilotAccess, as
     const { data: rec } = await supabaseAdmin.from('autopilot_recommendations').select('*').eq('id', req.params.id).eq('user_id', user.id).maybeSingle();
     if (!rec) return res.status(404).json({ error: 'Recommendation not found.' });
     if (rec.status !== 'suggested') return res.status(400).json({ error: `Already ${rec.status}.` });
-    await supabaseAdmin.from('autopilot_recommendations').update({ status: 'rejected', resolved_at: new Date().toISOString() }).eq('id', rec.id);
+    await supabaseAdmin.from('autopilot_recommendations').update({ status: 'rejected', resolved_at: new Date().toISOString() }).eq('id', rec.id).eq('user_id', user.id);
     await _nudgeRelatedLearning(user.id, rec, -10);
     res.json({ ok: true, status: 'rejected' });
   } catch (err) {
@@ -7775,6 +8127,29 @@ app.post('/api/publish/meta', requireSubOrFreeStrict, async (req, res) => {
     // accountId from _getMetaAccess is already normalised to exactly one 'act_' prefix.
     console.log('[publish/meta] account:', accountId, '| page:', pageId);
 
+    // Budget (Task 3 fix) — the ad set payload below previously hardcoded
+    // daily_budget:1000 (Meta minor units, i.e. a flat $10.00/day) regardless
+    // of what the user actually configured on Create/Launch, silently
+    // overriding every real budget. m.budget / s.dailyBudget / s.budget is
+    // the exact same field precedence the frontend itself already uses to
+    // read this package's budget back for display (see the review UI's own
+    // `m.budget || s.dailyBudget || s.budget` convention) and mirrors the
+    // sibling TikTok publish route directly above this one (tik.budget ||
+    // s.dailyBudget || s.budget || 30, same parse/floor pattern) for
+    // consistency between the two platforms' publish routes.
+    // Meta's daily_budget is documented in the ad account's currency's
+    // MINOR unit (e.g. cents for USD/EUR) -- the existing budget-EDIT route
+    // elsewhere in this file (PATCH /api/meta/campaign/:id) already assumes
+    // a 2-decimal currency and multiplies by 100 with the same "Meta
+    // daily_budget is in cents" comment; mirrored here for consistency.
+    // True per-currency (e.g. zero-decimal JPY) conversion doesn't exist
+    // anywhere in this codebase yet -- not introduced here, just not fixed
+    // here either, since it's a separate, currency-detection-dependent gap.
+    const rawBudgetMeta = m.budget || s.dailyBudget || s.budget || 30;
+    const dailyBudgetMajor = Math.max(1, parseFloat(String(rawBudgetMeta).replace(/[^0-9.]/g, '')) || 30);
+    const dailyBudgetMinorUnits = Math.round(dailyBudgetMajor * 100);
+    console.log('[publish/meta] configured daily budget:', dailyBudgetMajor, '-> minor units:', dailyBudgetMinorUnits);
+
     // Destination URL -- same fallback chain / placeholder pattern as
     // /api/publish/google's finalUrls, for consistency across platforms.
     const destinationUrl = (function() {
@@ -7820,7 +8195,7 @@ app.post('/api/publish/meta', requireSubOrFreeStrict, async (req, res) => {
         name: campaignName + (adSetCount > 1 ? ' Ad Set ' + (i + 1) : ' Ad Set'),
         campaign_id: campaign.id,
         status: 'PAUSED',
-        daily_budget: 1000,
+        daily_budget: dailyBudgetMinorUnits,
         billing_event: adSetConfig.billing_event,
         optimization_goal: adSetConfig.optimization_goal,
         bid_strategy: 'LOWEST_COST_WITHOUT_CAP',
