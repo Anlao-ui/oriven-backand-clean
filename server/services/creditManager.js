@@ -153,7 +153,12 @@ const PLAN_INTELLIGENCE_LIMITS = { free: 1, starter: 40, creator: 100, professio
 // real Infinity (no separate monthly cap beyond the credit economy) is
 // unchanged. This is a real, deliberate product-access change, not a
 // copy-only update — see the final report for the full disclosure.
-const PLAN_AUTOPILOT_LIMITS = { free: 0, starter: 0, creator: 0, professional: Infinity };
+// Plan entitlements (V10): Autopilot is part of the full workflow from
+// Starter up (services/planEntitlements.js). Starter and Creator therefore
+// get the same treatment Professional already had -- no separate monthly
+// execution cap; every execution still costs FEATURE_COSTS.autopilot credits
+// (unchanged). Free stays 0 (not included).
+const PLAN_AUTOPILOT_LIMITS = { free: 0, starter: Infinity, creator: Infinity, professional: Infinity };
 
 class InsufficientCreditsError extends Error {
   constructor(cost, balance) {
@@ -243,6 +248,17 @@ async function finalizeCreditLog(reservation, featureKey, info) {
   info = info || {};
   if (!reservation) return;
   _assertInitialized();
+  // model/tokens_in/tokens_out: when the caller didn't pass them, use what
+  // the provider reported for this request's AI calls (services/aiUsage.js).
+  // Informational only -- credits_cost above is still the fixed per-feature
+  // cost; tokens never change what a user is charged.
+  const used = require('./aiUsage').totals();
+  if (used) {
+    if (info.model == null && used.model) info = Object.assign({}, info, { model: used.model });
+    if (info.provider == null && used.provider) info = Object.assign({}, info, { provider: used.provider });
+    if (info.tokensIn == null && used.tokensIn != null) info = Object.assign({}, info, { tokensIn: used.tokensIn });
+    if (info.tokensOut == null && used.tokensOut != null) info = Object.assign({}, info, { tokensOut: used.tokensOut });
+  }
   const { error } = await supabaseAdmin.from('credit_transactions').insert({
     user_id:       reservation.userId,
     feature_key:   featureKey,

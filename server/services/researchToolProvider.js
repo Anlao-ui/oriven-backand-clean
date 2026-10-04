@@ -43,6 +43,7 @@
 
 const aimlProvider = require('../providers/aimlProvider');
 const modelRouter = require('./modelRouter');
+const aiUsage = require('./aiUsage'); // metadata-only [AIUsage] telemetry + prompt guard
 
 const MAX_SEARCH_RESULTS = 8;
 const MAX_QUERY_LEN = 300;
@@ -104,11 +105,16 @@ async function search(query) {
   if (!q) return { ok: false, reason: 'empty_query' };
   try {
     const route = modelRouter.routeTask('research-web-search');
-    const data = await aimlProvider.generateText(
-      'Answer using real web search grounding. Be concise and factual.',
-      q,
-      { model: route.model, max_tokens: 900, returnFull: true }
-    );
+    const sys = 'Answer using real web search grounding. Be concise and factual.';
+    const p = aiUsage.prepareText({ task: 'research-web-search', model: route.model, system: sys, user: q });
+    let data;
+    try {
+      data = await aimlProvider.generateText(p.system, p.user, { model: route.model, max_tokens: 900, returnFull: true });
+    } catch (err) {
+      aiUsage.record({ task: 'research-web-search', model: route.model, promptChars: p.promptChars, success: false, reason: 'provider_error' });
+      throw err;
+    }
+    aiUsage.record({ task: 'research-web-search', model: route.model, data, promptChars: p.promptChars, success: true });
     const message = data && data.choices && data.choices[0] && data.choices[0].message;
     const searchResults = Array.isArray(data && data.search_results) ? data.search_results : [];
     const citations = Array.isArray(data && data.citations) ? data.citations : [];

@@ -25,7 +25,9 @@ const toolRouter = require('./services/toolRouter');
 require('./tools/campaignTools'); // registers Tool Router entries as a side effect
 require('./tools/businessTools'); // V7 Phase 1 — registers remember_business_fact
 require('./tools/adEditTools'); // Ad Editing Workspace — registers edit_ad_copy, update_campaign_budget, update_audience, generate_new_creative, convert_platform, select_concept_variant
-const creditManager = require('./services/creditManager'); // no client of its own -- initialized below, right after supabaseAdmin exists
+const creditManager = require('./services/creditManager');
+const planEntitlements = require('./services/planEntitlements'); // Free/Starter/Creator/Professional capability table (mirrors plans.js) // no client of its own -- initialized below, right after supabaseAdmin exists
+const aiUsage = require('./services/aiUsage'); // prompt sanitizer + size guard + metadata-only AI usage telemetry
 const campaignGoals = require('./services/campaignGoals'); // single source of truth for the 4 campaign goals across every platform
 const platformCapabilities = require('./services/platformCapabilities'); // Universal Advertising Setup Engine, Phase 1 — capability registry (definitional only, no client of its own)
 const setupStateEngine = require('./services/setupStateEngine'); // Universal Advertising Setup Engine, Phase 2 — reads existing `integrations` rows only, makes no external API calls
@@ -73,6 +75,8 @@ const supabaseAdmin = createClient(
 // the whole app, and no risk of it racing dotenv at import time (see
 // services/creditManager.js's init() doc comment for why that mattered).
 creditManager.init(supabaseAdmin);
+// Optional ai_usage_events sink -- only writes when AI_USAGE_DB=true.
+aiUsage.configureDb(supabaseAdmin);
 
 // â”€â”€ Startup sanity checks â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 (function checkEnv() {
@@ -178,6 +182,8 @@ Object.keys(PRICE_IDS).forEach(function (plan) {
   if (priceId) PLAN_BY_PRICE_ID[priceId] = plan;
 });
 
+// Per-request AI usage context (route + user id) for [AIUsage] telemetry.
+app.use(aiUsage.middleware);
 app.use(cors());
 
 // â”€â”€ Static files â€” serve the frontend from the project root â”€â”€â”€â”€
@@ -625,6 +631,7 @@ async function getUserFromToken(req) {
   try {
     const { data, error } = await supabaseAdmin.auth.getUser(token);
     if (error || !data.user) return null;
+    aiUsage.setUser(data.user.id);
     return data.user;
   } catch (_) { return null; }
 }
@@ -838,12 +845,10 @@ async function requireAutopilotAccess(req, res, next) {
     const { data } = await supabaseAdmin
       .from('profiles').select('subscription_status').eq('id', user.id).maybeSingle();
     const status = (data && data.subscription_status) || 'free';
-    const limit = creditManager.PLAN_AUTOPILOT_LIMITS[status] || 0;
-    if (!(limit > 0)) {
-      // Copy corrected to match creditManager.PLAN_AUTOPILOT_LIMITS, the
-      // actual authority here (Creator's limit was later dropped to 0 -- see
-      // creditManager.js -- but this message was never updated to match).
-      return res.status(403).json({ error: 'Autopilot requires the Professional plan.', code: 'AUTOPILOT_NOT_AVAILABLE' });
+    if (!planEntitlements.hasEntitlement(status, 'autopilot')) {
+      // planEntitlements is the authority: Autopilot is part of the full
+      // workflow from Starter up (executions still cost credits).
+      return res.status(403).json({ error: 'Autopilot is available from the Starter plan.', code: 'AUTOPILOT_NOT_AVAILABLE' });
     }
     req.user = user;
     next();
@@ -860,6 +865,36 @@ async function requireAutopilotAccess(req, res, next) {
 // Now applied only to Research's one route. Kept as a named, reusable
 // middleware (mirrors requireAutopilotAccess's exact shape) rather than an
 // inline check, in case a future Creator+-only route needs the same gate.
+// requireEntitlement(key) — authenticated user + their persisted plan must
+// include the capability (services/planEntitlements.js). Runs before any
+// credit reservation, so a plan without the capability is never charged.
+function requireEntitlement(key) {
+  return async function (req, res, next) {
+    const auth = req.headers.authorization || '';
+    if (!auth) return res.status(401).json({ error: 'Authentication required', code: 'AUTH_REQUIRED' });
+    const user = await getUserFromToken(req);
+    if (!user) return res.status(401).json({ error: 'Invalid or expired session', code: 'AUTH_INVALID' });
+    try {
+      const { data } = await supabaseAdmin
+        .from('profiles').select('subscription_status').eq('id', user.id).maybeSingle();
+      const status = (data && data.subscription_status) || 'free';
+      if (!planEntitlements.hasEntitlement(status, key)) {
+        const min = planEntitlements.minPlanFor(key);
+        const label = min ? min.charAt(0).toUpperCase() + min.slice(1) : 'a paid';
+        return res.status(403).json({ error: 'This feature is available from the ' + label + ' plan.', code: 'PLAN_REQUIRED', feature: key, plan: min });
+      }
+      req.user = user;
+      req.subscriptionStatus = status;
+      next();
+    } catch (err) {
+      console.error('[Auth] Entitlement check error (' + key + '):', err.message);
+      return res.status(500).json({ error: 'Could not verify plan access' });
+    }
+  };
+}
+
+// Superseded by requireEntitlement('research') (Research is now included from
+// Starter). Kept, unused, so nothing that still references it breaks.
 async function requireCreatorPlus(req, res, next) {
   const auth = req.headers.authorization || '';
   if (!auth) return res.status(401).json({ error: 'Authentication required', code: 'AUTH_REQUIRED' });
@@ -973,19 +1008,80 @@ function _sizeToRatio(size) {
   return map[size] || '1:1';
 }
 
+// Every text call goes through aiUsage: inline data (data:/base64/blob)
+// is stripped from the prompt, oversized prompts are refused before the
+// provider is called, and one metadata-only [AIUsage] line is logged with
+// the token counts the provider reported (see services/aiUsage.js).
+// The provider is always asked for the full body (returnFull) so usage is
+// visible; callers still get exactly what they asked for (string by
+// default, message object with returnMessage, full body with returnFull).
+function _aimlUnwrap(data, opts) {
+  if (opts.returnFull) return data || {};
+  const message = (data && data.choices && data.choices[0] && data.choices[0].message) || {};
+  return opts.returnMessage ? message : (message.content || '');
+}
+
 async function _aimlText(taskType, system, user, opts = {}) {
   const router = require('./services/modelRouter');
   const route  = router.routeTask(taskType);
   const aiml   = require('./providers/aimlProvider');
-  return aiml.generateText(system, user, { model: route.model, ...opts });
+  const model  = opts.model || route.model;
+  const p = aiUsage.prepareText({ task: taskType, model, system, user });
+  let data;
+  try {
+    data = await aiml.generateText(p.system, p.user, { model: route.model, ...opts, returnFull: true });
+  } catch (err) {
+    aiUsage.record({ task: taskType, model, promptChars: p.promptChars, success: false, reason: 'provider_error' });
+    throw err;
+  }
+  aiUsage.record({ task: taskType, model, data, promptChars: p.promptChars, success: true });
+  return _aimlUnwrap(data, opts);
+}
+
+// Same-input memo for the uncharged, read-only AI narratives (forecast,
+// home briefing, business insights/reflection). These GETs run on page
+// load, so the same user re-opening a page re-paid for an identical prompt.
+// The key is user id + task + model + the exact prompt text, so any change
+// in the underlying data produces a new prompt and a fresh call; only an
+// identical request within the TTL is answered from memory. In-memory,
+// per-process, bounded, nothing persisted, and never used for charged
+// generation or anything without a known user.
+const _AI_MEMO_TTL_MS = 6 * 60 * 60 * 1000;
+const _AI_MEMO_MAX = 500;
+const _aiMemo = new Map();
+async function _aimlTextMemo(taskType, system, user, opts = {}) {
+  const ctx = aiUsage.current();
+  const uid = ctx && ctx.userId;
+  if (!uid) return _aimlText(taskType, system, user, opts);
+  const key = crypto.createHash('sha256').update(JSON.stringify([uid, taskType, opts.model || '', opts.max_tokens || '', system || '', user || ''])).digest('hex');
+  const hit = _aiMemo.get(key);
+  if (hit && hit.expires > Date.now()) {
+    console.log('[AIUsage] ' + JSON.stringify({ ts: new Date().toISOString(), event: 'ai_memo_hit', task: taskType, route: ctx.route || undefined, userId: uid }));
+    return hit.value;
+  }
+  const value = await _aimlText(taskType, system, user, opts);
+  if (typeof value === 'string' && value.trim()) {
+    if (_aiMemo.size >= _AI_MEMO_MAX) _aiMemo.delete(_aiMemo.keys().next().value);
+    _aiMemo.set(key, { value, expires: Date.now() + _AI_MEMO_TTL_MS });
+  }
+  return value;
 }
 
 async function _aimlImage(taskType, prompt, opts = {}) {
   const router = require('./services/modelRouter');
   const route  = router.routeTask(taskType);
   const aiml   = require('./providers/aimlProvider');
+  const model  = opts.model || route.model;
+  const p = aiUsage.prepareText({ task: taskType, model, system: '', user: prompt });
   console.log(`[${taskType}] Provider: AIML | Model: ${route.model} | Endpoint: /v1/images/generations`);
-  const urls = await aiml.generateImage(prompt, { model: route.model, ...opts });
+  let urls;
+  try {
+    urls = await aiml.generateImage(p.user, { model: route.model, ...opts });
+  } catch (err) {
+    aiUsage.record({ task: taskType, model, promptChars: p.promptChars, success: false, reason: 'provider_error' });
+    throw err;
+  }
+  aiUsage.record({ task: taskType, model, promptChars: p.promptChars, success: true });
   return urls[0] || null;
 }
 
@@ -1024,7 +1120,20 @@ async function _aimlVision(taskType, system, user, imageDataUrl, opts = {}) {
   const router = require('./services/modelRouter');
   const route  = router.routeTask(taskType);
   const aiml   = require('./providers/aimlProvider');
-  return aiml.generateTextWithVision(system, user, imageDataUrl, { model: route.model, ...opts });
+  const model  = opts.model || route.model;
+  // The image itself is sent on purpose (as an image part); only the text
+  // instructions are sanitized/size-checked. The vision provider returns
+  // content only, so tokens are logged as not reported.
+  const p = aiUsage.prepareText({ task: taskType, model, system, user });
+  let out;
+  try {
+    out = await aiml.generateTextWithVision(p.system, p.user, imageDataUrl, { model: route.model, ...opts });
+  } catch (err) {
+    aiUsage.record({ task: taskType, model, promptChars: p.promptChars, success: false, reason: 'provider_error' });
+    throw err;
+  }
+  aiUsage.record({ task: taskType, model, promptChars: p.promptChars, success: true });
+  return out;
 }
 
 // Multi-turn chat — messages is a full [{role,content}, ...] array (system + history + latest user turn).
@@ -1032,7 +1141,17 @@ async function _aimlChat(messages, opts = {}) {
   const router = require('./services/modelRouter');
   const route  = router.routeTask('chat');
   const aiml   = require('./providers/aimlProvider');
-  return aiml.generateText(messages, null, { model: route.model, ...opts });
+  const model  = opts.model || route.model;
+  const p = aiUsage.prepareText({ task: 'chat', model, messages });
+  let data;
+  try {
+    data = await aiml.generateText(p.messages, null, { model: route.model, ...opts, returnFull: true });
+  } catch (err) {
+    aiUsage.record({ task: 'chat', model, promptChars: p.promptChars, success: false, reason: 'provider_error' });
+    throw err;
+  }
+  aiUsage.record({ task: 'chat', model, data, promptChars: p.promptChars, success: true });
+  return _aimlUnwrap(data, opts);
 }
 
 // â”€â”€ Image prompt builder â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
@@ -2054,6 +2173,14 @@ app.post('/api/create-checkout-session', async (req, res) => {
       payment_method_types: ['card'],
       line_items: [{ price: priceId, quantity: 1 }],
       customer_email: userEmail || undefined,
+      // Stripe Tax: Stripe calculates any tax due from the customer's location
+      // and tax status, on top of the price (the paid prices are tax-
+      // exclusive in Stripe). OrivenAI never computes a rate itself. The
+      // full billing address gives Stripe the location and puts it on the
+      // invoice; businesses can add a VAT/tax ID (e.g. for reverse charge).
+      automatic_tax: { enabled: true },
+      billing_address_collection: 'required',
+      tax_id_collection: { enabled: true },
       metadata: { userId, plan },
       success_url: `${frontendUrl}/app?success=true`,
       cancel_url:  `${frontendUrl}${cancelPath}`,
@@ -2373,9 +2500,12 @@ app.post('/api/schedule-plan-change', requireSubscription, async (req, res) => {
     await stripe.subscriptionSchedules.update(scheduleId, {
       end_behavior: 'release', // after phase 2 starts, release the schedule and let the subscription keep renewing normally at the new price -- do not cancel it
       proration_behavior: 'none',
+      // Keep the subscription's own Stripe Tax setting on both phases (on for
+      // subscriptions started through Checkout with automatic tax, unchanged
+      // for any older subscription) instead of leaving it to schedule defaults.
       phases: [
-        { items: [{ price: currentPriceId, quantity: 1 }], start_date: sub.current_period_start, end_date: sub.current_period_end },
-        { items: [{ price: newPriceId, quantity: 1 }], start_date: sub.current_period_end },
+        { items: [{ price: currentPriceId, quantity: 1 }], start_date: sub.current_period_start, end_date: sub.current_period_end, automatic_tax: { enabled: !!(sub.automatic_tax && sub.automatic_tax.enabled) } },
+        { items: [{ price: newPriceId, quantity: 1 }], start_date: sub.current_period_end, automatic_tax: { enabled: !!(sub.automatic_tax && sub.automatic_tax.enabled) } },
       ],
     });
 
@@ -2610,7 +2740,7 @@ app.patch('/api/profile/timezone', async (req, res) => {
 // GET returns the caller's own flat message thread; POST appends a user
 // message and emails a notification (email is notification-only, not the
 // reply transport -- replies land back in-app via /api/support/admin-reply).
-app.get('/api/support/messages', requireSubscription, async (req, res) => {
+app.get('/api/support/messages', requireEntitlement('prioritySupport'), async (req, res) => {
   try {
     const { data, error } = await supabaseAdmin
       .from('support_messages').select('id, sender, body, created_at')
@@ -2630,7 +2760,7 @@ app.post('/api/support/messages', requireSubscription, async (req, res) => {
   try {
     const { data: profile } = await supabaseAdmin
       .from('profiles').select('subscription_status, email').eq('id', req.user.id).maybeSingle();
-    if (!profile || profile.subscription_status !== 'professional') {
+    if (!profile || !planEntitlements.hasEntitlement(profile.subscription_status, 'prioritySupport')) {
       return res.status(403).json({ error: 'Priority Support is a Professional plan feature', code: 'PLAN_REQUIRED' });
     }
     const { error: insertErr } = await supabaseAdmin.from('support_messages')
@@ -5204,10 +5334,13 @@ app.post('/api/autopilot/rules/:id/test', requireAutopilotAccess, async (req, re
     if (!rule.platform) return res.status(400).json({ error: 'Testing requires a rule scoped to one platform.' });
 
     let pool = [];
+    // Through the shared analysis cache (same 7-day analysis, reused while
+    // the account totals are unchanged and < 4h old) instead of a fresh
+    // full AI account analysis on every "Test rule" click.
     if (rule.platform === 'google') {
-      pool = (await _analyzeGoogleAccount(user, 'LAST_7_DAYS')).campaigns || [];
+      pool = ((await getOrRefreshAnalysis(user, 'google', 'LAST_7_DAYS')) || {}).campaigns || [];
     } else if (rule.platform === 'meta') {
-      pool = (await _analyzeMetaAccount(user, 'LAST_7_DAYS')).campaigns || [];
+      pool = ((await getOrRefreshAnalysis(user, 'meta', 'LAST_7_DAYS')) || {}).campaigns || [];
     } else if (rule.platform === 'tiktok') {
       if (rule.trigger_metric !== 'status' && rule.trigger_metric !== 'budget') {
         return res.status(400).json({ error: "TikTok campaigns don't have performance metrics available yet — only Status and Budget conditions can be tested for TikTok." });
@@ -5626,7 +5759,7 @@ const RESEARCH_CATEGORY_LABELS = Object.freeze({
 // this comment tells the next reader) which path actually ran.
 const _researchToolProvider = require('./services/researchToolProvider');
 const _urlContextFetcher = require('./services/urlContextFetcher');
-app.post('/api/research/query', requireCreatorPlus, async (req, res) => {
+app.post('/api/research/query', requireEntitlement('research'), async (req, res) => {
   const question = (req.body && req.body.question || '').trim();
   const category = (req.body && req.body.category || '').trim();
   if (!question) return res.status(400).json({ error: 'A research question is required.' });
@@ -6963,6 +7096,14 @@ Reply ONLY with valid JSON array (no markdown, no extra text):
 // Returns: { reply }
 app.post('/api/ai/chat', requireSubIfAuthed, async (req, res) => {
   const { message, context, brandCore, history } = req.body || {};
+  // The Oriven Chat assistant panel identifies itself (surface:'oriven-chat')
+  // and needs the orivenChat entitlement (Creator and Professional). Checked
+  // before any credit reservation. The same endpoint also answers inside the
+  // paid workflow (Research follow-ups, ad workspace, campaign results),
+  // which every paid plan keeps.
+  if (req.body && req.body.surface === 'oriven-chat' && !(req.user && planEntitlements.hasEntitlement(req.subscriptionStatus, 'orivenChat'))) {
+    return res.status(403).json({ error: 'Oriven Chat is available from the Creator plan.', code: 'PLAN_REQUIRED', feature: 'orivenChat', plan: 'creator' });
+  }
   if (!message) return res.status(400).json({ error: 'message is required' });
 
   const ctx = context || {};
@@ -7267,6 +7408,15 @@ You are a senior marketing strategist, not a generic chatbot — assume responsi
     res.json({ reply: reply || "I wasn't able to complete that — could you rephrase?", usedContext: businessContext ? businessContext.sources : undefined, appliedEdit: appliedEdit || undefined });
   } catch (err) {
     console.error('[ai/chat] error:', err.message);
+    // Refused by the prompt-size guard before any provider call: nothing
+    // was generated, so the reserved credits go back.
+    if (err && err.code === 'AI_PROMPT_TOO_LARGE') {
+      if (reservation) {
+        try { await creditManager.refundCredits(reservation); } catch (e) { console.warn('[ai/chat] refund failed:', e.message); }
+        creditManager.finalizeCreditLog(Object.assign({}, reservation, { charged: false }), 'ai_chat', { success: false, error: 'prompt_too_large', route: req.path }).catch(() => {});
+      }
+      return res.status(413).json({ error: 'This message is too long to process. Shorten it and try again.', code: 'AI_PROMPT_TOO_LARGE' });
+    }
     if (reservation) creditManager.finalizeCreditLog(reservation, 'ai_chat', { success: false, error: err.message, route: req.path }).catch(() => {});
     res.status(500).json({ error: 'Failed to generate a response. Please try again.' });
   }
@@ -15574,7 +15724,7 @@ app.get('/api/intelligence/forecast', requireSubIfAuthed, async (req, res) => {
     try {
       const system = `You are Oriven, writing a one-sentence "reasoning" and up to 3 "keyAssumptions" for an ALREADY-COMPUTED forecast. Do not change or invent any numbers â€” only explain the ones given. Return ONLY valid JSON, no markdown, no code fences: {"reasoning": "one sentence", "keyAssumptions": ["short assumption", "..."]}`;
       const userMsg = `Platform: ${platform === 'google' ? 'Google Ads' : 'Meta Ads'}\nHorizon: ${horizon} days\nForecast: spend â‚¬${forecast.spend.toFixed(2)}, clicks ${forecast.clicks}, conversions ${forecast.conversions}, CTR ${forecast.ctr.toFixed(2)}%${forecast.roas != null ? ', ROAS ' + forecast.roas.toFixed(2) + 'x' : ''}\nBased on: ${forecast.confidenceBasis}\nConfidence: ${forecast.confidence}%`;
-      const raw = await _aimlText('forecast', system, userMsg, { max_tokens: 300 });
+      const raw = await _aimlTextMemo('forecast', system, userMsg, { max_tokens: 300 });
       const cleaned = raw.replace(/^```(?:json)?\s*/i, '').replace(/```\s*$/, '').trim();
       const parsed = JSON.parse(cleaned);
       if (parsed.reasoning) reasoning = parsed.reasoning;
@@ -16080,7 +16230,7 @@ Structure:
 }
 Rules: max 5 summaryItems, max 4 recommendedActions, prioritize the highest-impact items, be specific with real numbers and platform names, never fabricate a number that isn't in the data below.`;
         const userMsg = `Time of day: ${timeGreeting}\n\nPLATFORM DATA:\n${platformSummaryLines.join('\n')}`;
-        const raw = await _aimlText('home-briefing', system, userMsg, { max_tokens: 900 });
+        const raw = await _aimlTextMemo('home-briefing', system, userMsg, { max_tokens: 900 });
         const cleaned = raw.replace(/^```(?:json)?\s*/i, '').replace(/```\s*$/, '').trim();
         const parsed = JSON.parse(cleaned);
         narrative.summaryItems = parsed.summaryItems || [];
@@ -16135,7 +16285,7 @@ app.get('/api/intelligence/briefing', requireSubIfAuthed, async (req, res) => {
     try {
       const system = `You are Oriven, writing a ${period} executive marketing brief from REAL data already computed below â€” a marketing director's report, not a dashboard dump. Do not invent numbers. Return ONLY valid JSON, no markdown: { "headline": "one sentence", "wins": ["..."], "losses": ["..."], "recommendations": ["..."], "nextActions": ["..."] }. Max 4 items per list.`;
       const userMsg = `Period: ${period}\n\n${lines.join('\n') || 'No platform data available.'}`;
-      const raw = await _aimlText('home-briefing', system, userMsg, { max_tokens: 900 });
+      const raw = await _aimlTextMemo('home-briefing', system, userMsg, { max_tokens: 900 });
       const cleaned = raw.replace(/^```(?:json)?\s*/i, '').replace(/```\s*$/, '').trim();
       const parsed = JSON.parse(cleaned);
       brief = { headline: parsed.headline || '', wins: parsed.wins || [], losses: parsed.losses || [], recommendations: parsed.recommendations || [], nextActions: parsed.nextActions || [] };
@@ -16909,7 +17059,20 @@ async function _gatherBusinessContext(userId, opts) {
     // Official logo -- informational only ("this exists and belongs to the
     // company"), not an instruction to insert it into every creative. The
     // calling route/workflow decides when branded creative calls for it.
-    if (profile && profile.logo_url) { lines.push(`Official logo available (use when the workflow calls for branded creative): ${profile.logo_url}`); sources.push('Brand logo'); }
+    // Only a short http(s) URL is ever written into the prompt. An uploaded
+    // logo is stored as a base64 data: URI (often 100k+ characters); pasted
+    // here it added tens of thousands of tokens to every AI call that uses
+    // business context while giving a text model nothing it can read. The
+    // stored logo itself is untouched -- only the prompt text changes.
+    if (profile && typeof profile.logo_url === 'string' && profile.logo_url.trim()) {
+      const logoRef = profile.logo_url.trim();
+      if (/^https?:\/\//i.test(logoRef) && logoRef.length <= 2048 && !/\s/.test(logoRef)) {
+        lines.push(`Official logo available (use when the workflow calls for branded creative): ${logoRef}`);
+      } else {
+        lines.push('Official logo available (uploaded to the brand assets; use when the workflow calls for branded creative).');
+      }
+      sources.push('Brand logo');
+    }
     if (products.length)  { lines.push(`Products: ${products.map(p => p.name + (p.usp ? ' (' + p.usp + ')' : '')).join('; ')}`); products.forEach(p => sources.push(`Product: ${p.name}`)); }
     if (audiences.length) { lines.push(`Target audiences: ${audiences.map(a => a.name).join(', ')}`); audiences.forEach(a => sources.push(`Audience: ${a.name}`)); }
     if (competitors.length) { lines.push(`Known competitors: ${competitors.map(c => c.company + (c.positioning ? ' (' + c.positioning + ')' : '')).join('; ')}`); competitors.forEach(c => sources.push(`Competitor: ${c.company}`)); }
@@ -17102,7 +17265,7 @@ app.get('/api/business/insights', async (req, res) => {
 
     const system = `You are a marketing analyst. Given a business's stored knowledge and its REAL recent ad performance (already fetched, not guessed), produce up to 4 short narrative insights connecting the two — e.g. which product/audience seems to be working on which platform. Reply ONLY with valid JSON, no markdown: { "insights": [{"title":"...","detail":"..."}] }. Ground every claim in the real data given; never invent numbers.`;
     const userMsg = `BUSINESS KNOWLEDGE:\n${bizCtx.text}\n\nRECENT PERFORMANCE:\n${perfLines.join('\n')}${relationships.length ? `\n\nLIKELY CAMPAIGN-PRODUCT LINKS (name-matched, not certain): ${relationships.map(r => `"${r.campaign}" ~ "${r.product}"`).join(', ')}` : ''}`;
-    const raw = await _aimlText('business-insights', system, userMsg, { max_tokens: 700 });
+    const raw = await _aimlTextMemo('business-insights', system, userMsg, { max_tokens: 700 });
     const cleaned = raw.replace(/^```(?:json)?\s*/i, '').replace(/```\s*$/, '').trim();
     let parsed = { insights: [] };
     try { parsed = JSON.parse(cleaned); } catch (_) { console.warn('[business/insights] AI response unparseable'); }
@@ -17278,7 +17441,7 @@ app.get('/api/business/reflection', async (req, res) => {
 
     const system = `You are a marketing strategist writing ${periodFraming} for a business you advise. Given real accumulated learnings and real recent performance (already computed, not guessed), write a short reflection: what was learned, what's still true, and one concrete recommendation for next period. Reply ONLY with valid JSON, no markdown: { "learned": ["...","..."], "recommendation": "..." }. Ground every statement in the data given; never invent numbers or claims not supported by it.`;
     const userMsg = `PERIOD: ${period}\n\nACCUMULATED LEARNINGS:\n${learningLines}${perfLines ? `\n\nRECENT PERFORMANCE:\n${perfLines}` : ''}`;
-    const raw = await _aimlText('business-reflection', system, userMsg, { max_tokens: 700 });
+    const raw = await _aimlTextMemo('business-reflection', system, userMsg, { max_tokens: 700 });
     const cleaned = raw.replace(/^```(?:json)?\s*/i, '').replace(/```\s*$/, '').trim();
     let parsed = { learned: [], recommendation: '' };
     try { parsed = JSON.parse(cleaned); } catch (_) { console.warn('[business/reflection] AI response unparseable'); }
@@ -17428,10 +17591,35 @@ app.use(function(err, req, res, _next) {
   });
 });
 
+// -- Background jobs gate --------------------------------------------
+// The cron jobs below act on the PRODUCTION database and the paid AI
+// provider (account deletion, credit-cycle resets, 4-hourly ad-account
+// analysis, Daily Brief pre-generation). A local `npm start` uses the
+// same production .env, so without a gate every developer machine ran
+// them too. They now run only when explicitly enabled:
+//   ENABLE_BACKGROUND_JOBS=true   -> run (set this on the Render service)
+//   ENABLE_BACKGROUND_JOBS=false  -> never run (anywhere)
+//   unset                         -> run only on Render (RENDER is set by
+//                                    Render itself), never locally
+function _backgroundJobsEnabled() {
+  const v = String(process.env.ENABLE_BACKGROUND_JOBS || '').trim().toLowerCase();
+  if (v === 'true') return true;
+  if (v === 'false') return false;
+  return !!process.env.RENDER;
+}
+const BACKGROUND_JOBS_ENABLED = _backgroundJobsEnabled();
+console.log(`[Cron] Background jobs ${BACKGROUND_JOBS_ENABLED ? 'ENABLED' : 'DISABLED'} (ENABLE_BACKGROUND_JOBS=${process.env.ENABLE_BACKGROUND_JOBS ? String(process.env.ENABLE_BACKGROUND_JOBS).trim() : 'unset'}, Render=${process.env.RENDER ? 'yes' : 'no'})`);
+// Registers a cron job only when background jobs are enabled; each run
+// gets its own AI usage context so [AIUsage] lines name the job.
+function _scheduleBackgroundJob(name, expression, fn, options) {
+  if (!BACKGROUND_JOBS_ENABLED) return null;
+  return cron.schedule(expression, () => aiUsage.withContext({ operation: 'cron:' + name }, fn), options);
+}
+
 // â”€â”€ Daily cron: delete unverified accounts older than 14 days â”€â”€â”€
 // Runs at 02:00 UTC every day. Safe to re-run â€” only targets accounts
 // where email_verified = false AND created_at < 14 days ago.
-cron.schedule('0 2 * * *', async () => {
+_scheduleBackgroundJob('unverified-account-cleanup', '0 2 * * *', async () => {
   const cutoff = new Date(Date.now() - 14 * 24 * 60 * 60 * 1000).toISOString();
   console.log(`[Cron] Cleanup run â€” cutoff: ${cutoff}`);
   try {
@@ -17465,7 +17653,7 @@ cron.schedule('0 2 * * *', async () => {
 // credits_cycle_end by the plan's period length added to the OLD
 // credits_cycle_end (not to now()), so a delayed cron run doesn't drift the
 // billing anchor day forward.
-cron.schedule('0 3 * * *', async () => {
+_scheduleBackgroundJob('credit-cycle-safety-net', '0 3 * * *', async () => {
   try {
     const { data: overdue, error } = await supabaseAdmin.from('profiles')
       .select('id, subscription_status, credits_cycle_end')
@@ -18306,6 +18494,7 @@ async function _runIntelligenceMonitoring() {
   const userIds = Object.keys(byUser);
   console.log(`[Monitoring] Run starting â€” ${userIds.length} connected user(s)`);
   for (const userId of userIds) {
+    aiUsage.setJobUser(userId); // [AIUsage] attribution for this user's calls
     const user = { id: userId };
     const providers = byUser[userId];
 
@@ -18320,7 +18509,7 @@ async function _runIntelligenceMonitoring() {
       const { data: profile } = await supabaseAdmin.from('profiles')
         .select('subscription_status').eq('id', userId).maybeSingle();
       const plan = profile && profile.subscription_status;
-      if (plan === 'creator' || plan === 'professional') {
+      if (planEntitlements.hasEntitlement(plan, 'autopilot')) { // Starter and up
         const { count } = await supabaseAdmin.from('automation_rules')
           .select('id', { count: 'exact', head: true }).eq('user_id', userId).eq('enabled', true);
         autopilotEligible = (count || 0) > 0;
@@ -18341,7 +18530,7 @@ async function _runIntelligenceMonitoring() {
 
 // Every 4 hours â€” frequent enough to feel continuous, light enough to keep
 // live-API usage reasonable across all connected users.
-cron.schedule('0 */4 * * *', () => {
+_scheduleBackgroundJob('intelligence-monitoring', '0 */4 * * *', () => {
   _runIntelligenceMonitoring().catch(err => console.error('[Monitoring] Fatal:', err.message));
 }, { timezone: 'UTC' });
 
@@ -18392,11 +18581,12 @@ async function getOrGenerateDailyBriefing(user, browserTimezone) {
 // naturally no-ops (via the cache check above) for anyone already
 // generated for their current local date. Frequent (30min) but cheap: a
 // DB-only pass except for the handful of users actually crossing midnight.
-cron.schedule('*/30 * * * *', async () => {
+_scheduleBackgroundJob('daily-brief-prewarm', '*/30 * * * *', async () => {
   try {
     const { data: rows } = await supabaseAdmin.from('integrations').select('user_id').in('provider', ['google_ads', 'meta_ads']);
     const userIds = [...new Set((rows || []).map(r => r.user_id))];
     for (const userId of userIds) {
+      aiUsage.setJobUser(userId);
       try {
         const { data: profile } = await supabaseAdmin.from('profiles').select('timezone').eq('id', userId).maybeSingle();
         await getOrGenerateDailyBriefing({ id: userId, timezone: profile && profile.timezone });
