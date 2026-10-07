@@ -28,6 +28,8 @@ require('./tools/adEditTools'); // Ad Editing Workspace — registers edit_ad_co
 const creditManager = require('./services/creditManager');
 const planEntitlements = require('./services/planEntitlements'); // Free/Starter/Creator/Professional capability table (mirrors plans.js) // no client of its own -- initialized below, right after supabaseAdmin exists
 const aiUsage = require('./services/aiUsage'); // prompt sanitizer + size guard + metadata-only AI usage telemetry
+const paidActions = require('./services/paidActions'); // one transaction pattern for every credit charge (claim → charge → settle/refund)
+const spendGuard = require('./services/spendGuard'); // daily provider-spend safety net
 const campaignGoals = require('./services/campaignGoals'); // single source of truth for the 4 campaign goals across every platform
 const platformCapabilities = require('./services/platformCapabilities'); // Universal Advertising Setup Engine, Phase 1 — capability registry (definitional only, no client of its own)
 const setupStateEngine = require('./services/setupStateEngine'); // Universal Advertising Setup Engine, Phase 2 — reads existing `integrations` rows only, makes no external API calls
@@ -77,6 +79,26 @@ const supabaseAdmin = createClient(
 creditManager.init(supabaseAdmin);
 // Optional ai_usage_events sink -- only writes when AI_USAGE_DB=true.
 aiUsage.configureDb(supabaseAdmin);
+// Paid-action claims/settlement (idempotency, lane locks, refunds) — uses
+// the credit_actions table when it exists, in-memory protection otherwise.
+paidActions.init({ db: supabaseAdmin, creditManager, getUser: getUserFromToken });
+// Provider hooks: refuse new provider calls past the spend guard's limits,
+// alert on provider-account errors, and count video/image-edit calls the
+// text wrappers don't see.
+(function () {
+  const aimlForHooks = require('./providers/aimlProvider');
+  const router = require('./services/modelRouter');
+  if (typeof aimlForHooks.setHooks === 'function') aimlForHooks.setHooks({
+    before: () => { const c = aiUsage.current(); spendGuard.preflight(c && c.userId); },
+    after: ({ method, path, ok, providerAccount }) => {
+      if (providerAccount) spendGuard.providerAccountProblem(method + ' ' + path);
+      if (method !== 'POST') return;
+      const c = aiUsage.current();
+      if (path.indexOf('/v2/video/generations') === 0) spendGuard.recordCall({ userId: c && c.userId, model: router.MODELS.aiml.video, success: ok });
+      else if (path === '/v1/images/edits') spendGuard.recordCall({ userId: c && c.userId, model: router.MODELS.aiml.image, success: ok });
+    },
+  });
+})();
 
 // â”€â”€ Startup sanity checks â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 (function checkEnv() {
@@ -184,6 +206,9 @@ Object.keys(PRICE_IDS).forEach(function (plan) {
 
 // Per-request AI usage context (route + user id) for [AIUsage] telemetry.
 app.use(aiUsage.middleware);
+// Settles the request's paid action (success → keep charge; any failure →
+// refund exactly once) right before its response is sent.
+app.use(paidActions.responseHook);
 app.use(cors());
 
 // â”€â”€ Static files â€” serve the frontend from the project root â”€â”€â”€â”€
@@ -625,6 +650,14 @@ OUTPUT: Return ONLY the HTML document. No explanation, no preamble, no markdown 
 
 // â”€â”€ Auth helper â€” verify Supabase JWT and return user â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 async function getUserFromToken(req) {
+  // One auth lookup per request: the paid-action lane guard and the route
+  // handler both ask, and both get the same promise.
+  if (req && req._orvUserPromise) return req._orvUserPromise;
+  const p = _getUserFromTokenUncached(req);
+  if (req) req._orvUserPromise = p;
+  return p;
+}
+async function _getUserFromTokenUncached(req) {
   const auth = req.headers.authorization || '';
   const token = auth.startsWith('Bearer ') ? auth.slice(7) : '';
   if (!token) return null;
@@ -1496,7 +1529,7 @@ INFOGRAPHIC MUST INCLUDE ALL OF THESE:
 // Receives: { prompt, size, imageType, imageFormat, refImageData? }
 // If refImageData is provided, Anthropic vision extracts style cues
 // which are appended to the DALL-E prompt as a style guide.
-app.post('/api/generate-image', requireSubOrFree, async (req, res) => {
+app.post('/api/generate-image', requireSubOrFree, paidActions.laneGuard('image'), async (req, res) => {
   const { prompt, size, imageType, imageFormat, refImageData, uploadType, brandColors, brandIdentityDisabled } = req.body;
   if (!prompt) return res.status(400).json({ error: 'prompt is required' });
 
@@ -1604,7 +1637,7 @@ app.post('/api/generate-image', requireSubOrFree, async (req, res) => {
 // Receives: { prompt, size, adFormat }
 // Steps 1 and 2 (copy + visual prompt) run in parallel via Promise.all
 // to minimise total latency before DALL-E is called.
-app.post('/api/generate-ad', requireSubIfAuthed, async (req, res) => {
+app.post('/api/generate-ad', requireSubIfAuthed, paidActions.laneGuard('image'), async (req, res) => {
   const { prompt, size, adFormat } = req.body;
   if (!prompt) return res.status(400).json({ error: 'prompt is required' });
 
@@ -1670,7 +1703,9 @@ Reply ONLY with valid JSON (no markdown fences, no extra text):
     console.warn('[Ads] Step 3 â€” AIML image failed (non-fatal):', err.message);
   }
 
-  if (reservation) creditManager.finalizeCreditLog(reservation, 'image_generation', { provider: 'aiml', success: true, route: req.path }).catch(() => {});
+  // The charge is for the image: no image → the action failed and is refunded.
+  if (!imageUrl) paidActions.markFailed('image_failed');
+  if (reservation) creditManager.finalizeCreditLog(reservation, 'image_generation', { provider: 'aiml', success: !!imageUrl, route: req.path }).catch(() => {});
   _recordCreativeAsset(req.user && req.user.id, { kind: 'ad', title: adCopy.title || prompt.slice(0, 80), content: { headline: adCopy.headline, body: adCopy.body, cta: adCopy.cta, imageUrl }, source_route: '/api/generate-ad' });
   res.json({
     title:    adCopy.title    || '',
@@ -1687,7 +1722,7 @@ Reply ONLY with valid JSON (no markdown fences, no extra text):
 // Step 1: Anthropic generates N variation objects (title/headline/body/cta/imagePrompt)
 // Step 2: All N DALL-E images generated in parallel
 // Returns: { variations: [{title,headline,body,cta,imageUrl},...] }
-app.post('/api/generate-campaign', requireSubIfAuthed, async (req, res) => {
+app.post('/api/generate-campaign', requireSubIfAuthed, paidActions.laneGuard('create-ad'), async (req, res) => {
   const { prompt, size } = req.body;
   if (!prompt) return res.status(400).json({ error: 'prompt is required' });
 
@@ -3192,7 +3227,7 @@ app.post('/api/invite/:token/accept', requireSubscription, async (req, res) => {
 //   { sourceImageUrl } (data: URI or http(s) URL — brandName not required
 //   in this mode, since the image itself is the input, not a description)
 // Returns: { imageUrl, prompt }
-app.post('/api/generate-logo', requireSubIfAuthed, async (req, res) => {
+app.post('/api/generate-logo', requireSubIfAuthed, paidActions.laneGuard('image'), async (req, res) => {
   let { brandName, description, logoStyle, styleDirection, colorPalette, sourceImageUrl } = req.body;
 
   // â”€â”€ Image-to-image mode: transform an existing uploaded/generated icon
@@ -3338,7 +3373,7 @@ console.log("UGC ROUTE REGISTERED");
 // â”€â”€ POST /api/generate-ugc â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 // AIML writes the script, Kling (via AIML) generates the video.
 // Frontend calls one endpoint, gets back a videoId to poll.
-app.post('/api/generate-ugc', requireSubIfAuthed, async (req, res) => {
+app.post('/api/generate-ugc', requireSubIfAuthed, paidActions.laneGuard('video'), async (req, res) => {
   const user = await getUserFromToken(req);
 
   if (!user) {
@@ -3515,6 +3550,7 @@ Script rules:
     console.log('[UGC] Video submitted to AIML:', generationId, '| user:', user.id);
     _recordCreativeAsset(user.id, { kind: 'ugc', title: (adContext || script).slice(0, 80), content: { script, generationId }, source_route: '/api/generate-ugc' });
     if (reservation) creditManager.finalizeCreditLog(reservation, 'video_generation', { provider: 'aiml', model: 'kling', success: true, route: req.path }).catch(() => {});
+    paidActions.awaitAsync(generationId); // charge settles when the job completes/fails (status endpoint)
     return res.json({ ok: true, videoId: generationId, status: 'processing' });
   } catch (err) {
     console.error('[UGC] AIML video submission error:', err.message);
@@ -3623,7 +3659,7 @@ Rules: first-person only, no stage directions, no brackets, output ONLY the spok
 // already let them through). Same credit economics apply either way
 // (creditManager.reserveCredits below still requires a real balance) --
 // this only removes the redundant, inconsistent full-subscription block.
-app.post('/api/generate-ugc-video', requireSubOrFree, async (req, res) => {
+app.post('/api/generate-ugc-video', requireSubOrFree, paidActions.laneGuard('video'), async (req, res) => {
   const user = await getUserFromToken(req);
   if (!user) return res.status(401).json({ error: 'Unauthorized' });
 
@@ -3656,6 +3692,7 @@ app.post('/api/generate-ugc-video', requireSubOrFree, async (req, res) => {
     });
     console.log('[UGC/video] Submitted:', generationId, '| user:', user.id);
     if (reservation) creditManager.finalizeCreditLog(reservation, 'video_generation', { provider: 'aiml', success: true, route: req.path }).catch(() => {});
+    paidActions.awaitAsync(generationId); // charge settles when the job completes/fails (status endpoint)
     return res.json({ ok: true, videoId: generationId, status: 'processing' });
   } catch (err) {
     console.error('[UGC/video] Error:', err.message);
@@ -3673,11 +3710,14 @@ app.get('/api/ugc-video-status/:videoId', async (req, res) => {
   try {
     const aiml = require('./providers/aimlProvider');
     const { status, videoUrl, failureReason } = await aiml.getVideoStatus(videoId);
+    // Final state settles the video charge: failed → refunded (once).
+    const settled = (status === 'completed' || status === 'failed') ? await paidActions.settleAsync(videoId, status === 'completed', user.id) : null;
     return res.json({
       status,
       videoUrl,
       thumbnailUrl: null,
       error:        failureReason || null,
+      creditsRefunded: !!(settled && settled.refunded),
     });
   } catch (err) {
     console.error('[UGC] Status error:', err.message);
@@ -3690,7 +3730,7 @@ app.get('/api/ugc-video-status/:videoId', async (req, res) => {
 // Three modes: 'ai' (Anthropic builds prompt) | 'script' (user prompt) | 'image' (image-to-video)
 // Provider: AIML API via aimlProvider (AIML_API_KEY).
 // API key is read from env only â€” never hardcoded or sent to frontend.
-app.post('/api/video-ads/generate', requireSubIfAuthed, async (req, res) => {
+app.post('/api/video-ads/generate', requireSubIfAuthed, paidActions.laneGuard('video'), async (req, res) => {
   const user = await getUserFromToken(req);
   if (!user) return res.status(401).json({ error: 'Unauthorized' });
 
@@ -3728,7 +3768,7 @@ app.post('/api/video-ads/generate', requireSubIfAuthed, async (req, res) => {
       console.log('[VideoAds/image] Generation started:', result.generationId, 'â€” user:', user.id);
       _recordCreativeAsset(user.id, { kind: 'video', title: 'Image-to-video', content: { generationId: result.generationId }, source_route: '/api/video-ads/generate' });
       if (reservation) creditManager.finalizeCreditLog(reservation, 'video_generation', { provider: 'aiml', success: true, route: req.path }).catch(() => {});
-      return res.json({ generationId: result.generationId, status: 'queued' });
+      paidActions.awaitAsync(result.generationId); return res.json({ generationId: result.generationId, status: 'queued' });
     } catch (err) {
       console.error('[VideoAds/image] error:', err.message);
       if (reservation) creditManager.finalizeCreditLog(reservation, 'video_generation', { success: false, error: err.message, route: req.path }).catch(() => {});
@@ -3745,7 +3785,7 @@ app.post('/api/video-ads/generate', requireSubIfAuthed, async (req, res) => {
       console.log('[VideoAds/script] Generation started:', result.generationId, 'â€” user:', user.id);
       _recordCreativeAsset(user.id, { kind: 'video', title: script.trim().slice(0, 80), content: { generationId: result.generationId, script: script.trim() }, source_route: '/api/video-ads/generate' });
       if (reservation) creditManager.finalizeCreditLog(reservation, 'video_generation', { provider: 'aiml', success: true, route: req.path }).catch(() => {});
-      return res.json({ generationId: result.generationId, status: 'queued' });
+      paidActions.awaitAsync(result.generationId); return res.json({ generationId: result.generationId, status: 'queued' });
     } catch (err) {
       console.error('[VideoAds/script] error:', err.message);
       if (reservation) creditManager.finalizeCreditLog(reservation, 'video_generation', { success: false, error: err.message, route: req.path }).catch(() => {});
@@ -3809,7 +3849,7 @@ Rules:
     console.log('[VideoAds/ai] Generation started:', result.generationId, 'â€” user:', user.id);
     _recordCreativeAsset(user.id, { kind: 'video', title: _product.trim().slice(0, 80), content: { generationId: result.generationId, prompt: vidPrompt }, source_route: '/api/video-ads/generate' });
     if (reservation) creditManager.finalizeCreditLog(reservation, 'video_generation', { provider: 'aiml', success: true, route: req.path }).catch(() => {});
-    return res.json({ generationId: result.generationId, status: 'queued' });
+    paidActions.awaitAsync(result.generationId); return res.json({ generationId: result.generationId, status: 'queued' });
   } catch (err) {
     console.error('[VideoAds/ai] error:', err.message);
     if (reservation) creditManager.finalizeCreditLog(reservation, 'video_generation', { success: false, error: err.message, route: req.path }).catch(() => {});
@@ -3830,10 +3870,13 @@ app.get('/api/video-ads/status/:generationId', async (req, res) => {
 
   try {
     const result = await aiml.getVideoStatus(req.params.generationId);
+    // Final state settles the video charge: failed → refunded (once).
+    const settled = (result.status === 'completed' || result.status === 'failed') ? await paidActions.settleAsync(req.params.generationId, result.status === 'completed', user.id) : null;
     return res.json({
       status:        result.status,
       videoUrl:      result.videoUrl,
       failureReason: result.failureReason,
+      creditsRefunded: !!(settled && settled.refunded),
     });
   } catch (err) {
     console.error('[VideoAds] Status error:', err.message);
@@ -3845,7 +3888,7 @@ app.get('/api/video-ads/status/:generationId', async (req, res) => {
 // Generates branded motion graphic videos via AIML API (kling-video).
 // Anthropic writes a cinematic video prompt with Brand Core injection.
 // Returns { generationId, status: 'queued' } â€” client polls /status/:id.
-app.post('/api/motion-graphics/generate', requireSubIfAuthed, async (req, res) => {
+app.post('/api/motion-graphics/generate', requireSubIfAuthed, paidActions.laneGuard('video'), async (req, res) => {
   const user = await getUserFromToken(req);
   if (!user) return res.status(401).json({ error: 'Unauthorized' });
 
@@ -3940,7 +3983,7 @@ Strict rules:
     console.log('[MotionGraphics] Generation queued:', result.generationId);
     _recordCreativeAsset(user.id, { kind: 'video', title: styleInfo.label, content: { generationId: result.generationId, prompt: videoPrompt }, source_route: '/api/motion-graphics/generate' });
     if (reservation) creditManager.finalizeCreditLog(reservation, 'video_generation', { provider: 'aiml', success: true, route: req.path }).catch(() => {});
-    return res.json({ generationId: result.generationId, status: 'queued' });
+    paidActions.awaitAsync(result.generationId); return res.json({ generationId: result.generationId, status: 'queued' });
   } catch (err) {
     console.error('[MotionGraphics] Generation error:', err.message);
     if (reservation) creditManager.finalizeCreditLog(reservation, 'video_generation', { success: false, error: err.message, route: req.path }).catch(() => {});
@@ -3961,10 +4004,13 @@ app.get('/api/motion-graphics/status/:generationId', async (req, res) => {
 
   try {
     const result = await aiml.getVideoStatus(req.params.generationId);
+    // Final state settles the video charge: failed → refunded (once).
+    const settled = (result.status === 'completed' || result.status === 'failed') ? await paidActions.settleAsync(req.params.generationId, result.status === 'completed', user.id) : null;
     return res.json({
       status:        result.status,
       videoUrl:      result.videoUrl,
       failureReason: result.failureReason,
+      creditsRefunded: !!(settled && settled.refunded),
     });
   } catch (err) {
     console.error('[MotionGraphics] Status error:', err.message);
@@ -3975,7 +4021,7 @@ app.get('/api/motion-graphics/status/:generationId', async (req, res) => {
 // â”€â”€ POST /api/product-shoots/generate â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 // Professional product photography via GPT Image 2.5 Sunburst (same stack as Visuals/Logos).
 // Anthropic builds the photography prompt from product + style + goal.
-app.post('/api/product-shoots/generate', requireSubIfAuthed, async (req, res) => {
+app.post('/api/product-shoots/generate', requireSubIfAuthed, paidActions.laneGuard('image'), async (req, res) => {
   const user = await getUserFromToken(req);
   if (!user) return res.status(401).json({ error: 'Unauthorized' });
 
@@ -4200,7 +4246,7 @@ app.post('/api/creative/improve', requireSubIfAuthed, async (req, res) => {
 // /api/generate-campaign for parallel image generation. Google/Meta/TikTok
 // only â€” Performance Max, Pinterest, and LinkedIn have no platform
 // integration in this codebase to build on yet.
-app.post('/api/creative/campaign-suite', requireSubIfAuthed, async (req, res) => {
+app.post('/api/creative/campaign-suite', requireSubIfAuthed, paidActions.laneGuard('create-ad'), async (req, res) => {
   try {
     const { product, goal, brandCore, productImages } = req.body || {};
     if (!product) return res.status(400).json({ error: 'product is required' });
@@ -5759,7 +5805,7 @@ const RESEARCH_CATEGORY_LABELS = Object.freeze({
 // this comment tells the next reader) which path actually ran.
 const _researchToolProvider = require('./services/researchToolProvider');
 const _urlContextFetcher = require('./services/urlContextFetcher');
-app.post('/api/research/query', requireEntitlement('research'), async (req, res) => {
+app.post('/api/research/query', requireEntitlement('research'), paidActions.laneGuard('research'), async (req, res) => {
   const question = (req.body && req.body.question || '').trim();
   const category = (req.body && req.body.category || '').trim();
   if (!question) return res.status(400).json({ error: 'A research question is required.' });
@@ -6020,7 +6066,11 @@ Return ONLY valid JSON with zero markdown, matching this exact shape (omit array
       return eid ? Object.assign({}, o, { evidenceIds: [eid] }) : Object.assign({}, o, { evidenceIds: [] });
     });
 
-    if (reservation) creditManager.finalizeCreditLog(reservation, 'ai_analysis', { provider: 'aiml', success: true, route: req.path }).catch(() => {});
+    // Nothing mapped at all (no market, no entities) is shown as "no results"
+    // by the UI — not a usable result, so the charge is refunded.
+    const _rsUsable = !!(market || competitors.length || customerSignals.length || advertisingPatterns.length || trends.length || opportunities.length);
+    if (!_rsUsable) paidActions.markFailed('research_no_usable_data');
+    if (reservation) creditManager.finalizeCreditLog(reservation, 'ai_analysis', { provider: 'aiml', success: _rsUsable, route: req.path }).catch(() => {});
     res.json({
       question,
       category: category || null,
@@ -6957,45 +7007,33 @@ ${platformRules}
 // actually charged, so a temporary provider limit never quietly costs the
 // user credits for work that never happened.
 function _isProviderUnavailable(err) {
-  return !!(err && (err.status === 429 || (err.retryable && typeof err.status === 'number' && err.status >= 500)));
+  if (!err) return false;
+  // OrivenAI's own provider account can't serve the request (no balance,
+  // quota exhausted, key rejected — tagged in providers/aimlProvider.js),
+  // or the provider couldn't be reached at all after retries (network
+  // error: retryable, no HTTP status). Neither is the user's fault, so both
+  // take the same refund + "temporarily unavailable" path as capacity.
+  if (err.providerAccount) return true;
+  // Timed out, provider queue full, or the daily spend guard refused the
+  // call — none of these produced anything, and none are the user's fault.
+  if (err.timeout || err.busy || err.code === 'AI_SPEND_LIMIT') return true;
+  if (err.retryable && typeof err.status !== 'number' && /network error/i.test(err.message || '')) return true;
+  return !!(err.status === 429 || (err.retryable && typeof err.status === 'number' && err.status >= 500));
 }
+// Shapes the 503 response only. The refund itself (and its "_refund" ledger
+// row) is done by the paid-action settlement for EVERY failed paid request
+// (services/paidActions.js), so it is not repeated here; the response
+// carries creditsRefunded:true once that refund has happened.
 async function _handleProviderUnavailable(reservation, featureKey, err, req, res) {
-  let refunded = false;
-  if (reservation && reservation.charged) {
-    try {
-      refunded = await creditManager.refundCredits(reservation);
-    } catch (refundErr) {
-      // Most likely refund_credits isn't migrated yet (see
-      // docs/migrations/2026-08-refund-credits.sql) -- log loudly so it's
-      // visible, but never let a refund failure block the error response
-      // the user is waiting on.
-      console.error(`[${featureKey}] Credit refund failed:`, refundErr.message);
-    }
-  }
-  if (reservation) {
-    creditManager.finalizeCreditLog(reservation, featureKey, { success: false, error: err.message, route: req.path }).catch(() => {});
-    if (refunded) {
-      // A separate, additive audit row rather than mutating the original
-      // one — credit_transactions is append-only by design (see
-      // 2026-08-credit-economy.sql's own comment on that table).
-      creditManager.finalizeCreditLog(
-        { requestId: crypto.randomUUID(), cost: reservation.cost, charged: false, userId: reservation.userId },
-        featureKey + '_refund',
-        { success: true, route: req.path }
-      ).catch(() => {});
-    }
-  }
+  if (reservation) creditManager.finalizeCreditLog(reservation, featureKey, { success: false, error: err.message, route: req.path }).catch(() => {});
   return res.status(503).json({
     ok: false,
-    error: refunded
-      ? 'Our AI provider is temporarily at capacity. Your credits were not charged — please try again in a moment.'
-      : 'Our AI provider is temporarily at capacity right now. Please try again in a moment.',
+    error: 'OrivenAI\'s generation service is temporarily unavailable. Please try again later.',
     code: 'PROVIDER_UNAVAILABLE',
-    refunded,
   });
 }
 
-app.post('/api/ai/create-ad', requireSubOrOnboardingGen, async (req, res) => {
+app.post('/api/ai/create-ad', requireSubOrOnboardingGen, paidActions.laneGuard('create-ad'), async (req, res) => {
   console.log('[create-ad] ← route handler entered');
   console.log('[create-ad] req.body keys:', Object.keys(req.body || {}));
   const { product, goal, platforms, mode, brandCore, productImages, platformObjective, campaignType, metaStructure, campaignStructure, metaPlacement, brandIdentityDisabled, pageContext, referenceAdContext, researchContext } = req.body;
@@ -7094,7 +7132,7 @@ Reply ONLY with valid JSON array (no markdown, no extra text):
 // Used by: the "Oriven AI" panel in Ads Manager (orvAiSend, app.html)
 // Receives: { message, context: { page, googleAccount, metaAccount }, brandCore, history }
 // Returns: { reply }
-app.post('/api/ai/chat', requireSubIfAuthed, async (req, res) => {
+app.post('/api/ai/chat', requireSubIfAuthed, paidActions.laneGuard('chat'), async (req, res) => {
   const { message, context, brandCore, history } = req.body || {};
   // The Oriven Chat assistant panel identifies itself (surface:'oriven-chat')
   // and needs the orivenChat entitlement (Creator and Professional). Checked
@@ -7317,9 +7355,13 @@ app.post('/api/ai/chat', requireSubIfAuthed, async (req, res) => {
     ? ' This user is on the Professional plan, which includes Priority Support: they can message the OrivenAI team from Settings → Subscription → Priority Support (replies appear in that thread), or email contact@orivenai.com.'
     : ' Priority Support (an in-app message thread to the OrivenAI team, in Settings → Subscription) is part of the Professional plan; anyone can email contact@orivenai.com.'} Never promise response times, 24/7 availability, phone support, live chat, a dedicated account manager or any other support guarantee. You cannot send emails or open tickets yourself.`;
 
+  // Research follow-ups (Research page, mode:'research-followup') answer from
+  // the market map only: no tools are offered and exactly one model call is
+  // made. The tool loop below stays for the Oriven Chat assistant.
+  const researchFollowup = !!(research && req.body && req.body.mode === 'research-followup');
   const toolsSection = `\n\nTOOLS AVAILABLE — call one when the user is clearly asking for an action to be taken (not when they're just asking a question or making conversation):\n${toolRouter.getCatalogPrompt()}\n\nTo use a tool, reply with ONLY a JSON object on its own, nothing else: {"tool": "<tool_name>", "params": {...}}. No markdown fences, no extra text before or after. If a required param is missing or ambiguous, don't guess — ask the user a short clarifying question in plain text instead of calling the tool. For anything that isn't an action request, just reply normally in plain conversational text. Tool names like "create_campaign_package" are internal — never write them out in a conversational reply; describe the action in plain English instead (e.g. "generate a campaign package", not "use create_campaign_package").`;
 
-  const systemPrompt = `You are Oriven, ORIVEN's AI marketing co-pilot. ORIVEN is organized as six steps — 01 Control Center (the start page: the user's business context — business, brand, audiences, competitors, connected accounts and knowledge — plus an overview of their advertising, what needs attention, and Planning: dated advertising plans, a monthly budget plan, briefs and naming/UTM templates), 02 Research (investigate a market, competitors, audiences and opportunities; results become a Market Map with sources, and chosen findings can go into Create), 03 Create (turn a brief into platform-ready ad creative and campaign structure; drafts go to Launch), 04 Launch (review drafts by platform with their readiness — ready, ready with warnings or blocked — and publish when the user chooses), 05 Campaigns (follow live campaign performance by platform, campaign and date range: spend, delivery, traffic and conversion metrics, with spend over time where the platform provides it), and 06 Autopilot (rules on Meta and Google campaigns that pause, resume, adjust budgets, notify or ask for approval first, plus recent activity). There is no separate Home or Business page; both live in Control Center. You help the user across all of them with their Google, Meta, TikTok and Pinterest ad campaigns. ORIVEN does not publish campaigns on a schedule: a planned start date is the user's plan, and launching is a manual step in Launch.${supportSection}${hasBrand ? `\n\nBRAND CONTEXT (draw on this when relevant):\n${brandSection}` : ''}${businessSection}${accountsSection}${pageSection}${campaignSection}${researchSection}${reviewSection}${launchSection}${autopilotSection}${businessSignalsSection}${workspaceSection}${opsSection}${toolsSection}
+  const systemPrompt = `You are Oriven, ORIVEN's AI marketing co-pilot. ORIVEN is organized as six steps — 01 Control Center (the start page: the user's business context — business, brand, audiences, competitors, connected accounts and knowledge — plus an overview of their advertising, what needs attention, and Planning: dated advertising plans, a monthly budget plan, briefs and naming/UTM templates), 02 Research (investigate a market, competitors, audiences and opportunities; results become a Market Map with sources, and chosen findings can go into Create), 03 Create (turn a brief into platform-ready ad creative and campaign structure; drafts go to Launch), 04 Launch (review drafts by platform with their readiness — ready, ready with warnings or blocked — and publish when the user chooses), 05 Campaigns (follow live campaign performance by platform, campaign and date range: spend, delivery, traffic and conversion metrics, with spend over time where the platform provides it), and 06 Autopilot (rules on Meta and Google campaigns that pause, resume, adjust budgets, notify or ask for approval first, plus recent activity). There is no separate Home or Business page; both live in Control Center. You help the user across all of them with their Google, Meta, TikTok and Pinterest ad campaigns. ORIVEN does not publish campaigns on a schedule: a planned start date is the user's plan, and launching is a manual step in Launch.${supportSection}${hasBrand ? `\n\nBRAND CONTEXT (draw on this when relevant):\n${brandSection}` : ''}${businessSection}${accountsSection}${pageSection}${campaignSection}${researchSection}${reviewSection}${launchSection}${autopilotSection}${businessSignalsSection}${workspaceSection}${opsSection}${researchFollowup ? '' : toolsSection}
 
 Be conversational and natural. Match the energy of the message — brief for casual small talk, thorough for strategic or campaign questions. Think like a knowledgeable colleague, not a branded bot. Never start with hollow affirmations like "Great!" or "Absolutely!". Be direct. Never mention that you are powered by any specific AI provider or model — you are simply Oriven.${businessContext ? ' When it is relevant, reference specific business knowledge by name (a real product, audience, or competitor) instead of speaking in generalities — it shows the user Oriven actually remembers their business. If competitor information is present, use it only for strategic positioning advice, never to copy or replicate a competitor\'s messaging or content.' : ''}
 
@@ -7351,7 +7393,9 @@ You are a senior marketing strategist, not a generic chatbot — assume responsi
   }
 
   try {
-    const MAX_TOOL_STEPS = 5;
+    // Hard ceiling on model calls for ONE chat message: 5 for the assistant
+    // (each tool step = 1 call), 1 for a research follow-up.
+    const MAX_TOOL_STEPS = researchFollowup ? 1 : 5;
     let reply = null;
     let pendingAction = null;
     // Ad Editing Workspace — the last non-confirmation tool that actually
@@ -7382,6 +7426,7 @@ You are a senior marketing strategist, not a generic chatbot — assume responsi
       if (!result.ok) {
         reply = result.error;
         if (result.status === 402) creditsExhausted = true;
+        paidActions.markFailed('tool_failed'); // the message's action didn't complete → refund
         break;
       }
       if (result.clarification) { reply = result.clarification; break; }
@@ -7405,16 +7450,14 @@ You are a senior marketing strategist, not a generic chatbot — assume responsi
     }
     if (reservation) creditManager.finalizeCreditLog(reservation, 'ai_chat', { provider: 'aiml', success: true, route: req.path }).catch(() => {});
     if (pendingAction) return res.json({ pendingAction });
+    if (!reply) paidActions.markFailed('no_reply'); // no usable answer → refund
     res.json({ reply: reply || "I wasn't able to complete that — could you rephrase?", usedContext: businessContext ? businessContext.sources : undefined, appliedEdit: appliedEdit || undefined });
   } catch (err) {
     console.error('[ai/chat] error:', err.message);
     // Refused by the prompt-size guard before any provider call: nothing
     // was generated, so the reserved credits go back.
     if (err && err.code === 'AI_PROMPT_TOO_LARGE') {
-      if (reservation) {
-        try { await creditManager.refundCredits(reservation); } catch (e) { console.warn('[ai/chat] refund failed:', e.message); }
-        creditManager.finalizeCreditLog(Object.assign({}, reservation, { charged: false }), 'ai_chat', { success: false, error: 'prompt_too_large', route: req.path }).catch(() => {});
-      }
+      if (reservation) creditManager.finalizeCreditLog(reservation, 'ai_chat', { success: false, error: 'prompt_too_large', route: req.path }).catch(() => {});
       return res.status(413).json({ error: 'This message is too long to process. Shorten it and try again.', code: 'AI_PROMPT_TOO_LARGE' });
     }
     if (reservation) creditManager.finalizeCreditLog(reservation, 'ai_chat', { success: false, error: err.message, route: req.path }).catch(() => {});
@@ -17619,6 +17662,13 @@ function _scheduleBackgroundJob(name, expression, fn, options) {
 // â”€â”€ Daily cron: delete unverified accounts older than 14 days â”€â”€â”€
 // Runs at 02:00 UTC every day. Safe to re-run â€” only targets accounts
 // where email_verified = false AND created_at < 14 days ago.
+// Refunds paid actions left in progress by a crashed/hung request and
+// settles abandoned async video jobs (services/paidActions.js sweep).
+_scheduleBackgroundJob('paid-actions-sweep', '*/15 * * * *', () => {
+  const aimlSweep = require('./providers/aimlProvider');
+  return paidActions.sweep({ getVideoStatus: (id) => aimlSweep.getVideoStatus(id) }).catch((err) => console.error('[paidActions] sweep failed:', err.message));
+});
+
 _scheduleBackgroundJob('unverified-account-cleanup', '0 2 * * *', async () => {
   const cutoff = new Date(Date.now() - 14 * 24 * 60 * 60 * 1000).toISOString();
   console.log(`[Cron] Cleanup run â€” cutoff: ${cutoff}`);

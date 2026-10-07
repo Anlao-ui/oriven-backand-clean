@@ -28,6 +28,7 @@
 const { AsyncLocalStorage } = require('async_hooks');
 
 const als = new AsyncLocalStorage();
+const spendGuard = require('./spendGuard');
 
 const DEFAULT_MAX_PROMPT_CHARS = 200000;
 const DEFAULT_WARN_PROMPT_CHARS = 60000;
@@ -147,6 +148,7 @@ function _safe(fields) {
     route: str(c.route, 160),
     operation: str(c.operation, 80),
     userId: str(c.userId, 64),
+    actionId: str(c.paid && c.paid.actionId, 64),
     promptChars: num(fields.promptChars),
     approxPromptTokens: num(fields.promptChars) == null ? null : Math.ceil(fields.promptChars / 4),
     removedInlineChars: num(fields.removedInlineChars),
@@ -154,6 +156,8 @@ function _safe(fields) {
     completionTokens: num(fields.completionTokens),
     totalTokens: num(fields.totalTokens),
     tokensReported: fields.tokensReported === true,
+    estCostUsd: num(fields.estCostUsd),
+    durationMs: num(fields.durationMs),
     success: fields.success == null ? null : !!fields.success,
     reason: str(fields.reason, 80),
   };
@@ -217,9 +221,11 @@ function extractUsage(data) {
   return { promptTokens: p, completionTokens: c, totalTokens: t, reported: p != null || c != null || t != null };
 }
 
-function record({ task, model, provider, data, promptChars: chars, success, reason }) {
+function record({ task, model, provider, data, promptChars: chars, success, reason, durationMs }) {
   const usage = success ? extractUsage(data) : { promptTokens: null, completionTokens: null, totalTokens: null, reported: false };
   const c = current();
+  // Feeds the daily spend guard (estimates only; see services/spendGuard.js).
+  const estCostUsd = spendGuard.recordCall({ userId: c && c.userId, model, usage, success: !!success });
   if (c) {
     c.calls += 1;
     c.model = model || c.model;
@@ -231,6 +237,7 @@ function record({ task, model, provider, data, promptChars: chars, success, reas
     event: 'ai_call', task, model, provider, promptChars: chars, success,
     promptTokens: usage.promptTokens, completionTokens: usage.completionTokens, totalTokens: usage.totalTokens,
     tokensReported: usage.reported, reason: success ? null : (reason || 'provider_error'),
+    estCostUsd: +estCostUsd.toFixed(5), durationMs,
   });
   _persist(line);
   return line;

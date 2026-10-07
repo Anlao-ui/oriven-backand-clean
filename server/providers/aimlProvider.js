@@ -119,32 +119,57 @@ const MAX_CONCURRENT_REQUESTS = parseInt(process.env.AIML_MAX_CONCURRENT, 10) ||
 let _activeRequests = 0;
 const _requestQueue = [];
 
+// The wait queue is bounded (AIML_MAX_QUEUE, default 20): past that the
+// request is refused immediately (503, nothing sent, credits refunded by
+// the paid-action settlement) instead of piling up minutes of billable
+// work behind a burst.
+const MAX_QUEUE = parseInt(process.env.AIML_MAX_QUEUE, 10) || 20;
 function _acquireSlot() {
   if (_activeRequests < MAX_CONCURRENT_REQUESTS) {
     _activeRequests++;
     return Promise.resolve();
   }
+  if (_requestQueue.length >= MAX_QUEUE) {
+    const err = new Error('OrivenAI\'s generation service is busy right now. Please try again in a moment.');
+    err.status = 503;
+    err.code = 'AI_BUSY';
+    err.busy = true;
+    err.retryable = false;
+    return Promise.reject(err);
+  }
   return new Promise((resolve) => _requestQueue.push(resolve));
 }
+function queueState() { return { active: _activeRequests, queued: _requestQueue.length, maxConcurrent: MAX_CONCURRENT_REQUESTS, maxQueue: MAX_QUEUE }; }
 function _releaseSlot() {
   const next = _requestQueue.shift();
   if (next) next(); // hand the slot straight to the next queued caller
   else _activeRequests--;
 }
 
-// ── Retry/backoff ────────────────────────────────────────────────
-// Retries only genuinely transient failures -- 429 (rate limit) and 5xx
-// (provider-side outage/overload) -- never 4xx client errors (bad
-// request, auth failure), where retrying can't help and only delays the
-// real error reaching the caller. Honors the provider's own Retry-After
-// header when present (429 responses commonly include one); otherwise
-// falls back to exponential backoff with jitter so many concurrent
-// retries don't all re-hit the provider on the same tick.
-const RETRYABLE_STATUS = new Set([429, 500, 502, 503, 504]);
-const MAX_ATTEMPTS      = parseInt(process.env.AIML_MAX_RETRIES, 10) || 3;
-const BASE_DELAY_MS     = 1500;
-const MAX_DELAY_MS      = 8000;
-const MAX_RETRY_AFTER_MS = 15000; // never honor a provider Retry-After beyond this
+// ── Retry / timeout policy ───────────────────────────────────────
+// A provider request is retried ONLY when the provider certainly did not
+// start (and so cannot bill) the work:
+//   • the connection failed before the request was sent (DNS failure,
+//     connection refused, connect timeout, host/network unreachable)
+//   • HTTP 429 or 503 — the provider refused it up front
+// Each of those gets at most ONE retry (AIML_MAX_RETRIES caps attempts at
+// 2), honoring Retry-After up to 15s.
+//
+// Never retried: a timeout, a connection dropped after sending, 500/502/
+// 504, provider-account errors (401/402/403/quota/billing), other 4xx and
+// malformed bodies. Those may already have been processed — and billed —
+// upstream, or can't succeed on a retry; the caller fails and the paid
+// action is refunded (services/paidActions.js).
+//
+// Every attempt has a hard timeout (AbortController), so a hung provider
+// can never keep a request (and the user's credits) in limbo:
+//   chat/text 180s (AIML_TIMEOUT_MS), image 240s, image edit 240s,
+//   video submit 60s, status polls 30s.
+const RETRY_STATUS = new Set([429, 503]);
+const MAX_ATTEMPTS = Math.min(Math.max(parseInt(process.env.AIML_MAX_RETRIES, 10) || 2, 1), 2);
+const BASE_DELAY_MS = 1500;
+const MAX_RETRY_AFTER_MS = 15000;
+const PRE_SEND_CODES = new Set(['ECONNREFUSED', 'ENOTFOUND', 'EAI_AGAIN', 'UND_ERR_CONNECT_TIMEOUT', 'EHOSTUNREACH', 'ENETUNREACH']);
 
 function _sleep(ms) { return new Promise((resolve) => setTimeout(resolve, ms)); }
 
@@ -153,74 +178,87 @@ function _retryDelay(attempt, retryAfterHeader) {
     const sec = Number(retryAfterHeader);
     if (!Number.isNaN(sec) && sec > 0) return Math.min(sec * 1000, MAX_RETRY_AFTER_MS);
   }
-  const exp    = Math.min(BASE_DELAY_MS * Math.pow(2, attempt - 1), MAX_DELAY_MS);
-  const jitter = exp * 0.25 * Math.random();
-  return Math.round(exp + jitter);
+  return Math.round(BASE_DELAY_MS * attempt * (1 + 0.25 * Math.random()));
 }
 
-// ── Internal HTTP helper ──────────────────────────────────────
-// err.status / err.retryable are set on every thrown error so callers
-// (server.js route handlers) can tell "the provider is genuinely
-// unavailable after retries" apart from every other kind of failure --
-// that distinction is what drives the refund + clear-user-message path.
+function _timeoutFor(method, path) {
+  if (method === 'GET') return 30000;
+  if (path.indexOf('/v2/video/') === 0) return 60000;
+  if (path.indexOf('/v1/images/') === 0) return 240000;
+  return parseInt(process.env.AIML_TIMEOUT_MS, 10) || 180000;
+}
 
-async function _request(method, path, body) {
-  const key  = _key();
-  const url  = `${AIML_BASE}${path}`;
-  const opts = {
-    method,
-    headers: {
-      'Authorization': `Bearer ${key}`,
-      'Content-Type':  'application/json',
-    },
-  };
-  if (body !== undefined) opts.body = JSON.stringify(body);
+// True only when the failure happened before any bytes reached the provider.
+function _failedBeforeSend(netErr) {
+  const code = (netErr && netErr.cause && netErr.cause.code) || (netErr && netErr.code) || '';
+  return PRE_SEND_CODES.has(code);
+}
 
+// Optional hooks set by server.js: before() runs ahead of every billable
+// (non-GET) request and may throw to refuse it (spend guard); after() sees
+// the final outcome (provider-account alerting, video/edit cost tracking).
+let _hooks = {};
+function setHooks(hooks) { _hooks = hooks || {}; }
+
+// One sender for JSON and multipart requests.
+// makeOpts() returns fresh fetch options per attempt (a FormData/JSON body
+// is rebuilt each time); `tag` only labels log lines.
+async function _send(method, path, makeOpts, tag) {
+  if (method !== 'GET' && typeof _hooks.before === 'function') _hooks.before({ method, path });
+  const url = `${AIML_BASE}${path}`;
+  const timeoutMs = _timeoutFor(method, path);
   await _acquireSlot();
+  let outcome = { ok: false, providerAccount: false, attempts: 0 };
   try {
     let lastErr;
     for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
-      let response;
+      outcome.attempts = attempt;
+      const ctrl = new AbortController();
+      const timer = setTimeout(() => ctrl.abort(), timeoutMs);
+      let response, data, parseFailed = false, text = '';
       try {
-        response = await fetch(url, opts);
+        response = await fetch(url, Object.assign(makeOpts(), { signal: ctrl.signal }));
+        try { data = await response.json(); }
+        catch (parseErr) {
+          if (parseErr && parseErr.name === 'AbortError') throw parseErr;
+          parseFailed = true;
+          text = await response.text().catch(() => '(empty)');
+        }
       } catch (netErr) {
-        lastErr = new Error(`AIML API network error: ${netErr.message}`);
-        lastErr.retryable = true;
-        if (attempt < MAX_ATTEMPTS) {
-          const delay = _retryDelay(attempt);
-          console.warn(`[AIML] network error on attempt ${attempt}/${MAX_ATTEMPTS} (${path}) — retrying in ${delay}ms:`, netErr.message);
-          await _sleep(delay);
-          continue;
+        clearTimeout(timer);
+        if (netErr && netErr.name === 'AbortError') {
+          lastErr = new Error(`AIML API timed out after ${Math.round(timeoutMs / 1000)}s (${path})`);
+          lastErr.timeout = true;
+          lastErr.retryable = false;
+          throw lastErr;
         }
-        throw lastErr;
-      }
-
-      let data;
-      try {
-        data = await response.json();
-      } catch (_) {
-        const text = await response.text().catch(() => '(empty)');
-        lastErr = new Error(`AIML API non-JSON (HTTP ${response.status}): ${text.slice(0, 300)}`);
-        lastErr.status = response.status;
-        lastErr.retryable = RETRYABLE_STATUS.has(response.status);
+        lastErr = new Error(`AIML API network error: ${netErr && netErr.message}`);
+        lastErr.retryable = _failedBeforeSend(netErr);
         if (lastErr.retryable && attempt < MAX_ATTEMPTS) {
-          const delay = _retryDelay(attempt, response.headers.get('retry-after'));
-          console.warn(`[AIML] non-JSON HTTP ${response.status} on attempt ${attempt}/${MAX_ATTEMPTS} (${path}) — retrying in ${delay}ms`);
+          const delay = _retryDelay(attempt);
+          console.warn(`[AIML] connection failed before send on attempt ${attempt}/${MAX_ATTEMPTS} (${path}) — retrying in ${delay}ms`);
           await _sleep(delay);
           continue;
         }
         throw lastErr;
       }
+      clearTimeout(timer);
 
-      if (response.ok) return data;
+      if (!parseFailed && response.ok) { outcome.ok = true; return data; }
 
-      lastErr = new Error(_friendlyError(data, response.status));
+      lastErr = new Error(parseFailed
+        ? `AIML API non-JSON (HTTP ${response.status}): ${text.slice(0, 300)}`
+        : _friendlyError(data, response.status));
       lastErr.status = response.status;
-      lastErr.retryable = RETRYABLE_STATUS.has(response.status);
-
+      lastErr.retryable = RETRY_STATUS.has(response.status);
+      if (_isProviderAccountError(response.status, parseFailed ? null : data)) {
+        lastErr.providerAccount = true;
+        lastErr.retryable = false;
+        outcome.providerAccount = true;
+      }
       if (lastErr.retryable && attempt < MAX_ATTEMPTS) {
         const delay = _retryDelay(attempt, response.headers.get('retry-after'));
-        console.warn(`[AIML] HTTP ${response.status} on attempt ${attempt}/${MAX_ATTEMPTS} (${path}) — retrying in ${delay}ms`);
+        console.warn(`[AIML]${tag ? ' ' + tag : ''} HTTP ${response.status} on attempt ${attempt}/${MAX_ATTEMPTS} (${path}) — retrying in ${delay}ms`);
         await _sleep(delay);
         continue;
       }
@@ -229,10 +267,36 @@ async function _request(method, path, body) {
     throw lastErr;
   } finally {
     _releaseSlot();
+    if (typeof _hooks.after === 'function') {
+      try { _hooks.after(Object.assign({ method, path }, outcome)); } catch (_) {}
+    }
   }
 }
 
+async function _request(method, path, body) {
+  const key = _key();
+  return _send(method, path, () => {
+    const opts = { method, headers: { 'Authorization': `Bearer ${key}`, 'Content-Type': 'application/json' } };
+    if (body !== undefined) opts.body = JSON.stringify(body);
+    return opts;
+  });
+}
+
 // ── Friendly error mapping ────────────────────────────────────
+
+// OrivenAI's OWN provider account can't serve the request (no balance,
+// plan/quota exhausted, or its key rejected). Never the end user's fault,
+// so server.js treats it like any other provider-unavailable condition
+// (refund what was reserved + a clear "temporarily unavailable" message)
+// instead of a generic generation failure that keeps the charge.
+function _isProviderAccountError(httpStatus, data) {
+  if (httpStatus === 401 || httpStatus === 402 || httpStatus === 403) return true;
+  if (httpStatus === 400 || httpStatus === 422) {
+    const raw = String(data?.error?.message || data?.message || data?.error || '');
+    return /(insufficient|not enough|no)\s+(credit|balance|fund)|quota|billing|payment required/i.test(raw);
+  }
+  return false;
+}
 
 function _friendlyError(data, httpStatus) {
   const friendly = {
@@ -395,53 +459,12 @@ async function generateImage(prompt, options = {}) {
 
 async function _requestForm(path, form) {
   const key = _key();
-  const url = `${AIML_BASE}${path}`;
   // Deliberately no Content-Type header: fetch sets
   // "multipart/form-data; boundary=..." itself from the FormData body,
   // and hand-setting it here would drop the boundary and break the request.
-  const opts = { method: 'POST', headers: { 'Authorization': `Bearer ${key}` }, body: form };
-
   const masked = _readRaw().slice(0, 5) + '[...]';
   console.log('[AIML/img-edit] → POST', path, '| key prefix:', masked);
-
-  await _acquireSlot();
-  try {
-    let lastErr;
-    for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
-      let response;
-      try {
-        response = await fetch(url, opts);
-      } catch (netErr) {
-        lastErr = new Error(`AIML API network error: ${netErr.message}`);
-        lastErr.retryable = true;
-        if (attempt < MAX_ATTEMPTS) { await _sleep(_retryDelay(attempt)); continue; }
-        throw lastErr;
-      }
-
-      let data;
-      try {
-        data = await response.json();
-      } catch (_) {
-        const text = await response.text().catch(() => '(empty)');
-        lastErr = new Error(`AIML API non-JSON (HTTP ${response.status}): ${text.slice(0, 300)}`);
-        lastErr.status = response.status;
-        lastErr.retryable = RETRYABLE_STATUS.has(response.status);
-        if (lastErr.retryable && attempt < MAX_ATTEMPTS) { await _sleep(_retryDelay(attempt, response.headers.get('retry-after'))); continue; }
-        throw lastErr;
-      }
-
-      if (response.ok) return data;
-
-      lastErr = new Error(_friendlyError(data, response.status));
-      lastErr.status = response.status;
-      lastErr.retryable = RETRYABLE_STATUS.has(response.status);
-      if (lastErr.retryable && attempt < MAX_ATTEMPTS) { await _sleep(_retryDelay(attempt, response.headers.get('retry-after'))); continue; }
-      throw lastErr;
-    }
-    throw lastErr;
-  } finally {
-    _releaseSlot();
-  }
+  return _send('POST', path, () => ({ method: 'POST', headers: { 'Authorization': `Bearer ${key}` }, body: form }), 'img-edit');
 }
 
 // imageBuffer: Buffer of the source image bytes. mimeType: e.g. 'image/png'.
@@ -592,4 +615,6 @@ module.exports = {
   generateVideo,
   generateVideoFromImage,
   getVideoStatus,
+  setHooks,
+  queueState,
 };

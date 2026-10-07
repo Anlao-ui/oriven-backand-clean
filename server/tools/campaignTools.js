@@ -369,7 +369,10 @@ toolRouter.register({
   name: 'refresh_campaign_creative',
   description: 'Generate a complete refreshed campaign (Google + Meta + TikTok packages together) for a product — reuses the Creative Engine\'s campaign suite. Read-only.',
   params: '{ product: string, goal?: string }',
-  requiresConfirmation: false,
+  // Generates three full campaign packages (three large model calls) in one
+  // go, so it runs only after the user confirms it in chat — never silently
+  // from inside the chat tool loop.
+  requiresConfirmation: true,
   resolve: (params) => {
     if (!params.product) return { needsClarification: 'Which product should I refresh the campaign creative for?' };
     return { product: params.product, goal: params.goal || 'Sales' };

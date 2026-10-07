@@ -195,7 +195,7 @@ async function reserveCredits(user, featureKey, opts) {
   const requestId = crypto.randomUUID();
 
   if (!charge) {
-    return { requestId, cost, charged: false, userId: user && user.id };
+    return { requestId, cost, charged: false, userId: user && user.id, featureKey };
   }
   if (!user || !user.id) {
     throw new Error('[creditManager] reserveCredits requires an authenticated user when charge=true');
@@ -217,7 +217,12 @@ async function reserveCredits(user, featureKey, opts) {
   if (!row || !row.ok) {
     throw new InsufficientCreditsError(cost, row && row.balance);
   }
-  return { requestId, cost, charged: true, userId: user.id };
+  const reservation = { requestId, cost, charged: true, userId: user.id, featureKey };
+  // Ties the charge to the current request's paid action so ANY failure of
+  // that request refunds it exactly once (services/paidActions.js). No-op
+  // outside a request (background jobs keep their own refund handling).
+  try { require('./paidActions').attachReservation(reservation); } catch (e) { console.warn('[creditManager] attach failed:', e.message); }
+  return reservation;
 }
 
 // Called when a charged operation ultimately fails after the provider
@@ -230,16 +235,28 @@ async function reserveCredits(user, featureKey, opts) {
 // reserve) -- callers should still wrap this in try/catch since the RPC
 // itself can throw (e.g. not yet migrated -- same defensive pattern as
 // every other RPC call in this file).
+// Idempotent per reservation: the first call refunds, every later call for
+// the same reservation object returns false without touching the balance
+// (paidActions adds a cross-process guard on top via credit_actions).
 async function refundCredits(reservation) {
   if (!reservation || !reservation.charged || !reservation.userId) return false;
+  if (reservation._refundState === 'done' || reservation._refundState === 'pending') return false;
   _assertInitialized();
-  const { data, error } = await supabaseAdmin.rpc('refund_credits', {
-    p_user_id: reservation.userId,
-    p_amount: reservation.cost,
-  });
-  if (error) throw error;
-  const row = Array.isArray(data) ? data[0] : data;
-  return !!(row && row.ok);
+  reservation._refundState = 'pending';
+  try {
+    const { data, error } = await supabaseAdmin.rpc('refund_credits', {
+      p_user_id: reservation.userId,
+      p_amount: reservation.cost,
+    });
+    if (error) throw error;
+    const row = Array.isArray(data) ? data[0] : data;
+    const ok = !!(row && row.ok);
+    reservation._refundState = ok ? 'done' : 'failed';
+    return ok;
+  } catch (err) {
+    reservation._refundState = 'failed';
+    throw err;
+  }
 }
 
 // Called AFTER the AI call (success or failure), via try/finally. Always
