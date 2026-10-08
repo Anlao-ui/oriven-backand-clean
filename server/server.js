@@ -30,6 +30,7 @@ const planEntitlements = require('./services/planEntitlements'); // Free/Starter
 const aiUsage = require('./services/aiUsage'); // prompt sanitizer + size guard + metadata-only AI usage telemetry
 const paidActions = require('./services/paidActions'); // one transaction pattern for every credit charge (claim → charge → settle/refund)
 const spendGuard = require('./services/spendGuard'); // daily provider-spend safety net
+const stripeBilling = require('./services/stripeBilling'); // Stripe → plan/credit reconciliation (authoritative, idempotent)
 const campaignGoals = require('./services/campaignGoals'); // single source of truth for the 4 campaign goals across every platform
 const platformCapabilities = require('./services/platformCapabilities'); // Universal Advertising Setup Engine, Phase 1 — capability registry (definitional only, no client of its own)
 const setupStateEngine = require('./services/setupStateEngine'); // Universal Advertising Setup Engine, Phase 2 — reads existing `integrations` rows only, makes no external API calls
@@ -203,6 +204,7 @@ Object.keys(PRICE_IDS).forEach(function (plan) {
   var priceId = PRICE_IDS[plan];
   if (priceId) PLAN_BY_PRICE_ID[priceId] = plan;
 });
+stripeBilling.init({ stripe, db: supabaseAdmin, creditManager, planByPriceId: PLAN_BY_PRICE_ID });
 
 // Per-request AI usage context (route + user id) for [AIUsage] telemetry.
 app.use(aiUsage.middleware);
@@ -220,278 +222,53 @@ app.use(express.static(path.resolve(__dirname, '..', '..')));
 
 // â”€â”€ Stripe webhook â€” must be registered BEFORE express.json() â”€â”€
 app.post('/api/stripe-webhook', express.raw({ type: 'application/json' }), async (req, res) => {
-  console.log('\nâ”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€');
-  console.log('[Webhook] â–¶ Route hit');
-
-  // 1. Verify Stripe signature
-  const sig = req.headers['stripe-signature'];
+  // 1. Only Stripe can call this: signature check against the raw body.
   let event;
+  try {
+    event = stripe.webhooks.constructEvent(req.body, req.headers['stripe-signature'], process.env.STRIPE_WEBHOOK_SECRET);
+  } catch (err) {
+    console.error('[Webhook] Signature verification failed:', err.message);
+    return res.status(400).send('Webhook Error: invalid signature');
+  }
+
+  // 2. Subscription state comes ONLY from Stripe's own objects, through one
+  //    reconciliation layer (services/stripeBilling.js): plan = the
+  //    subscription's current price + status; credits only after a
+  //    confirmed payment, for Stripe's real billing period.
+  const HANDLERS = {
+    'checkout.session.completed': stripeBilling.onCheckoutCompleted,
+    'invoice.payment_succeeded': stripeBilling.onInvoicePaid,
+    'customer.subscription.updated': stripeBilling.onSubscriptionUpdated,
+    'customer.subscription.deleted': stripeBilling.onSubscriptionDeleted,
+  };
+  const handler = HANDLERS[event.type];
+  if (!handler) {
+    if (event.type === 'invoice.payment_failed') {
+      // No entitlement change: Stripe retries the payment and moves the
+      // subscription to past_due / unpaid / canceled, which the
+      // subscription.updated/deleted handlers apply. No credits are granted.
+      console.warn('[Webhook] invoice.payment_failed', event.id);
+    }
+    return res.json({ received: true });
+  }
+
+  // 3. Each event id is processed once (Stripe delivers at least once).
+  const claim = await stripeBilling.claimEvent(event);
+  if (claim === 'duplicate') return res.json({ received: true, duplicate: true });
+  if (claim === 'busy') return res.status(409).json({ error: 'Event is already being processed' }); // Stripe retries later
 
   try {
-    event = stripe.webhooks.constructEvent(req.body, sig, process.env.STRIPE_WEBHOOK_SECRET);
-    console.log('[Webhook] âœ… Signature verified');
+    const result = await handler(event.data.object);
+    await stripeBilling.finishEvent(event, true);
+    console.log('[Webhook]', event.type, event.id, JSON.stringify(result || {}));
+    return res.json({ received: true });
   } catch (err) {
-    console.error('[Webhook] âŒ Signature verification failed:', err.message);
-    return res.status(400).send(`Webhook Error: ${err.message}`);
+    // Failed mid-way: report failure so Stripe retries. Every step is
+    // idempotent, so a retry can't grant a plan or credits twice.
+    await stripeBilling.finishEvent(event, false, err.message);
+    console.error('[Webhook]', event.type, event.id, 'failed — Stripe will retry:', err.message);
+    return res.status(500).json({ error: 'Webhook processing failed' });
   }
-
-  // 2. Log event type
-  console.log('[Webhook] Event type:', event.type);
-  console.log('[Webhook] Event id:  ', event.id);
-
-  // â”€â”€ Subscription deleted (cancellation applied) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-  if (event.type === 'customer.subscription.deleted') {
-    const sub = event.data.object;
-    const customerId = sub.customer;
-    console.log('[Webhook] subscription.deleted â†’ customer:', customerId);
-    if (customerId) {
-      const { error } = await supabaseAdmin.from('profiles')
-        .update({ subscription_status: 'free', pending_plan: null, pending_plan_date: null })
-        .eq('stripe_customer_id', customerId);
-      if (error) console.error('[Webhook] subscription.deleted DB error:', error.message);
-      else console.log('[Webhook] âœ… Plan reset to free for customer:', customerId);
-    }
-    return res.json({ received: true });
-  }
-
-  // â”€â”€ Subscription updated (paid-to-paid switch) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-  // Plan is derived from the subscription's CURRENT active Stripe price
-  // (PLAN_BY_PRICE_ID reverse lookup), not from sub.metadata.pending_plan.
-  // Metadata was the old signal when /api/schedule-plan-change changed the
-  // Stripe price immediately; now that paid<->paid switches go through a
-  // Stripe Subscription Schedule (real period-end scheduling, see that
-  // route below), the price genuinely does not change in Stripe until the
-  // schedule's phase 2 begins -- at which point THIS event fires with the
-  // new price already active, and comparing it against the DB's current
-  // subscription_status is what detects a real, effective plan change.
-  // This also makes the handler naturally idempotent: once the DB already
-  // matches Stripe's price, repeated/unrelated subscription.updated events
-  // (schedule attachment, cancel_at_period_end toggling, etc.) are a no-op.
-  if (event.type === 'customer.subscription.updated') {
-    const sub = event.data.object;
-    const customerId = sub.customer;
-
-    // Keep the stored "cancellation scheduled" state in sync with Stripe,
-    // whether it was scheduled/undone in Settings or in the Customer Portal.
-    // Only touches pending_plan when it means "cancel to free"; a pending
-    // paid<->paid switch is left alone. Matched on both customer and
-    // subscription id so another subscription's event can't change it.
-    if (customerId && sub.id) {
-      const cancelIso = _subScheduledCancelIso(sub);
-      try {
-        const q = supabaseAdmin.from('profiles');
-        const { error } = cancelIso
-          ? await q.update({ pending_plan: 'free', pending_plan_date: cancelIso })
-              .eq('stripe_customer_id', customerId).eq('stripe_subscription_id', sub.id)
-          : await q.update({ pending_plan: null, pending_plan_date: null })
-              .eq('stripe_customer_id', customerId).eq('stripe_subscription_id', sub.id).eq('pending_plan', 'free');
-        if (error) console.error('[Webhook] subscription.updated cancel-state sync error:', error.message);
-      } catch (err) {
-        console.error('[Webhook] subscription.updated cancel-state sync error:', err.message);
-      }
-    }
-    const currentPriceId = sub.items && sub.items.data && sub.items.data[0] && sub.items.data[0].price && sub.items.data[0].price.id;
-    const planFromStripe = currentPriceId && PLAN_BY_PRICE_ID[currentPriceId];
-
-    if (planFromStripe && sub.status === 'active' && customerId) {
-      const { data: beforeProfile } = await supabaseAdmin.from('profiles')
-        .select('id, subscription_status').eq('stripe_customer_id', customerId).maybeSingle();
-      const previousPlan = beforeProfile && beforeProfile.subscription_status;
-
-      if (beforeProfile && planFromStripe !== previousPlan) {
-        console.log('[Webhook] subscription.updated â†’ Stripe price now maps to plan:', planFromStripe, '(was', previousPlan, ')');
-        const { error } = await supabaseAdmin.from('profiles')
-          .update({ subscription_status: planFromStripe, pending_plan: null, pending_plan_date: null })
-          .eq('id', beforeProfile.id);
-        if (error) {
-          console.error('[Webhook] subscription.updated DB error:', error.message);
-        } else {
-          console.log('[Webhook] âœ… Plan updated to:', planFromStripe, 'for customer:', customerId);
-          try {
-            const cycleStart = sub.current_period_start ? new Date(sub.current_period_start * 1000).toISOString() : new Date().toISOString();
-            const cycleEnd   = sub.current_period_end   ? new Date(sub.current_period_end   * 1000).toISOString() : new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString();
-            await creditManager.provisionCreditsForCycle(beforeProfile.id, planFromStripe, cycleStart, cycleEnd, 'stripe', { previousPlan: previousPlan });
-          } catch (err) {
-            console.error('[Webhook] subscription.updated credit provisioning error:', err.message);
-          }
-        }
-      } else {
-        console.log('[Webhook] subscription.updated â€” Stripe price already matches DB plan, no-op (idempotent)');
-      }
-    } else {
-      console.log('[Webhook] subscription.updated â€” unrecognized price or not active, skipping');
-    }
-    return res.json({ received: true });
-  }
-
-  // -- Invoice paid (real billing-cycle boundary) -- resets credits_balance
-  // to the plan's allowance and anchors credits_cycle_start/end to Stripe's
-  // own period, which does not necessarily align to a calendar month.
-  if (event.type === 'invoice.payment_succeeded') {
-    const invoice = event.data.object;
-    const customerId = invoice.customer;
-    const periodStart = invoice.period_start ? new Date(invoice.period_start * 1000).toISOString() : null;
-    const periodEnd   = invoice.period_end   ? new Date(invoice.period_end   * 1000).toISOString() : null;
-    console.log('[Webhook] invoice.payment_succeeded -> customer:', customerId);
-    if (customerId) {
-      try {
-        const { data: profile } = await supabaseAdmin.from('profiles')
-          .select('id, subscription_status').eq('stripe_customer_id', customerId).maybeSingle();
-        if (profile) {
-          const result = await creditManager.provisionCreditsForCycle(profile.id, profile.subscription_status, periodStart, periodEnd, 'stripe');
-          if (result.provisioned) console.log(`[Webhook] Credits reset to ${result.allowance} for ${profile.id} (plan: ${profile.subscription_status})`);
-          else console.log(`[Webhook] Skipped credit reset for ${profile.id}:`, result.reason);
-        } else {
-          console.warn('[Webhook] invoice.payment_succeeded - no profile found for customer:', customerId);
-        }
-      } catch (err) {
-        console.error('[Webhook] invoice.payment_succeeded credit reset error:', err.message);
-      }
-    }
-    return res.json({ received: true });
-  }
-
-  if (event.type !== 'checkout.session.completed') {
-    console.log('[Webhook] â„¹ï¸  Ignoring event type:', event.type);
-    return res.json({ received: true });
-  }
-
-  const session = event.data.object;
-
-  // 3. Log full metadata for debugging
-  console.log('[Webhook] payment_status:', session.payment_status);
-  console.log('[Webhook] session.metadata:', JSON.stringify(session.metadata));
-
-  // 4. Extract userId and plan
-  const userId = session.metadata && session.metadata.userId;
-  const plan   = session.metadata && session.metadata.plan;
-
-  console.log('[Webhook] Extracted userId:', userId || '(MISSING)');
-  console.log('[Webhook] Extracted plan:  ', plan   || '(MISSING)');
-
-  // 5. Guard: both fields must be present
-  if (!userId) {
-    console.error('[Webhook] âŒ userId missing from metadata â€” cannot update Supabase');
-    return res.json({ received: true });
-  }
-  if (!plan) {
-    console.error('[Webhook] âŒ plan missing from metadata â€” cannot update Supabase');
-    return res.json({ received: true });
-  }
-
-  // 6. Guard: plan must be a known value
-  console.log("[Checkout Debug] Using creator/professional plan mapping");
-  const validPlans = ['starter', 'creator', 'professional'];
-  if (!validPlans.includes(plan)) {
-    console.error(`[Webhook] âŒ Unknown plan "${plan}" â€” expected one of: ${validPlans.join(', ')}`);
-    return res.json({ received: true });
-  }
-
-  // 7. Guard: payment must be confirmed
-  if (session.payment_status !== 'paid') {
-    console.warn(`[Webhook] âš ï¸  payment_status is "${session.payment_status}", not "paid" â€” skipping update`);
-    return res.json({ received: true });
-  }
-
-  // 8. Attempt Supabase update
-  console.log(`[Webhook] ðŸ”„ UPDATE profiles SET subscription_status = '${plan}' WHERE id = '${userId}'`);
-
-  // subscription_status/stripe_subscription_id/stripe_customer_id are safe
-  // to write unconditionally on a webhook retry (idempotent by nature -- a
-  // repeated identical write is a no-op). The credit grant is NOT safe to
-  // repeat this way, so it's split out into provisionCreditsForCycle below,
-  // which has its own idempotency check (skips if credits_cycle_end already
-  // matches) -- Stripe's documented at-least-once delivery means this
-  // handler can genuinely fire more than once for the same checkout.
-  const { data: updateData, error: updateError } = await supabaseAdmin
-    .from('profiles')
-    .update({
-      subscription_status: plan,
-      stripe_subscription_id: session.subscription || null,
-      stripe_customer_id: session.customer || null,
-    })
-    .eq('id', userId)
-    .select('id, subscription_status');
-
-  if (!updateError && updateData && updateData.length) {
-    try {
-      // First-activation credit grant -- immediately corrected to Stripe's
-      // real billing period by the invoice.payment_succeeded handler above,
-      // which fires right after checkout completes. Routed through
-      // provisionCreditsForCycle (not a direct field write) specifically so
-      // a duplicate delivery of this same event never re-grants the full
-      // allowance twice.
-      const cyc = { start: new Date().toISOString(), end: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString() };
-      const grant = await creditManager.provisionCreditsForCycle(userId, plan, cyc.start, cyc.end, 'signup');
-      console.log('[Webhook] Credit grant:', grant.provisioned ? `${grant.allowance} credits provisioned` : `skipped (${grant.reason})`);
-    } catch (err) {
-      console.error('[Webhook] Credit provisioning error:', err.message);
-    }
-  }
-
-  // Log raw update result â€” never assume success without checking
-  console.log('[Webhook] Raw update response:');
-  console.log('           data: ', JSON.stringify(updateData));
-  console.log('           error:', JSON.stringify(updateError));
-
-  if (updateError) {
-    console.error('[Webhook] âŒ UPDATE failed');
-    console.error('           code:   ', updateError.code);
-    console.error('           message:', updateError.message);
-    console.error('           details:', updateError.details);
-    console.error('           hint:   ', updateError.hint);
-    if (updateError.code === '42501') {
-      console.error('[Webhook] âŒ RLS policy blocked the update â€” service_role key is probably wrong');
-    }
-  } else if (!updateData || updateData.length === 0) {
-    console.warn('[Webhook] âš ï¸  UPDATE matched 0 rows');
-    console.warn('           This means no profile row has id =', userId);
-    console.warn('           Checking whether the row exists at all...');
-
-    const { data: checkData, error: checkError } = await supabaseAdmin
-      .from('profiles')
-      .select('id, subscription_status')
-      .eq('id', userId)
-      .maybeSingle();
-
-    if (checkError) {
-      console.error('[Webhook] âŒ Existence check failed:', checkError.message);
-    } else if (!checkData) {
-      console.error('[Webhook] âŒ No profile row found for userId:', userId);
-      console.error('           The user may not have a profiles row yet');
-    } else {
-      console.log('[Webhook] â„¹ï¸  Row exists but was not updated:', JSON.stringify(checkData));
-      console.log('[Webhook]    This is likely an RLS permission problem');
-    }
-  } else {
-    console.log('[Webhook] âœ… UPDATE succeeded â€” rows changed:', updateData.length);
-    console.log('[Webhook]    Updated row:', JSON.stringify(updateData[0]));
-  }
-
-  // 9. Independent post-update verification SELECT â€” confirms what's in the DB right now
-  console.log('[Webhook] ðŸ”Ž Verifying current DB value...');
-  const { data: verifyData, error: verifyError } = await supabaseAdmin
-    .from('profiles')
-    .select('id, subscription_status')
-    .eq('id', userId)
-    .maybeSingle();
-
-  if (verifyError) {
-    console.error('[Webhook] âŒ Verification SELECT failed:', verifyError.message);
-  } else if (!verifyData) {
-    console.error('[Webhook] âŒ Verification: no row found in profiles for userId:', userId);
-  } else {
-    const actual = verifyData.subscription_status;
-    if (actual === plan) {
-      console.log(`[Webhook] âœ… CONFIRMED â€” DB shows subscription_status = "${actual}"`);
-    } else {
-      console.error(`[Webhook] âŒ MISMATCH â€” expected "${plan}" but DB shows "${actual}"`);
-      console.error('[Webhook]    The update did not persist â€” check service_role key and RLS policies');
-    }
-  }
-
-  console.log('â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€\n');
-  res.json({ received: true });
 });
 
 app.use(express.json({ limit: '20mb' }));
@@ -2174,40 +1951,53 @@ Rules:
 });
 
 // â”€â”€ Stripe checkout session â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// Identity comes ONLY from the verified session token. Any userId/email in
+// the body is ignored (and a mismatching one is rejected). The session is
+// tied to the authenticated user three ways — client_reference_id, session
+// metadata and subscription metadata — and the webhook only links a
+// subscription to that user after ownership checks (services/stripeBilling).
 app.post('/api/create-checkout-session', async (req, res) => {
-  const { plan, userId, userEmail, source } = req.body;
-
-  console.log(`[Checkout] â–¶ Request received â€” plan: ${plan}, userId: ${userId}, email: ${userEmail || '(none)'}`);
-
-  if (!plan || !userId) {
-    console.error('[Checkout] âŒ Missing required fields â€” plan:', plan, 'userId:', userId);
-    return res.status(400).json({ error: 'plan and userId are required' });
+  const user = await getUserFromToken(req);
+  if (!user) return res.status(401).json({ error: 'Sign in to choose a plan.', code: 'AUTH_REQUIRED' });
+  const { plan } = req.body || {};
+  if (req.body && req.body.userId && req.body.userId !== user.id) {
+    console.warn('[Checkout] Refused: body userId does not match the signed-in user', user.id);
+    return res.status(403).json({ error: 'This checkout request does not match your account.', code: 'IDENTITY_MISMATCH' });
   }
 
   const validPlans = ['starter', 'creator', 'professional'];
-  if (!validPlans.includes(plan)) {
-    console.error(`[Checkout] âŒ Unrecognised plan name: "${plan}" â€” expected one of: ${validPlans.join(', ')}`);
-    return res.status(400).json({ error: `Unrecognised plan: ${plan}` });
-  }
-
+  if (!plan || !validPlans.includes(plan)) return res.status(400).json({ error: 'Choose a valid plan.' });
   const priceId = PRICE_IDS[plan];
   if (!priceId) {
-    console.error(`[Checkout] âŒ No price ID configured for plan "${plan}"`);
-    console.error('[Checkout]    STRIPE_PRICE_' + plan.toUpperCase(), '= (NOT SET in environment)');
-    console.error('[Checkout]    Fix: add this variable in the Render dashboard and redeploy');
+    console.error('[Checkout] No price ID configured for plan', plan, '(STRIPE_PRICE_' + plan.toUpperCase() + ')');
     return res.status(400).json({ error: `No price configured for plan: ${plan}. Contact support.` });
   }
 
-  const frontendUrl = FRONTEND_URL;
-  // All checkout cancels return to /app â€” hard paywall will re-appear for unpaid users.
-  const cancelPath = '/app?canceled=true';
+  const { data: profile, error: profErr } = await supabaseAdmin.from('profiles')
+    .select('stripe_customer_id, stripe_subscription_id').eq('id', user.id).maybeSingle();
+  if (profErr) return res.status(500).json({ error: 'Could not verify your account right now.' });
+
+  // One subscription per account: an existing live subscription is changed
+  // from Settings (schedule-plan-change), never by buying a second one.
+  if (profile && profile.stripe_subscription_id) {
+    try {
+      const existing = await stripe.subscriptions.retrieve(profile.stripe_subscription_id);
+      if (stripeBilling.LIVE.includes(existing.status)) {
+        return res.status(409).json({ error: 'You already have a subscription. Change your plan in Settings → Subscription.', code: 'ALREADY_SUBSCRIBED' });
+      }
+    } catch (err) {
+      if (!(err && (err.statusCode === 404 || err.code === 'resource_missing'))) {
+        console.error('[Checkout] Could not verify existing subscription:', err.message);
+        return res.status(502).json({ error: 'Could not reach the payment provider. Please try again.' });
+      }
+    }
+  }
 
   try {
-    const session = await stripe.checkout.sessions.create({
+    const params = {
       mode: 'subscription',
       payment_method_types: ['card'],
       line_items: [{ price: priceId, quantity: 1 }],
-      customer_email: userEmail || undefined,
       // Stripe Tax: Stripe calculates any tax due from the customer's location
       // and tax status, on top of the price (the paid prices are tax-
       // exclusive in Stripe). OrivenAI never computes a rate itself. The
@@ -2216,29 +2006,25 @@ app.post('/api/create-checkout-session', async (req, res) => {
       automatic_tax: { enabled: true },
       billing_address_collection: 'required',
       tax_id_collection: { enabled: true },
-      metadata: { userId, plan },
-      success_url: `${frontendUrl}/app?success=true`,
-      cancel_url:  `${frontendUrl}${cancelPath}`,
-    });
-
-    console.log(`[Checkout] âœ… Session created`);
-    console.log(`[Checkout]    Session ID:   ${session.id}`);
-    console.log(`[Checkout]    userId:       ${userId}`);
-    console.log(`[Checkout]    plan:         ${plan}`);
-    console.log(`[Checkout]    priceId:      ${priceId}`);
-    console.log(`[Checkout]    success_url:  ${frontendUrl}/app?success=true`);
-    console.log(`[Checkout]    cancel_url:   ${frontendUrl}${cancelPath}`);
+      client_reference_id: user.id,
+      metadata: { userId: user.id, plan },
+      subscription_data: { metadata: { userId: user.id, plan } },
+      success_url: `${FRONTEND_URL}/app?success=true`,
+      cancel_url:  `${FRONTEND_URL}/app?canceled=true`,
+    };
+    if (profile && profile.stripe_customer_id) {
+      // Returning customer: reuse their own Stripe customer (never one from
+      // the request). Tax needs Checkout to save the collected address/name.
+      params.customer = profile.stripe_customer_id;
+      params.customer_update = { address: 'auto', name: 'auto' };
+    } else {
+      params.customer_email = user.email || undefined;
+    }
+    const session = await stripe.checkout.sessions.create(params);
+    console.log('[Checkout] Session created for user', user.id, '| plan:', plan);
     res.json({ url: session.url });
   } catch (err) {
-    // Log every available field on Stripe errors for easy debugging
-    console.error('[Checkout] âŒ Stripe error creating session');
-    console.error('           message:', err.message);
-    console.error('           type:   ', err.type    || '(none)');
-    console.error('           code:   ', err.code    || '(none)');
-    console.error('           param:  ', err.param   || '(none)');
-    console.error('           raw:    ', err.raw ? JSON.stringify(err.raw) : '(none)');
-    console.error('           plan:   ', plan);
-    console.error('           priceId:', priceId);
+    console.error('[Checkout] Stripe error creating session:', err.message, '| type:', err.type || '-', '| code:', err.code || '-');
     res.status(500).json({ error: 'Could not create checkout session. Please try again.' });
   }
 });
@@ -2409,7 +2195,7 @@ app.post('/api/schedule-plan-change', requireSubscription, async (req, res) => {
     .eq('id', user.id)
     .maybeSingle();
 
-  if (profileError) return res.status(500).json({ error: profileError.message });
+  if (profileError) return res.status(500).json({ error: 'Could not verify your account right now.' });
 
   const currentPlan = (profile && profile.subscription_status) || 'free';
   const subId = profile && profile.stripe_subscription_id;
@@ -2430,7 +2216,7 @@ app.post('/api/schedule-plan-change', requireSubscription, async (req, res) => {
         .eq('id', user.id);
       if (dbErr) {
         console.error('[SchedulePlan] DB downgrade-to-free failed:', dbErr.message);
-        return res.status(500).json({ error: 'Could not update your plan: ' + dbErr.message });
+        return res.status(500).json({ error: 'Could not update your plan. Please try again.' });
       }
       return res.json({ ok: true, subscription_status: 'free', pending_plan: null, pending_plan_date: null });
     }
@@ -2461,7 +2247,7 @@ app.post('/api/schedule-plan-change', requireSubscription, async (req, res) => {
         // DB don't disagree, then report the real failure instead of ok:true.
         console.error('[SchedulePlan] DB write failed after Stripe cancel scheduled, reverting Stripe:', dbErr.message);
         await stripe.subscriptions.update(subId, { cancel_at_period_end: false }).catch(() => {});
-        return res.status(500).json({ error: 'Could not save the scheduled cancellation: ' + dbErr.message });
+        return res.status(500).json({ error: 'Could not save the scheduled cancellation. Nothing was changed — please try again.' });
       }
       console.log('[SchedulePlan] Cancellation scheduled for:', periodEnd);
       return res.json({ ok: true, pending_plan: 'free', pending_plan_date: periodEnd });
@@ -2475,62 +2261,55 @@ app.post('/api/schedule-plan-change', requireSubscription, async (req, res) => {
     }
   }
 
-  // Switching between paid plans â€” update Stripe subscription, fallback to DB-only change
+  // Switching between paid plans. Stripe is changed first; the DB only
+  // records the scheduled change once Stripe accepted it, and the plan
+  // itself (and its credits) only change when Stripe actually moves the
+  // subscription to the new price and the payment for it succeeds
+  // (webhook → services/stripeBilling.js). A Stripe failure changes nothing.
   const newPriceId = PRICE_IDS[plan];
   if (!newPriceId) return res.status(400).json({ error: 'Price not configured for plan: ' + plan });
 
   if (!subId) {
-    // No Stripe subscription â€” apply plan change directly in DB (edge case: manual override).
-    // This path has no real Stripe invoice/period to anchor a credit cycle
-    // to, and no invoice.payment_succeeded webhook will ever fire for it --
-    // this exact gap (subscription_status changed, credits never
-    // provisioned) was the root cause of accounts showing a paid plan with
-    // credits_balance:0, credits_cycle_end:null. Provision a placeholder
-    // 30-day cycle now, same convention checkout.session.completed uses.
-    const { error: dbErr } = await supabaseAdmin.from('profiles')
-      .update({ subscription_status: plan, pending_plan: null, pending_plan_date: null })
-      .eq('id', user.id);
-    if (dbErr) {
-      console.error('[SchedulePlan] No sub ID â€” DB plan update failed:', dbErr.message);
-      return res.status(500).json({ error: 'Could not update your plan: ' + dbErr.message });
-    }
-    try {
-      const cyc = { start: new Date(), end: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000) };
-      await creditManager.provisionCreditsForCycle(user.id, plan, cyc.start.toISOString(), cyc.end.toISOString(), 'manual', { previousPlan: currentPlan });
-    } catch (err) {
-      console.error('[SchedulePlan] No sub ID â€” credit provisioning failed:', err.message);
-    }
-    console.log('[SchedulePlan] No sub ID â€” applied plan directly in DB:', plan);
-    return res.json({ ok: true, subscription_status: plan });
+    // A paid plan with no Stripe subscription (granted manually by
+    // OrivenAI). Switching to another paid plan means paying for it, so it
+    // goes through Checkout — never a direct DB change with free credits.
+    return res.json({ requiresCheckout: true });
   }
 
+  let scheduleId = null, createdSchedule = false;
   try {
+    // Ownership: subId comes only from this user's own profile row; the
+    // subscription must also belong to this user's own Stripe customer.
     const sub = await stripe.subscriptions.retrieve(subId);
-    const periodEnd = new Date(sub.current_period_end * 1000).toISOString();
-    const currentPriceId = sub.items.data[0].price.id;
-
+    if (profile.stripe_customer_id && sub.customer !== profile.stripe_customer_id) {
+      console.error('[SchedulePlan] Subscription/customer mismatch for user', user.id);
+      return res.status(409).json({ error: 'We could not verify this subscription. Please contact contact@orivenai.com.', code: 'SUBSCRIPTION_MISMATCH' });
+    }
+    if (!stripeBilling.ACTIVE.includes(sub.status)) {
+      return res.status(409).json({ error: 'Your subscription has an open payment issue. Update your payment method in Manage Subscription first.', code: 'SUBSCRIPTION_NOT_ACTIVE' });
+    }
+    const period = stripeBilling.periodOf(sub);
+    const currentPriceId = stripeBilling.priceIdOf(sub);
+    if (!period || !currentPriceId) {
+      return res.status(502).json({ error: 'Could not read your billing period from the payment provider. Nothing was changed — please try again.', code: 'STRIPE_PERIOD_UNKNOWN' });
+    }
     if (currentPriceId === newPriceId) {
       return res.status(400).json({ error: 'Already scheduled for this plan' });
     }
+    const startTs = Math.floor(new Date(period.startISO).getTime() / 1000);
+    const endTs = Math.floor(new Date(period.endISO).getTime() / 1000);
 
     // Real Stripe-native "change at period end, no charge now" mechanism --
     // a Subscription Schedule with two phases (current price until the
-    // period boundary, then the new price). This does NOT change Stripe's
-    // active price today, unlike the previous implementation which called
-    // stripe.subscriptions.update(...) with proration_behavior:'create_
-    // prorations' -- that changed Stripe's price AND billed a prorated
-    // amount immediately, while the DB simultaneously told the user the
-    // change was merely "pending until periodEnd": a direct contradiction
-    // between what Stripe had already done and what the UI claimed. With a
-    // schedule, phase 2 genuinely does not take effect in Stripe until
-    // periodEnd, so DB/UI and Stripe now actually agree the whole time.
-    let scheduleId = sub.schedule;
+    // period boundary, then the new price). Stripe's active price does not
+    // change until periodEnd, so DB/UI and Stripe agree the whole time.
+    scheduleId = sub.schedule || null;
     if (!scheduleId) {
       // Turns the existing subscription into a schedule without disrupting
-      // it (Stripe's documented pattern) -- does not create a second
-      // subscription or a second customer.
+      // it (Stripe's documented pattern) -- no second subscription/customer.
       const schedule = await stripe.subscriptionSchedules.create({ from_subscription: subId });
       scheduleId = schedule.id;
+      createdSchedule = true;
     }
     await stripe.subscriptionSchedules.update(scheduleId, {
       end_behavior: 'release', // after phase 2 starts, release the schedule and let the subscription keep renewing normally at the new price -- do not cancel it
@@ -2539,40 +2318,30 @@ app.post('/api/schedule-plan-change', requireSubscription, async (req, res) => {
       // subscriptions started through Checkout with automatic tax, unchanged
       // for any older subscription) instead of leaving it to schedule defaults.
       phases: [
-        { items: [{ price: currentPriceId, quantity: 1 }], start_date: sub.current_period_start, end_date: sub.current_period_end, automatic_tax: { enabled: !!(sub.automatic_tax && sub.automatic_tax.enabled) } },
-        { items: [{ price: newPriceId, quantity: 1 }], start_date: sub.current_period_end, automatic_tax: { enabled: !!(sub.automatic_tax && sub.automatic_tax.enabled) } },
+        { items: [{ price: currentPriceId, quantity: 1 }], start_date: startTs, end_date: endTs, automatic_tax: { enabled: !!(sub.automatic_tax && sub.automatic_tax.enabled) } },
+        { items: [{ price: newPriceId, quantity: 1 }], start_date: endTs, automatic_tax: { enabled: !!(sub.automatic_tax && sub.automatic_tax.enabled) } },
       ],
     });
 
     const { error: dbErr } = await supabaseAdmin.from('profiles')
-      .update({ pending_plan: plan, pending_plan_date: periodEnd })
+      .update({ pending_plan: plan, pending_plan_date: period.endISO })
       .eq('id', user.id);
     if (dbErr) {
-      console.error('[SchedulePlan] DB write failed after Stripe schedule created:', dbErr.message);
-      return res.status(500).json({ error: 'Plan change was scheduled with the payment provider but could not be saved: ' + dbErr.message });
+      // Stripe accepted the change but we couldn't record it: undo it in
+      // Stripe so the two never disagree, and report a real failure.
+      console.error('[SchedulePlan] DB write failed after Stripe schedule update, releasing schedule:', dbErr.message);
+      await stripe.subscriptionSchedules.release(scheduleId).catch((e) => console.error('[SchedulePlan] Schedule release after DB failure ALSO failed — manual review:', e.message));
+      return res.status(500).json({ error: 'Could not save your plan change. Nothing was changed — please try again.', code: 'PLAN_CHANGE_NOT_SAVED' });
     }
 
-    console.log('[SchedulePlan] Plan change to', plan, 'scheduled (Stripe subscription schedule) for:', periodEnd);
-    return res.json({ ok: true, pending_plan: plan, pending_plan_date: periodEnd });
+    console.log('[SchedulePlan] Plan change to', plan, 'scheduled (Stripe subscription schedule) for:', period.endISO);
+    return res.json({ ok: true, pending_plan: plan, pending_plan_date: period.endISO });
   } catch (err) {
-    // Stripe failed â€” apply plan change directly in DB so the user isn't stuck.
-    // Same reasoning as the "no sub ID" branch above: no Stripe event will
-    // provision a credit cycle for this change, so do it here directly.
-    console.error('[SchedulePlan] Stripe update failed, falling back to DB plan change:', err.message);
-    const { error: dbErr } = await supabaseAdmin.from('profiles')
-      .update({ subscription_status: plan, pending_plan: null, pending_plan_date: null })
-      .eq('id', user.id);
-    if (dbErr) {
-      console.error('[SchedulePlan] DB fallback plan change also failed:', dbErr.message);
-      return res.status(500).json({ error: 'Could not change your plan: ' + err.message });
-    }
-    try {
-      const cyc = { start: new Date(), end: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000) };
-      await creditManager.provisionCreditsForCycle(user.id, plan, cyc.start.toISOString(), cyc.end.toISOString(), 'manual', { previousPlan: currentPlan });
-    } catch (provErr) {
-      console.error('[SchedulePlan] Fallback credit provisioning failed:', provErr.message);
-    }
-    return res.json({ ok: true, subscription_status: plan });
+    // Never fall back to a DB-only plan change: that granted a plan (and a
+    // full credit allowance) the payment provider never established.
+    console.error('[SchedulePlan] Stripe plan change failed, nothing changed:', err.message);
+    if (createdSchedule && scheduleId) await stripe.subscriptionSchedules.release(scheduleId).catch(() => {});
+    return res.status(502).json({ error: 'Could not change your plan with the payment provider. Nothing was changed — please try again.', code: 'STRIPE_PLAN_CHANGE_FAILED' });
   }
 });
 
@@ -2583,11 +2352,26 @@ app.post('/api/cancel-plan-change', requireSubscription, async (req, res) => {
 
   const { data: profile, error: profileError } = await supabaseAdmin
     .from('profiles')
-    .select('pending_plan, stripe_subscription_id')
+    .select('pending_plan, stripe_subscription_id, stripe_customer_id')
     .eq('id', user.id)
     .maybeSingle();
 
-  if (profileError) return res.status(500).json({ error: profileError.message });
+  if (profileError) return res.status(500).json({ error: 'Could not verify your account right now.' });
+
+  // Ownership: the subscription comes only from this user's own profile row
+  // and must belong to this user's own Stripe customer.
+  if (profile && profile.stripe_subscription_id) {
+    try {
+      const owned = await stripe.subscriptions.retrieve(profile.stripe_subscription_id);
+      if (profile.stripe_customer_id && owned.customer !== profile.stripe_customer_id) {
+        console.error('[CancelPlanChange] Subscription/customer mismatch for user', user.id);
+        return res.status(409).json({ error: 'We could not verify this subscription. Please contact contact@orivenai.com.', code: 'SUBSCRIPTION_MISMATCH' });
+      }
+    } catch (err) {
+      console.error('[CancelPlanChange] Could not verify subscription:', err.message);
+      return res.status(502).json({ error: 'Could not reach the payment provider. Nothing was changed — please try again.', code: 'STRIPE_UNAVAILABLE' });
+    }
+  }
 
   // Undo whatever is actually scheduled in Stripe -- BEFORE clearing the DB
   // fields, and returning an error (not ok:true) if the Stripe side fails,
@@ -2625,14 +2409,19 @@ app.post('/api/cancel-plan-change', requireSubscription, async (req, res) => {
       }
     } catch (err) {
       console.error('[CancelPlanChange] Stripe undo error:', err.message);
-      return res.status(500).json({ error: 'Could not cancel the scheduled change with the payment provider: ' + err.message });
+      return res.status(502).json({ error: 'Could not cancel the scheduled change with the payment provider. Nothing was changed — please try again.', code: 'STRIPE_UNDO_FAILED' });
     }
   }
 
   const { error: dbErr } = await supabaseAdmin.from('profiles')
     .update({ pending_plan: null, pending_plan_date: null })
     .eq('id', user.id);
-  if (dbErr) return res.status(500).json({ error: 'Could not clear the scheduled change: ' + dbErr.message });
+  if (dbErr) {
+    // Stripe is already back on the current plan; the next subscription.updated
+    // webhook re-syncs the display state, so report the failure honestly.
+    console.error('[CancelPlanChange] DB clear failed after Stripe undo:', dbErr.message);
+    return res.status(500).json({ error: 'Your plan was kept, but the change could not be saved here. Refresh in a moment.', code: 'PLAN_STATE_NOT_SAVED' });
+  }
 
   res.json({ ok: true });
 });
@@ -17675,15 +17464,19 @@ _scheduleBackgroundJob('unverified-account-cleanup', '0 2 * * *', async () => {
   try {
     const { data: stale, error } = await supabaseAdmin
       .from('profiles')
-      .select('id, email')
+      .select('id, email, subscription_status, stripe_subscription_id, stripe_customer_id')
       .eq('email_verified', false)
       .lt('created_at', cutoff);
 
     if (error) { console.error('[Cron] Query error:', error.message); return; }
     if (!stale || stale.length === 0) { console.log('[Cron] No stale unverified accounts'); return; }
 
-    console.log(`[Cron] Deleting ${stale.length} unverified account(s)...`);
-    for (const row of stale) {
+    // Never delete an account that pays or has a paid plan — that would
+    // leave a Stripe subscription billing a person with no account.
+    const deletable = stale.filter((row) => !row.stripe_subscription_id && !row.stripe_customer_id && !PAID_PLANS.includes(row.subscription_status));
+    if (deletable.length !== stale.length) console.warn(`[Cron] Skipping ${stale.length - deletable.length} unverified account(s) with a paid plan or Stripe billing`);
+    console.log(`[Cron] Deleting ${deletable.length} unverified account(s)...`);
+    for (const row of deletable) {
       try {
         const { error: delErr } = await supabaseAdmin.auth.admin.deleteUser(row.id);
         if (delErr) console.error('[Cron] Delete failed for', row.id, ':', delErr.message);
@@ -17706,13 +17499,26 @@ _scheduleBackgroundJob('unverified-account-cleanup', '0 2 * * *', async () => {
 _scheduleBackgroundJob('credit-cycle-safety-net', '0 3 * * *', async () => {
   try {
     const { data: overdue, error } = await supabaseAdmin.from('profiles')
-      .select('id, subscription_status, credits_cycle_end')
+      .select('id, subscription_status, credits_cycle_end, stripe_subscription_id, stripe_customer_id')
       .in('subscription_status', ['starter', 'creator', 'professional'])
       .lt('credits_cycle_end', new Date().toISOString());
     if (error) { console.error('[CreditReset] Query error:', error.message); return; }
     if (overdue && overdue.length) {
-      console.log(`[CreditReset] Resetting ${overdue.length} overdue credit cycle(s)`);
+      console.log(`[CreditReset] Checking ${overdue.length} overdue credit cycle(s)`);
       for (const row of overdue) {
+        // Stripe-billed: refill only for a period Stripe says is active and
+        // paid (never for a failed/past-due renewal); revoke if Stripe ended it.
+        if (row.stripe_subscription_id) {
+          try {
+            const r = await stripeBilling.reconcileOverdue(row);
+            console.log('[CreditReset] Stripe reconcile', row.id, JSON.stringify(r && (r.credits || r.skipped || r.plan)));
+          } catch (err) {
+            console.error('[CreditReset] Stripe reconcile failed for', row.id, ':', err.message);
+          }
+          continue;
+        }
+        // No Stripe subscription (plan granted manually): keep the existing
+        // 30-day renewal of the manual grant.
         const allowance = creditManager.PLAN_ALLOWANCES[row.subscription_status];
         if (allowance == null) continue;
         const oldEnd = row.credits_cycle_end ? new Date(row.credits_cycle_end) : new Date();
@@ -17735,13 +17541,18 @@ _scheduleBackgroundJob('credit-cycle-safety-net', '0 3 * * *', async () => {
     // exact bug this pass fixes -- would otherwise sit broken forever
     // until its owner happens to load /api/credits/status.
     const { data: neverProvisioned, error: npErr } = await supabaseAdmin.from('profiles')
-      .select('id, subscription_status')
+      .select('id, subscription_status, stripe_subscription_id, stripe_customer_id')
       .in('subscription_status', ['starter', 'creator', 'professional'])
       .is('credits_cycle_end', null);
     if (npErr) { console.error('[CreditReset] Never-provisioned query error:', npErr.message); return; }
     if (neverProvisioned && neverProvisioned.length) {
       console.log(`[CreditReset] Repairing ${neverProvisioned.length} never-provisioned paid account(s)`);
       for (const row of neverProvisioned) {
+        if (row.stripe_subscription_id) {
+          // Stripe-billed: only provision what Stripe shows as active and paid.
+          try { await stripeBilling.reconcileOverdue(row); } catch (err) { console.error('[CreditReset] Stripe reconcile failed for', row.id, ':', err.message); }
+          continue;
+        }
         const start = new Date();
         const end = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000);
         try {

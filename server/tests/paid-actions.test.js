@@ -67,8 +67,8 @@ class Q {
   is(c, v) { this.f.push((r) => (r[c] == null) === (v == null)); return this; }
   order() { return this; } range() { return this; } not() { return this; } or() { return this; } ilike() { return this; } contains() { return this; } filter() { return this; }
   limit(n) { this.lim = n; return this; }
-  maybeSingle() { this.single = 'maybe'; return this.run(); }
-  single() { this.single = 'one'; return this.run(); }
+  maybeSingle() { this._single = 'maybe'; return this.run(); }
+  single() { this._single = 'one'; return this.run(); }
   then(a, b) { return this.run().then(a, b); }
   async run() {
     await null;
@@ -90,7 +90,7 @@ class Q {
     if (this.op === 'delete') { const m = match(); TABLES[this.t] = all.filter((r) => !m.includes(r)); return { data: null, error: null }; }
     let m = match().map((x) => ({ ...x }));
     if (this.lim != null) m = m.slice(0, this.lim);
-    if (this.single) return { data: m[0] || null, error: null };
+    if (this._single) return { data: m[0] || null, error: null };
     return { data: m, error: null };
   }
 }

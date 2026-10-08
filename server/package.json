@@ -8,6 +8,7 @@
     "test:research": "node tests/research.test.js",
     "test:paid-actions": "node tests/paid-actions.test.js",
     "test:provider-retry": "node tests/provider-retry.test.js",
+    "test:billing-integrity": "node tests/billing-integrity.test.js",
     "test:publish-idempotency": "node tests/publish-idempotency.test.js",
     "test:research-retrieval": "node tests/research-retrieval.test.js",
     "test:research-url-context": "node tests/research-url-context.test.js",

@@ -378,7 +378,7 @@ async function getCreditStatus(userId) {
   _assertInitialized();
   const { data, error } = await supabaseAdmin
     .from('profiles')
-    .select('credits_balance, credits_cycle_end, subscription_status, credits_provisioned_plan, campaigns_generated')
+    .select('credits_balance, credits_cycle_end, subscription_status, credits_provisioned_plan, campaigns_generated, stripe_subscription_id')
     .eq('id', userId)
     .maybeSingle();
   if (error) throw error;
@@ -430,9 +430,15 @@ async function getCreditStatus(userId) {
   // reset credits on every Settings open or page load. Scoped to
   // plan !== 'free' -- Free's own reset lives entirely in
   // ensure_free_daily_cycle above, not this Node-side repair path.
+  // Not for Stripe-billed accounts: their credits are granted only after
+  // Stripe confirms a payment, for Stripe's real billing period
+  // (services/stripeBilling.js). Repairing here on a page load would grant
+  // a new plan's allowance before its payment succeeded (e.g. the moment a
+  // scheduled upgrade flips the plan label).
+  const stripeBilled = !!(data && data.stripe_subscription_id);
   const neverProvisioned = data && !data.credits_cycle_end;
   const provisionedForWrongPlan = data && data.credits_cycle_end && data.credits_provisioned_plan && data.credits_provisioned_plan !== plan;
-  if (plan !== 'free' && (neverProvisioned || provisionedForWrongPlan) && allowance > 0) {
+  if (plan !== 'free' && !stripeBilled && (neverProvisioned || provisionedForWrongPlan) && allowance > 0) {
     try {
       const cyc = _placeholderCycle();
       const result = await provisionCreditsForCycle(userId, plan, cyc.startISO, cyc.endISO, 'repair', { previousPlan: data.credits_provisioned_plan });
