@@ -36,6 +36,7 @@ const accounts = require('./services/accounts'); // signup validation, profile c
 const firstAd = require('./services/firstAd'); // free first-ad image for new Free accounts (off unless FREE_FIRST_AD_ENABLED)
 const emailLifecycle = require('./services/email/lifecycle'); // lifecycle emails (off unless EMAIL_MODE + EMAIL_LIFECYCLE_ENABLED)
 const emailSender = require('./services/email/sender');
+const emailVerification = require('./services/email/verification'); // verification email: Resend first, SMTP fallback
 const campaignGoals = require('./services/campaignGoals'); // single source of truth for the 4 campaign goals across every platform
 const platformCapabilities = require('./services/platformCapabilities'); // Universal Advertising Setup Engine, Phase 1 — capability registry (definitional only, no client of its own)
 const setupStateEngine = require('./services/setupStateEngine'); // Universal Advertising Setup Engine, Phase 2 — reads existing `integrations` rows only, makes no external API calls
@@ -2702,6 +2703,26 @@ app.post('/api/support/admin-reply', async (req, res) => {
   }
 });
 
+// Sends the verification email for a freshly stored token: Resend when it can
+// deliver to this address, the existing SMTP path otherwise (or if Resend
+// fails). Never throws.
+async function _sendVerificationEmail({ to, firstName, token, smtpReady }) {
+  const verifyUrl = `${FRONTEND_URL}?verify_token=${token}`;
+  const smtpSend = smtpReady ? () => _smtpTransporter().sendMail({
+    from:    process.env.SMTP_FROM || `ORIVEN <${process.env.SMTP_USER}>`,
+    to,
+    subject: 'Verify your ORIVEN email address',
+    html:    _verificationEmailHtml(firstName || 'there', verifyUrl),
+    text:    `Hi ${firstName || 'there'},\n\nVerify your email:\n${verifyUrl}\n\nThis link is valid for ${accounts.VERIFY_TTL_DAYS} days.\n\n— ORIVEN`
+  }) : null;
+  try {
+    return await emailVerification.sendVerification({ to, firstName, verifyUrl, tokenHash: accounts.hashToken(token), smtpSend });
+  } catch (err) {
+    console.error('[Verification] send error:', err.message);
+    return { via: 'none', reason: 'error' };
+  }
+}
+
 // ── POST /api/signup ────────────────────────────────────────────────
 // Creates the auth user (email_confirm:true — sign-in is not blocked on
 // verification), then its profile row, then sends the verification email.
@@ -2737,7 +2758,7 @@ app.post('/api/signup', async (req, res) => {
   onboarding.recordEvent({ name: 'signup_completed', userId: user.id }); // activation funnel; fire-and-forget
 
   const smtpReady = !!(process.env.SMTP_USER && process.env.SMTP_PASS);
-  const token = smtpReady ? accounts.newToken() : null;
+  const token = emailVerification.canSendVerification(email, smtpReady) ? accounts.newToken() : null;
   const profile = await accounts.createProfile({ userId: user.id, firstName, lastName, email, tokenHash: token ? accounts.hashToken(token) : null });
   if (!profile.ok) {
     // The account exists and can sign in; the app creates a minimal profile
@@ -2746,23 +2767,13 @@ app.post('/api/signup', async (req, res) => {
   }
 
   // Verification email: only when a token was really stored (otherwise the
-  // link could never work). Best-effort — signup succeeds either way.
+  // link could never work). Resend first, SMTP fallback (verification.js).
+  // Best-effort — signup succeeds either way.
   if (token && profile.verification) {
-    const verifyUrl = `${FRONTEND_URL}?verify_token=${token}`;
-    try {
-      await _smtpTransporter().sendMail({
-        from:    process.env.SMTP_FROM || `ORIVEN <${process.env.SMTP_USER}>`,
-        to:      email,
-        subject: 'Verify your ORIVEN email address',
-        html:    _verificationEmailHtml(firstName, verifyUrl),
-        text:    `Hi ${firstName},\n\nVerify your email:\n${verifyUrl}\n\nThis link is valid for ${accounts.VERIFY_TTL_DAYS} days.\n\n— ORIVEN`
-      });
-      console.log('[Signup] Verification email sent for user', user.id);
-    } catch (emailErr) {
-      console.error('[Signup] Verification email failed (non-fatal):', emailErr.message);
-    }
-  } else if (!smtpReady) {
-    console.warn('[Signup] SMTP not configured — no verification email');
+    const sent = await _sendVerificationEmail({ to: email, firstName, token, smtpReady });
+    console.log('[Signup] Verification email for user', user.id, '| via:', sent.via, sent.reason ? '(' + sent.reason + ')' : '');
+  } else if (!token) {
+    console.warn('[Signup] No email provider available — no verification email');
   }
 
   // Marketing email only with an explicit opt-in (unchecked by default in
@@ -2815,29 +2826,29 @@ app.post('/api/verify-email', async (req, res) => {
 app.post('/api/resend-verification', async (req, res) => {
   const user = await getUserFromToken(req);
   if (!user) return res.status(401).json({ error: 'Unauthorized' });
-  if (!process.env.SMTP_USER || !process.env.SMTP_PASS) {
-    return res.status(503).json({ error: 'Email service not configured' });
-  }
+  const smtpReady = !!(process.env.SMTP_USER && process.env.SMTP_PASS);
   if (!accounts.allowSignup('resend:' + user.id)) return res.status(429).json({ error: 'Too many requests. Please try again later.' });
   try {
     const { data: profile } = await supabaseAdmin.from('profiles')
-      .select('first_name, email, email_verified').eq('id', user.id).maybeSingle();
+      .select('first_name, email, email_verified, verification_sent_at').eq('id', user.id).maybeSingle();
     if (profile && profile.email_verified === true) return res.json({ ok: true, alreadyVerified: true });
+    const toEmail = (profile && profile.email) || user.email;
+    if (!emailVerification.canSendVerification(toEmail, smtpReady)) {
+      return res.status(503).json({ error: 'Email service not configured' });
+    }
+    // One verification email at a time: a new token (and email) only after the cooldown.
+    const lastSent = profile && profile.verification_sent_at ? Date.parse(profile.verification_sent_at) : 0;
+    if (lastSent && Date.now() - lastSent < emailVerification.RESEND_COOLDOWN_MS) {
+      return res.status(429).json({ error: 'We just sent you an email. Please wait a minute before requesting another.', code: 'VERIFY_COOLDOWN' });
+    }
     const token = accounts.newToken();
     if (!(await accounts.storeNewToken(user.id, accounts.hashToken(token)))) {
       return res.status(503).json({ error: 'Email verification is not available yet.' });
     }
-    const firstName = (profile && profile.first_name) || 'there';
-    const toEmail   = (profile && profile.email) || user.email;
-    const verifyUrl = `${FRONTEND_URL}?verify_token=${token}`;
-    await _smtpTransporter().sendMail({
-      from:    process.env.SMTP_FROM || `ORIVEN <${process.env.SMTP_USER}>`,
-      to:      toEmail,
-      subject: 'Verify your ORIVEN email address',
-      html:    _verificationEmailHtml(firstName, verifyUrl),
-      text:    `Hi ${firstName},\n\nVerify your email:\n${verifyUrl}\n\nThis link is valid for ${accounts.VERIFY_TTL_DAYS} days.\n\n— ORIVEN`
-    });
-    console.log('[ResendVerify] Sent for user', user.id);
+    const firstName = (profile && profile.first_name) || null;
+    const sent = await _sendVerificationEmail({ to: toEmail, firstName, token, smtpReady });
+    console.log('[ResendVerify] user', user.id, '| via:', sent.via, sent.reason ? '(' + sent.reason + ')' : '');
+    if (sent.via === 'none') return res.status(sent.reason === 'suppressed' ? 422 : 500).json({ error: sent.reason === 'suppressed' ? 'We can’t send email to this address. Please contact support.' : 'Could not send that email right now. Please try again shortly.' });
     res.json({ ok: true });
   } catch (err) {
     console.error('[ResendVerify] Failed:', err.message);
@@ -16064,9 +16075,11 @@ app.post('/api/email/unsubscribe', (req, res) => _unsubscribe(req, res, false));
 app.get('/api/email/preferences', async (req, res) => {
   const user = await getUserFromToken(req);
   if (!user) return res.status(401).json({ error: 'Authentication required' });
-  const { data, error } = await supabaseAdmin.from('profiles').select('marketing_opt_in').eq('id', user.id).maybeSingle();
-  if (error) return res.json({ marketing: false, available: false });
-  res.json({ marketing: !!(data && data.marketing_opt_in === true), available: true });
+  const { data, error } = await supabaseAdmin.from('profiles').select('marketing_opt_in, email').eq('id', user.id).maybeSingle();
+  if (error) return res.json({ marketing: false, available: false, suppressed: false });
+  let suppressed = false;
+  try { suppressed = await emailLifecycle.isSuppressed((data && data.email) || user.email); } catch (_) {}
+  res.json({ marketing: !suppressed && !!(data && data.marketing_opt_in === true), available: true, suppressed });
 });
 app.put('/api/email/preferences', async (req, res) => {
   const user = await getUserFromToken(req);
@@ -16074,6 +16087,13 @@ app.put('/api/email/preferences', async (req, res) => {
   const want = req.body && req.body.marketing;
   if (typeof want !== 'boolean') return res.status(400).json({ error: 'marketing must be true or false' });
   try {
+    if (want) {
+      // An address that bounced or reported spam can't be opted back in here.
+      const { data: p } = await supabaseAdmin.from('profiles').select('email').eq('id', user.id).maybeSingle();
+      if (await emailLifecycle.isSuppressed((p && p.email) || user.email)) {
+        return res.status(409).json({ error: 'We can’t send email to this address.', code: 'EMAIL_SUPPRESSED' });
+      }
+    }
     const ok = await emailLifecycle.setConsent(user.id, want, 'settings');
     if (!ok) return res.status(503).json({ error: 'Email preferences are not available yet.' });
     res.json({ marketing: want });

@@ -23,7 +23,6 @@ H.net.handler = async (url, opts) => {
   return new Response(JSON.stringify({ id: 'em_' + resend.sent.length }), { status: 200 });
 };
 const P = (id, created, extra) => Object.assign({ id, email: id + '@example.invalid', first_name: 'Sam', created_at: created, subscription_status: 'free', first_value_at: null, first_value_kind: null, marketing_opt_in: null }, extra || {});
-const sentTo = (id) => resend.sent.filter((s) => s.to === id + '@example.invalid' || s.to === 'qa@example.invalid');
 
 (async () => {
   await H.start();
@@ -51,8 +50,8 @@ const sentTo = (id) => resend.sent.filter((s) => s.to === id + '@example.invalid
   check('names are HTML-escaped', !/<script>x/.test(w.html) && /&lt;script&gt;/.test(w.html));
   check('free first ad mentioned only when available', /free/.test(T.render('first_ad_reminder', { freeFirstAd: true }, { appUrl: 'a' }).subject) && !/free/i.test(T.render('first_ad_reminder', { freeFirstAd: false }, { appUrl: 'a' }).html.replace(/Free plan/g, '')));
 
-  log('\nC. Triggers (test mode → every message goes to the QA inbox)');
-  process.env.EMAIL_MODE = 'test'; process.env.RESEND_API_KEY = 're_test_mock'; process.env.EMAIL_FROM = 'OrivenAI <hello@mail.orivenai.com>'; process.env.EMAIL_TEST_TO = 'qa@example.invalid';
+  log('\nC. Triggers (live mode against the mocked Resend — nothing leaves this process)');
+  process.env.EMAIL_MODE = 'live'; process.env.RESEND_API_KEY = 're_test_mock'; process.env.EMAIL_FROM = 'OrivenAI <hello@mail.orivenai.com>';
   H.rows('profiles').length = 0; H.rows('email_sends').length = 0;
   H.rows('profiles').push(
     P(uid(2), ago(0.2)),                                                              // welcome
@@ -81,7 +80,8 @@ const sentTo = (id) => resend.sent.filter((s) => s.to === id + '@example.invalid
   check('paid onboarding → Creator (service, sent without marketing consent)', byUser[uid(8)] === 'paid_onboarding');
   check('historical account → nothing', !byUser[uid(9)]);
   check('missing email address → nothing', !byUser[uid(10)]);
-  check('test mode: every message went to the QA inbox, subject [TEST]', resend.sent.length === 6 && resend.sent.every((m) => m.to === 'qa@example.invalid' && /^\[TEST\] /.test(m.subject)), resend.sent.map((m) => m.to));
+  check('six emails, each to its own account, live subjects (no [TEST])', resend.sent.length === 6 && resend.sent.every((m) => /@example\.invalid$/.test(m.to) && !/^\[TEST\]/.test(m.subject)), resend.sent.map((m) => m.to));
+  check('live idempotency keys carry the live scope', resend.sent.every((m) => /^oriven:live:/.test(m.key)));
   check('API key sent as Bearer only', resend.sent.every((m) => m.auth === 'Bearer re_test_mock'));
   const mk = resend.sent.filter((m) => m.headers['List-Unsubscribe']);
   check('marketing emails carry List-Unsubscribe + one-click headers', mk.length === 4 && mk.every((m) => m.headers['List-Unsubscribe-Post'] === 'List-Unsubscribe=One-Click'));
@@ -151,8 +151,8 @@ const sentTo = (id) => resend.sent.filter((s) => s.to === id + '@example.invalid
   await L.runOnce({ now });
   const row13 = H.rows('email_sends').find((x) => x.user_id === u13);
   await L.retryFailed({ minAgeMs: 0 });
-  check('a 4xx is permanent → not retried', row13.status === 'failed' && row13.attempts === 1);
-  check('idempotency key per (user, email)', resend.sent.every((m) => /^oriven:[0-9a-f-]+:/.test(m.key)));
+  check('a 4xx is permanent → marked error, not retried', row13.status === 'error' && row13.attempts === 1, row13);
+  check('idempotency key per (scope, user, email)', resend.sent.every((m) => /^oriven:live:[0-9a-f-]+:/.test(m.key)));
   const t0 = Date.now(); for (let i = 0; i < 6; i++) await sender.send({ to: 'a@b.c', subject: 's', html: 'h', text: 't', idempotencyKey: 'rate' + i });
   check('client-side pacing (~5/s, under Resend’s 10/s)', Date.now() - t0 >= 900, Date.now() - t0);
 
@@ -182,8 +182,8 @@ const sentTo = (id) => resend.sent.filter((s) => s.to === id + '@example.invalid
   const r16 = H.rows('email_sends').find((x) => x.user_id === uid(16));
   check('no unsubscribe secret → marketing email skipped, never sent without a working unsubscribe', r16 && r16.status === 'skipped' && r16.error === 'no_unsubscribe_secret');
   process.env.EMAIL_UNSUBSCRIBE_SECRET = 'unsub-test-secret';
-  delete process.env.EMAIL_TEST_TO;
-  check('test mode without EMAIL_TEST_TO → not sent', (await sender.send({ to: 'real@customer.invalid', subject: 's', html: 'h', text: 't', idempotencyKey: 'z' })).skipped === 'no_test_recipient');
+  process.env.EMAIL_MODE = 'test'; delete process.env.EMAIL_TEST_ALLOWLIST;
+  check('test mode with no allowlist → a customer address is refused', (await sender.send({ to: 'real@customer.invalid', subject: 's', html: 'h', text: 't', idempotencyKey: 'z' })).skipped === 'not_allowlisted');
   process.env.EMAIL_MODE = 'off';
   check('mode off → send() refuses', (await sender.send({ to: 'x@y.z', subject: 's', html: 'h', text: 't', idempotencyKey: 'q' })).skipped === 'mode_off');
   check('no outbound network except mocked Resend', H.net.blocked.length === 0, H.net.blocked);

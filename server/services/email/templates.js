@@ -62,6 +62,20 @@ const PLAN_INTRO = {
 };
 
 const TEMPLATES = {
+  // Email address verification (transactional — sent right after signup and
+  // on "resend", regardless of marketing consent). services/email/verification.js
+  verify_email(d, ctx) {
+    const name = d.firstName ? `, ${esc(d.firstName)}` : '';
+    const days = d.validDays || 14;
+    const body =
+      p(`Hi${name}. Please confirm that this is your email address, so we can reach you about your account.`) +
+      button('Confirm my email', d.verifyUrl) +
+      small(`The link is valid for ${days} days. If you didn’t create an OrivenAI account, you can ignore this email.`);
+    return { category: 'service', subject: 'Confirm your email for OrivenAI',
+      html: layout({ heading: 'Confirm your email', body, ctx, category: 'service', why: 'You’re receiving this because this address was used to create an OrivenAI account.' }),
+      text: `Hi${d.firstName ? ' ' + d.firstName : ''},\n\nConfirm your email for OrivenAI (valid ${days} days):\n${d.verifyUrl}\n\nIf you didn’t create an OrivenAI account, you can ignore this email.\n\n— OrivenAI` };
+  },
+
   // 1 — Welcome (service). Carries the verification link when one is pending,
   // so a new user gets one email, not two.
   welcome(d, ctx) {

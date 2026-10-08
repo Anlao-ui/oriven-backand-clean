@@ -14,6 +14,7 @@
     "test:signup": "node tests/signup.test.js",
     "test:first-ad": "node tests/first-ad.test.js",
     "test:email": "node tests/email-lifecycle.test.js",
+    "test:email-safety": "node tests/email-safety.test.js",
     "test:db-security": "node tests/db-security.test.js",
     "test:publish-idempotency": "node tests/publish-idempotency.test.js",
     "test:research-retrieval": "node tests/research-retrieval.test.js",

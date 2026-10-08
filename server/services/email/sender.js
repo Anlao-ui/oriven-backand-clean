@@ -2,12 +2,15 @@
 //
 // EMAIL_MODE (default 'off'):
 //   off  — nothing is sent; send() returns { skipped: 'mode_off' }
-//   test — every message goes to EMAIL_TEST_TO instead of the real recipient
-//          (subject prefixed [TEST]); nothing reaches a customer
+//   test — ONLY addresses listed in EMAIL_TEST_ALLOWLIST can receive email
+//          (subject prefixed [TEST]); every other address is refused. Test
+//          sends use their own idempotency keys and ledger records, so they
+//          never stand in for a real (live) email.
 //   live — real delivery (requires explicit approval)
-// RESEND_API_KEY      server-side only (Render env), never logged
-// EMAIL_FROM          e.g. "OrivenAI <hello@mail.orivenai.com>" (verified domain)
-// EMAIL_REPLY_TO      optional, e.g. contact@orivenai.com
+// EMAIL_TEST_ALLOWLIST  comma/space separated addresses (your own test accounts)
+// RESEND_API_KEY        server-side only (Render env), never logged
+// EMAIL_FROM            e.g. "OrivenAI <hello@mail.orivenai.com>" (verified domain)
+// EMAIL_REPLY_TO        optional, e.g. contact@orivenai.com
 //
 // Sends: POST https://api.resend.com/emails with an Idempotency-Key (Resend
 // keeps keys for 24h), so a retried send can't deliver twice. Retries on
@@ -26,6 +29,24 @@ function mode() {
   return m === 'live' || m === 'test' ? m : 'off';
 }
 
+// 'test' | 'live' — which set of records/keys a send belongs to.
+function scope() { return mode() === 'test' ? 'test' : 'live'; }
+
+function configured() { return !!(process.env.RESEND_API_KEY && process.env.EMAIL_FROM); }
+
+function testAllowlist() {
+  return new Set(String(process.env.EMAIL_TEST_ALLOWLIST || '')
+    .split(/[\s,;]+/).map((s) => s.trim().toLowerCase()).filter((s) => /@/.test(s)));
+}
+
+// Whether this address may receive email right now (mode + allowlist + config).
+function canDeliver(to) {
+  const m = mode();
+  if (m === 'off' || !configured() || !to) return false;
+  if (m === 'test') return testAllowlist().has(String(to).trim().toLowerCase());
+  return true;
+}
+
 // ~5 requests/second per process.
 let _next = 0;
 async function _pace() {
@@ -37,21 +58,24 @@ async function _pace() {
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
+// Errors worth another attempt later (everything else is final).
+function isRetryable(error) { return /^(network|http_429|http_5\d\d)/.test(String(error || '')); }
+
 // msg: { to, subject, html, text, headers?, tags?, idempotencyKey }
 // Returns { id } | { skipped } | { error, retryable }
 async function send(msg) {
   const m = mode();
   if (m === 'off') return { skipped: 'mode_off' };
-  const key = process.env.RESEND_API_KEY;
-  const from = process.env.EMAIL_FROM;
-  if (!key || !from) return { skipped: 'not_configured' };
+  if (!configured()) return { skipped: 'not_configured' };
   if (!msg || !msg.to || !msg.idempotencyKey) return { error: 'invalid_message', retryable: false };
-  let to = msg.to, subject = msg.subject;
+  const to = String(msg.to).trim();
+  let subject = msg.subject;
   if (m === 'test') {
-    if (!process.env.EMAIL_TEST_TO) return { skipped: 'no_test_recipient' };
-    to = process.env.EMAIL_TEST_TO; subject = '[TEST] ' + subject;
+    // Never redirected: in test mode only allowlisted addresses receive mail.
+    if (!testAllowlist().has(to.toLowerCase())) return { skipped: 'not_allowlisted' };
+    subject = '[TEST] ' + subject;
   }
-  const body = { from, to: [to], subject, html: msg.html, text: msg.text };
+  const body = { from: process.env.EMAIL_FROM, to: [to], subject, html: msg.html, text: msg.text };
   if (process.env.EMAIL_REPLY_TO) body.reply_to = process.env.EMAIL_REPLY_TO;
   if (msg.headers) body.headers = msg.headers;
   if (msg.tags) body.tags = msg.tags;
@@ -61,12 +85,13 @@ async function send(msg) {
     try {
       const res = await _fetch(API, {
         method: 'POST',
-        headers: { Authorization: 'Bearer ' + key, 'Content-Type': 'application/json', 'Idempotency-Key': String(msg.idempotencyKey).slice(0, 256) },
+        headers: { Authorization: 'Bearer ' + process.env.RESEND_API_KEY, 'Content-Type': 'application/json', 'Idempotency-Key': String(msg.idempotencyKey).slice(0, 256) },
         body: JSON.stringify(body),
       });
       let data = null; try { data = await res.json(); } catch (_) {}
       if (res.ok && data && data.id) return { id: data.id };
-      last = { error: 'http_' + res.status + (data && data.name ? ':' + String(data.name).slice(0, 40) : ''), retryable: res.status === 429 || res.status >= 500 };
+      const error = 'http_' + res.status + (data && data.name ? ':' + String(data.name).slice(0, 40) : '');
+      last = { error, retryable: isRetryable(error) };
       if (!last.retryable) return last;
     } catch (err) {
       last = { error: 'network', retryable: true };
@@ -93,4 +118,4 @@ function verifyWebhook(rawBody, headers, secret) {
   } catch (_) { return false; }
 }
 
-module.exports = { send, mode, verifyWebhook, _setFetchForTests };
+module.exports = { send, mode, scope, configured, canDeliver, testAllowlist, isRetryable, verifyWebhook, _setFetchForTests };

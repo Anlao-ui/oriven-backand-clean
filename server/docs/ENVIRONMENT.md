@@ -40,7 +40,18 @@ Extracted directly from `process.env.*` references across `server.js`, `provider
 
 | Variable | Purpose |
 |---|---|
-| `SMTP_HOST` / `SMTP_PORT` / `SMTP_USER` / `SMTP_PASS` / `SMTP_FROM` | Transactional email (verification, invites). If unset, verification emails are skipped with a startup warning rather than a hard failure — confirmed in the boot log every phase of this project. |
+| `SMTP_HOST` / `SMTP_PORT` / `SMTP_USER` / `SMTP_PASS` / `SMTP_FROM` | Fallback for the verification email (and support replies). Used when Resend can't deliver to the address or fails. If unset, verification emails are skipped with a startup warning. |
+| `EMAIL_MODE` | `off` (default) — Resend sends nothing · `test` — only addresses in `EMAIL_TEST_ALLOWLIST` receive email (subject `[TEST]`), with separate records/idempotency keys · `live` — real delivery. |
+| `EMAIL_TEST_ALLOWLIST` | Comma-separated test addresses (your own). In `test` mode nothing else is processed or sent. |
+| `RESEND_API_KEY` | Resend sending key (secret). |
+| `EMAIL_FROM` | Sender on the verified Resend domain, e.g. `OrivenAI <hello@mail.orivenai.com>`. |
+| `EMAIL_REPLY_TO` | Optional reply-to address. |
+| `EMAIL_UNSUBSCRIBE_SECRET` | Long random string; signs unsubscribe links. Without it, marketing emails are skipped. |
+| `RESEND_WEBHOOK_SECRET` | `whsec_…` signing secret of the Resend webhook (`/api/email/webhook`). Without it, every webhook call is rejected. |
+| `EMAIL_POSTAL_ADDRESS` | Company address shown in the email footer. |
+| `EMAIL_LIFECYCLE_ENABLED` | `true` registers the 15-minute lifecycle job (welcome, reminders, …). Off by default. |
+| `EMAIL_LIFECYCLE_SINCE` | Optional; only accounts created on/after this date get lifecycle email (default: onboarding rollout). |
+| `PUBLIC_API_URL` | Optional; base for unsubscribe links (default: the Render URL). |
 
 ## Not required to boot, but referenced
 

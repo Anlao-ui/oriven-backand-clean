@@ -6,7 +6,7 @@
 // signup paths can fail because of email, and a missed run simply catches
 // up on the next one.
 //
-//   welcome            service    account created (within 7 days)
+//   welcome            service    account created (within 48 hours)
 //   paid_onboarding    service    paid plan active (once per plan)
 //   first_ad_reminder  marketing  2–14 days after signup, no first result yet
 //   first_success      marketing  first Create/Research result (within 7 days)
@@ -24,7 +24,14 @@
 //     process or a retry can't send the same email twice;
 //   - at most one email per user per run; marketing at most every 3 days;
 //   - the ledger stores template keys and provider ids only — never
-//     addresses, subjects or content.
+//     addresses, subjects or content;
+//   - test mode (EMAIL_MODE=test) processes ONLY accounts whose address is in
+//     EMAIL_TEST_ALLOWLIST. Its ledger rows carry a 'test:' dedupe-key prefix
+//     and its idempotency keys a 'test' scope, so a test send never counts as
+//     (or blocks) the real email later;
+//   - only temporary failures (network, 429, 5xx) are retried; skips and
+//     other errors are final;
+//   - nothing is written while sending isn't configured.
 
 const crypto = require('crypto');
 const templates = require('./templates');
@@ -34,11 +41,17 @@ const onboarding = require('../onboarding');
 const DAY = 864e5;
 const MARKETING_GAP_DAYS = 3;
 const MAX_ATTEMPTS = 3;
+const WELCOME_WINDOW = 2 * DAY;
 const PAID = ['starter', 'creator', 'professional'];
 const PRIORITY = ['paid_onboarding', 'welcome', 'first_success', 'first_ad_reminder', 'upgrade_education', 'inactive'];
 
 let _db = null;
 function init({ db }) { _db = db; }
+
+// Ledger key prefix for the current scope: test rows never mix with live ones.
+const keyPrefix = () => (sender.scope() === 'test' ? 'test:' : '');
+const inScope = (dedupeKey) => (sender.scope() === 'test') === String(dedupeKey || '').startsWith('test:');
+const bareKey = (dedupeKey) => String(dedupeKey || '').replace(/^test:/, '');
 
 function since() {
   const t = process.env.EMAIL_LIFECYCLE_SINCE ? Date.parse(process.env.EMAIL_LIFECYCLE_SINCE) : NaN;
@@ -82,7 +95,7 @@ function decide(profile, facts, now) {
   const firstValue = profile.first_value_at ? Date.parse(profile.first_value_at) : null;
   const cand = [];
 
-  if (age <= 7 * DAY) cand.push({ template: 'welcome', key: 'welcome', data: { firstName: profile.first_name } });
+  if (age <= WELCOME_WINDOW) cand.push({ template: 'welcome', key: 'welcome', data: { firstName: profile.first_name } });
   if (PAID.includes(plan)) cand.push({ template: 'paid_onboarding', key: 'paid:' + plan, data: { plan } });
   if (consent && gapOk) {
     if (firstValue && now - firstValue <= 7 * DAY) {
@@ -107,9 +120,16 @@ function decide(profile, facts, now) {
 
 // ── Data access ─────────────────────────────────────────────────────
 async function _loadCandidates(limit) {
-  const { data, error } = await _db.from('profiles')
+  let q = _db.from('profiles')
     .select('id, email, first_name, created_at, subscription_status, first_value_at, first_value_kind, marketing_opt_in')
-    .gte('created_at', since().toISOString()).order('created_at', { ascending: true }).limit(limit);
+    .gte('created_at', since().toISOString());
+  if (sender.mode() === 'test') {
+    // Test mode never even reads accounts outside the allowlist.
+    const allow = Array.from(sender.testAllowlist());
+    if (!allow.length) return [];
+    q = q.in('email', allow);
+  }
+  const { data, error } = await q.order('created_at', { ascending: true }).limit(limit);
   if (error) throw error;
   return data || [];
 }
@@ -122,8 +142,8 @@ async function _facts(users, now) {
   const { data: sends, error: e1 } = await _db.from('email_sends').select('user_id, dedupe_key, category, status, sent_at, created_at').in('user_id', ids);
   if (e1) throw e1;
   (sends || []).forEach((s) => {
-    const f = facts[s.user_id]; if (!f) return;
-    if (s.status !== 'failed') f.sent.add(s.dedupe_key); // failed rows are retried by retryFailed()
+    const f = facts[s.user_id]; if (!f || !inScope(s.dedupe_key)) return; // test and live records never mix
+    if (s.status !== 'failed') f.sent.add(bareKey(s.dedupe_key)); // failed rows are retried by retryFailed()
     if (s.category === 'marketing' && s.status === 'sent') { const t = s.sent_at || s.created_at; if (!f.lastMarketingAt || t > f.lastMarketingAt) f.lastMarketingAt = t; }
   });
   const { data: evs } = await _db.from('events').select('user_id, event_name, props, created_at').in('user_id', ids)
@@ -150,7 +170,7 @@ function _message(user, due) {
   if (out.category === 'marketing' && !unsub) return { error: 'no_unsubscribe_secret' }; // never send marketing without a working unsubscribe
   const headers = out.category === 'marketing' ? { 'List-Unsubscribe': `<${unsub}>`, 'List-Unsubscribe-Post': 'List-Unsubscribe=One-Click' } : undefined;
   return { to: user.email, subject: out.subject, html: out.html, text: out.text, headers, category: out.category,
-    tags: [{ name: 'template', value: due.template }], idempotencyKey: `oriven:${user.id}:${due.key}` };
+    tags: [{ name: 'template', value: due.template }], idempotencyKey: `oriven:${sender.scope()}:${user.id}:${bareKey(due.key)}` };
 }
 
 async function _deliver(rowId, user, due) {
@@ -162,9 +182,12 @@ async function _deliver(rowId, user, due) {
   const r = await sender.send(msg);
   const now = new Date().toISOString();
   if (r.id) { await _db.from('email_sends').update({ status: 'sent', provider_id: r.id, sent_at: now, updated_at: now }).eq('id', rowId); return 'sent'; }
-  if (r.skipped) { await _db.from('email_sends').update({ status: 'failed', error: r.skipped, updated_at: now }).eq('id', rowId); return 'not_sent:' + r.skipped; }
-  await _db.from('email_sends').update({ status: 'failed', error: String(r.error).slice(0, 80), updated_at: now }).eq('id', rowId);
-  return 'failed';
+  // A skip (e.g. not allowlisted) is final — never retried.
+  if (r.skipped) { await _db.from('email_sends').update({ status: 'skipped', error: r.skipped, updated_at: now }).eq('id', rowId); return 'skipped'; }
+  // Temporary failures stay 'failed' for retryFailed(); anything else is final ('error').
+  const retry = sender.isRetryable(r.error);
+  await _db.from('email_sends').update({ status: retry ? 'failed' : 'error', error: String(r.error).slice(0, 80), updated_at: now }).eq('id', rowId);
+  return retry ? 'failed' : 'error';
 }
 
 // One pass. dryRun: decide only, write nothing, send nothing.
@@ -172,6 +195,9 @@ async function runOnce({ now, limit, dryRun } = {}) {
   now = now || Date.now();
   const summary = { considered: 0, due: 0, sent: 0, skipped: 0, failed: 0, plan: [] };
   if (!dryRun && sender.mode() === 'off') return Object.assign(summary, { disabled: 'mode_off' });
+  // Nothing is written while sending isn't possible (no ledger rows that would
+  // later stand in for the real email).
+  if (!dryRun && !sender.configured()) return Object.assign(summary, { disabled: 'not_configured' });
   const users = await _loadCandidates(limit || 500);
   const facts = await _facts(users, now);
   for (const u of users) {
@@ -186,31 +212,32 @@ async function runOnce({ now, limit, dryRun } = {}) {
     summary.plan.push({ user: String(u.id).slice(0, 8), template: due.template });
     if (dryRun) continue;
     const category = templates.render(due.template, due.data, { appUrl: appUrl() }).category;
-    const ins = await _db.from('email_sends').insert({ user_id: u.id, template: due.template, dedupe_key: due.key, category, status: 'sending', attempts: 1 }).select('id').maybeSingle();
+    const ins = await _db.from('email_sends').insert({ user_id: u.id, template: due.template, dedupe_key: keyPrefix() + due.key, category, status: 'sending', attempts: 1 }).select('id').maybeSingle();
     if (ins.error) { summary.skipped++; continue; } // unique (user_id, dedupe_key): already queued elsewhere
     const out = await _deliver(ins.data.id, u, due);
-    if (out === 'sent') summary.sent++; else if (out === 'failed') summary.failed++; else summary.skipped++;
+    if (out === 'sent') summary.sent++; else if (out === 'failed' || out === 'error') summary.failed++; else summary.skipped++;
   }
   await retryFailed({ summary, now });
   return summary;
 }
 
-// Retries failed sends (retryable errors) up to MAX_ATTEMPTS, no sooner than
-// minAgeMs (default 10 minutes) after the last attempt.
+// Retries temporary failures (network, 429, 5xx) of the current scope up to
+// MAX_ATTEMPTS, no sooner than minAgeMs (default 10 minutes) after the last
+// attempt. Skips and other errors are never retried.
 async function retryFailed({ summary, now, minAgeMs } = {}) {
-  if (sender.mode() === 'off') return;
+  if (sender.mode() === 'off' || !sender.configured()) return;
   const cutoff = new Date((now || Date.now()) - (minAgeMs == null ? 10 * 60e3 : minAgeMs)).toISOString();
   const { data } = await _db.from('email_sends').select('id, user_id, template, dedupe_key, attempts, error')
     .eq('status', 'failed').lt('attempts', MAX_ATTEMPTS).lte('updated_at', cutoff).limit(50);
   for (const row of data || []) {
-    if (/^http_4\d\d/.test(row.error || '') && !/^http_429/.test(row.error || '')) continue; // permanent
+    if (!inScope(row.dedupe_key) || !sender.isRetryable(row.error)) continue;
     const { data: u } = await _db.from('profiles').select('id, email, first_name, created_at, subscription_status, first_value_at, first_value_kind, marketing_opt_in').eq('id', row.user_id).maybeSingle();
     if (!u || !u.email) continue;
     const { data: claimed } = await _db.from('email_sends').update({ status: 'sending', attempts: row.attempts + 1 }).eq('id', row.id).eq('status', 'failed').select('id');
     if (!claimed || !claimed.length) continue;
-    const due = { template: row.template, key: row.dedupe_key, data: { firstName: u.first_name, plan: u.subscription_status, kind: u.first_value_kind } };
+    const due = { template: row.template, key: bareKey(row.dedupe_key), data: { firstName: u.first_name, plan: u.subscription_status, kind: u.first_value_kind } };
     const out = await _deliver(row.id, u, due);
-    if (summary) { if (out === 'sent') summary.sent++; else summary.failed++; }
+    if (summary) { if (out === 'sent') summary.sent++; else if (out === 'skipped') summary.skipped++; else summary.failed++; }
   }
 }
 
@@ -223,6 +250,12 @@ async function setConsent(userId, optIn, source) {
   const { error } = await _db.from('profiles').update(patch).eq('id', userId);
   if (error) { if (/marketing_/.test(error.message || '') || error.code === '42703' || error.code === 'PGRST204') return false; throw error; }
   return true;
+}
+
+async function isSuppressed(email) {
+  if (!email) return false;
+  const { data } = await _db.from('email_suppressions').select('email_hash').eq('email_hash', emailHash(email)).maybeSingle();
+  return !!data;
 }
 
 async function suppress(email, reason) {
@@ -253,6 +286,6 @@ async function handleProviderEvent(evt) {
 }
 
 module.exports = {
-  init, decide, runOnce, retryFailed, setConsent, suppress, handleProviderEvent,
-  unsubscribeUrl, checkUnsubToken, emailHash, since,
+  init, decide, runOnce, retryFailed, setConsent, suppress, isSuppressed, handleProviderEvent,
+  unsubscribeUrl, checkUnsubToken, emailHash, since, WELCOME_WINDOW,
 };
