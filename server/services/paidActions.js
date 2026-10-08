@@ -265,6 +265,8 @@ async function _refundReservations(reservations, route, reason) {
   for (const r of reservations) {
     if (!r.charged) continue;
     try {
+      // A non-credit grant (e.g. services/firstAd.js) gives itself back.
+      if (typeof r.release === 'function') { if (await r.release()) { refundedAny = true; r._refundState = 'done'; } continue; }
       const did = await _cm.refundCredits(r);
       if (did) {
         refundedAny = true;

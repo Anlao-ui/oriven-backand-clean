@@ -31,6 +31,11 @@ const aiUsage = require('./services/aiUsage'); // prompt sanitizer + size guard 
 const paidActions = require('./services/paidActions'); // one transaction pattern for every credit charge (claim → charge → settle/refund)
 const spendGuard = require('./services/spendGuard'); // daily provider-spend safety net
 const stripeBilling = require('./services/stripeBilling'); // Stripe → plan/credit reconciliation (authoritative, idempotent)
+const onboarding = require('./services/onboarding'); // welcome eligibility, completion, first value, activation events
+const accounts = require('./services/accounts'); // signup validation, profile creation, email verification
+const firstAd = require('./services/firstAd'); // free first-ad image for new Free accounts (off unless FREE_FIRST_AD_ENABLED)
+const emailLifecycle = require('./services/email/lifecycle'); // lifecycle emails (off unless EMAIL_MODE + EMAIL_LIFECYCLE_ENABLED)
+const emailSender = require('./services/email/sender');
 const campaignGoals = require('./services/campaignGoals'); // single source of truth for the 4 campaign goals across every platform
 const platformCapabilities = require('./services/platformCapabilities'); // Universal Advertising Setup Engine, Phase 1 — capability registry (definitional only, no client of its own)
 const setupStateEngine = require('./services/setupStateEngine'); // Universal Advertising Setup Engine, Phase 2 — reads existing `integrations` rows only, makes no external API calls
@@ -205,6 +210,10 @@ Object.keys(PRICE_IDS).forEach(function (plan) {
   if (priceId) PLAN_BY_PRICE_ID[priceId] = plan;
 });
 stripeBilling.init({ stripe, db: supabaseAdmin, creditManager, planByPriceId: PLAN_BY_PRICE_ID });
+onboarding.init({ db: supabaseAdmin });
+accounts.init({ db: supabaseAdmin });
+firstAd.init({ db: supabaseAdmin });
+emailLifecycle.init({ db: supabaseAdmin });
 
 // Per-request AI usage context (route + user id) for [AIUsage] telemetry.
 app.use(aiUsage.middleware);
@@ -276,6 +285,21 @@ app.post('/api/stripe-webhook', express.raw({ type: 'application/json' }), async
     await stripeBilling.finishEvent(event, false, err.message);
     console.error('[Webhook]', event.type, event.id, 'failed — Stripe will retry:', err.message);
     return res.status(500).json({ error: 'Webhook processing failed' });
+  }
+});
+
+// ── Resend webhook (delivery, bounce, complaint) — raw body for the Svix
+// signature, so registered before express.json(). Without
+// RESEND_WEBHOOK_SECRET every request is rejected.
+app.post('/api/email/webhook', express.raw({ type: 'application/json', limit: '256kb' }), async (req, res) => {
+  const raw = Buffer.isBuffer(req.body) ? req.body.toString('utf8') : '';
+  if (!emailSender.verifyWebhook(raw, req.headers, process.env.RESEND_WEBHOOK_SECRET)) return res.status(401).json({ error: 'Invalid signature' });
+  try {
+    await emailLifecycle.handleProviderEvent(JSON.parse(raw));
+    res.json({ ok: true });
+  } catch (err) {
+    console.error('[EmailWebhook]', err.message);
+    res.status(500).json({ error: 'Could not process event' }); // Resend retries
   }
 });
 
@@ -1360,7 +1384,13 @@ app.post('/api/generate-image', requireSubOrFree, paidActions.laneGuard('image')
   // generation trial (requireSubIfAuthed, not requireSubscription), which
   // stays unbilled just like the identical guard on every other route below.
   let reservation;
-  if (req.user) {
+  // A new Free account's first ad image (services/firstAd.js, off unless
+  // enabled): claimed instead of charging credits; released by the normal
+  // paid-action settlement if the image fails.
+  const firstAdClaim = req.user ? await firstAd.claim(req.user.id) : null;
+  if (firstAdClaim) {
+    paidActions.attachReservation(firstAdClaim);
+  } else if (req.user) {
     try {
       reservation = await creditManager.reserveCredits(req.user, 'image_generation');
     } catch (err) {
@@ -2672,20 +2702,20 @@ app.post('/api/support/admin-reply', async (req, res) => {
   }
 });
 
-// â”€â”€ POST /api/signup â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-// Creates a user immediately (email_confirm:true bypasses Supabase gate),
-// stores email_verified:false in profiles, sends verification email.
+// ── POST /api/signup ────────────────────────────────────────────────
+// Creates the auth user (email_confirm:true — sign-in is not blocked on
+// verification), then its profile row, then sends the verification email.
+// Profile creation and verification live in services/accounts.js.
 // Body: { firstName, lastName, email, password, phone }
 app.post('/api/signup', async (req, res) => {
-  const { firstName, lastName, email, password, phone } = req.body || {};
-  if (!firstName || !email || !password) {
-    return res.status(400).json({ error: 'First name, email and password are required' });
+  const fwd = String(req.headers['x-forwarded-for'] || '').split(',')[0].trim();
+  if (!accounts.allowSignup(fwd || req.ip || '')) {
+    return res.status(429).json({ error: 'Too many sign-ups from this network. Please try again later.' });
   }
-  if (password.length < 6) {
-    return res.status(400).json({ error: 'Password must be at least 6 characters' });
-  }
+  const v = accounts.validateSignup(req.body);
+  if (v.error) return res.status(400).json({ error: v.error });
+  const { firstName, lastName, email, password, phone } = v.value;
 
-  // Create user â€” email_confirm:true means Supabase won't block signInWithPassword
   const { data: authData, error: authError } = await supabaseAdmin.auth.admin.createUser({
     email,
     password,
@@ -2694,123 +2724,127 @@ app.post('/api/signup', async (req, res) => {
   });
 
   if (authError) {
-    console.error('[Signup] Auth user creation failed:', authError.message);
     const msg = authError.message || '';
-    if (msg.toLowerCase().includes('already') || msg.toLowerCase().includes('exists')) {
+    console.error('[Signup] Auth user creation failed:', msg);
+    if (/already|exists|registered/i.test(msg)) {
       return res.status(409).json({ error: 'An account with this email already exists. Please sign in.' });
     }
-    return res.status(500).json({ error: msg || 'Could not create account' });
+    if (/password/i.test(msg)) return res.status(400).json({ error: msg });
+    return res.status(500).json({ error: 'Could not create your account right now. Please try again.' });
   }
 
   const user = authData.user;
-  const verificationToken = crypto.randomBytes(32).toString('hex');
+  onboarding.recordEvent({ name: 'signup_completed', userId: user.id }); // activation funnel; fire-and-forget
 
-  // Upsert profile row â€” using upsert (not insert) so a Supabase auth trigger that
-  // pre-creates the row cannot block the write or leave a stale subscription_status.
-  const { error: profileError } = await supabaseAdmin.from('profiles').upsert({
-    id:                   user.id,
-    first_name:           firstName,
-    last_name:            lastName || null,
-    email,
-    phone:                phone || null,
-    subscription_status:  'free',
-    email_verified:        false,
-    onboarding_completed:  false,
-    verification_token:    verificationToken,
-    verification_sent_at:  new Date().toISOString()
-  }, { onConflict: 'id' });
-  if (profileError) console.error('[Signup] Profile upsert error:', profileError.message);
-  else console.log('[Signup] Profile upserted with subscription_status=free for user:', user.id);
+  const smtpReady = !!(process.env.SMTP_USER && process.env.SMTP_PASS);
+  const token = smtpReady ? accounts.newToken() : null;
+  const profile = await accounts.createProfile({ userId: user.id, firstName, lastName, email, tokenHash: token ? accounts.hashToken(token) : null });
+  if (!profile.ok) {
+    // The account exists and can sign in; the app creates a minimal profile
+    // on first load. Logged for follow-up, never silently ignored.
+    console.error('[Signup] PROFILE NOT CREATED — user', user.id, '| code:', profile.error && (profile.error.code || profile.error.message));
+  }
 
-  // Send verification email (best-effort â€” signup succeeds even if email fails)
-  const smtpUser = process.env.SMTP_USER;
-  const smtpPass = process.env.SMTP_PASS;
-  if (smtpUser && smtpPass) {
-    const verifyUrl = `${FRONTEND_URL}?verify_token=${verificationToken}`;
+  // Verification email: only when a token was really stored (otherwise the
+  // link could never work). Best-effort — signup succeeds either way.
+  if (token && profile.verification) {
+    const verifyUrl = `${FRONTEND_URL}?verify_token=${token}`;
     try {
       await _smtpTransporter().sendMail({
-        from:    process.env.SMTP_FROM || `ORIVEN <${smtpUser}>`,
+        from:    process.env.SMTP_FROM || `ORIVEN <${process.env.SMTP_USER}>`,
         to:      email,
         subject: 'Verify your ORIVEN email address',
         html:    _verificationEmailHtml(firstName, verifyUrl),
-        text:    `Hi ${firstName},\n\nVerify your email:\n${verifyUrl}\n\nThis link is valid for 14 days.\n\nâ€” ORIVEN`
+        text:    `Hi ${firstName},\n\nVerify your email:\n${verifyUrl}\n\nThis link is valid for ${accounts.VERIFY_TTL_DAYS} days.\n\n— ORIVEN`
       });
-      console.log('[Signup] Verification email sent to', email);
+      console.log('[Signup] Verification email sent for user', user.id);
     } catch (emailErr) {
       console.error('[Signup] Verification email failed (non-fatal):', emailErr.message);
     }
-  } else {
-    console.warn('[Signup] SMTP not configured â€” skipping verification email');
+  } else if (!smtpReady) {
+    console.warn('[Signup] SMTP not configured — no verification email');
   }
 
-  console.log('[Signup] âœ… User created:', user.id, email);
+  // Marketing email only with an explicit opt-in (unchecked by default in
+  // the signup form); never inferred from account creation.
+  if (req.body && req.body.marketingOptIn === true && profile.ok) {
+    emailLifecycle.setConsent(user.id, true, 'signup').catch((e) => console.warn('[Signup] consent not stored:', e.message));
+  }
+
+  console.log('[Signup] User created:', user.id, '| profile:', profile.ok ? 'ok' : 'FAILED');
   res.json({ ok: true, userId: user.id });
 });
 
-// â”€â”€ POST /api/verify-email â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-// No auth required â€” the token itself is the credential.
-// Body: { token }
+// ── POST /api/profile/ensure ────────────────────────────────────────
+// Creates the signed-in user's profile row if it is missing (insert-only;
+// never modifies an existing row). Replaces the browser's own upsert —
+// browsers have no write access to profiles.
+app.post('/api/profile/ensure', async (req, res) => {
+  const user = await getUserFromToken(req);
+  if (!user) return res.status(401).json({ error: 'Authentication required' });
+  try {
+    res.json(await accounts.ensureProfile(user));
+  } catch (err) {
+    console.error('[ProfileEnsure]', err.code || err.message);
+    res.status(500).json({ error: 'Could not prepare your account right now.' });
+  }
+});
+
+// ── POST /api/verify-email ──────────────────────────────────────────
+// No auth required — the token itself is the credential (hashed at rest,
+// valid for accounts.VERIFY_TTL_DAYS). Body: { token }
 app.post('/api/verify-email', async (req, res) => {
   const { token } = req.body || {};
   if (!token) return res.status(400).json({ error: 'Token required' });
-
-  const { data, error } = await supabaseAdmin.from('profiles')
-    .select('id')
-    .eq('verification_token', token)
-    .maybeSingle();
-
-  if (error)  return res.status(500).json({ error: error.message });
-  if (!data)  return res.status(404).json({ error: 'Verification link is invalid or has already been used' });
-
-  await supabaseAdmin.from('profiles').update({
-    email_verified:     true,
-    verification_token: null
-  }).eq('id', data.id);
-
-  console.log('[VerifyEmail] âœ… Email verified for user:', data.id);
-  res.json({ ok: true });
+  try {
+    const found = await accounts.findToken(token);
+    if (found.error === 'expired') return res.status(410).json({ error: 'This verification link has expired. Request a new one from the app.' });
+    if (found.error === 'unavailable') return res.status(503).json({ error: 'Could not verify right now. Please try again.' });
+    if (found.error) return res.status(404).json({ error: 'Verification link is invalid or has already been used' });
+    await accounts.markVerified(found.userId);
+    console.log('[VerifyEmail] Email verified for user:', found.userId);
+    res.json({ ok: true });
+  } catch (err) {
+    console.error('[VerifyEmail] error:', err.message);
+    res.status(500).json({ error: 'Could not verify right now. Please try again.' });
+  }
 });
 
-// â”€â”€ POST /api/resend-verification â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// ── POST /api/resend-verification ───────────────────────────────────
 // Requires auth. Generates a fresh token and resends the email.
 app.post('/api/resend-verification', async (req, res) => {
   const user = await getUserFromToken(req);
   if (!user) return res.status(401).json({ error: 'Unauthorized' });
-
-  const smtpUser = process.env.SMTP_USER;
-  const smtpPass = process.env.SMTP_PASS;
-  if (!smtpUser || !smtpPass) {
-    return res.status(503).json({ error: 'Email service not configured â€” set SMTP_USER and SMTP_PASS' });
+  if (!process.env.SMTP_USER || !process.env.SMTP_PASS) {
+    return res.status(503).json({ error: 'Email service not configured' });
   }
-
-  const verificationToken = crypto.randomBytes(32).toString('hex');
-  const verifyUrl = `${FRONTEND_URL}?verify_token=${verificationToken}`;
-
-  const { data: profile } = await supabaseAdmin.from('profiles')
-    .select('first_name, email').eq('id', user.id).maybeSingle();
-  const firstName = (profile && profile.first_name) || 'there';
-  const toEmail   = (profile && profile.email)       || user.email;
-
-  await supabaseAdmin.from('profiles').update({
-    verification_token:   verificationToken,
-    verification_sent_at: new Date().toISOString()
-  }).eq('id', user.id);
-
+  if (!accounts.allowSignup('resend:' + user.id)) return res.status(429).json({ error: 'Too many requests. Please try again later.' });
   try {
+    const { data: profile } = await supabaseAdmin.from('profiles')
+      .select('first_name, email, email_verified').eq('id', user.id).maybeSingle();
+    if (profile && profile.email_verified === true) return res.json({ ok: true, alreadyVerified: true });
+    const token = accounts.newToken();
+    if (!(await accounts.storeNewToken(user.id, accounts.hashToken(token)))) {
+      return res.status(503).json({ error: 'Email verification is not available yet.' });
+    }
+    const firstName = (profile && profile.first_name) || 'there';
+    const toEmail   = (profile && profile.email) || user.email;
+    const verifyUrl = `${FRONTEND_URL}?verify_token=${token}`;
     await _smtpTransporter().sendMail({
-      from:    process.env.SMTP_FROM || `ORIVEN <${smtpUser}>`,
+      from:    process.env.SMTP_FROM || `ORIVEN <${process.env.SMTP_USER}>`,
       to:      toEmail,
       subject: 'Verify your ORIVEN email address',
       html:    _verificationEmailHtml(firstName, verifyUrl),
-      text:    `Hi ${firstName},\n\nVerify your email:\n${verifyUrl}\n\nThis link is valid for 14 days.\n\nâ€” ORIVEN`
+      text:    `Hi ${firstName},\n\nVerify your email:\n${verifyUrl}\n\nThis link is valid for ${accounts.VERIFY_TTL_DAYS} days.\n\n— ORIVEN`
     });
-    console.log('[ResendVerify] âœ… Sent to', toEmail);
+    console.log('[ResendVerify] Sent for user', user.id);
     res.json({ ok: true });
   } catch (err) {
     console.error('[ResendVerify] Failed:', err.message);
     res.status(500).json({ error: 'Could not send that email right now. Please try again shortly.' });
   }
 });
+
 
 // â”€â”€ AI Logo Generation â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 // Receives: { brandName, description, logoStyle, styleDirection, colorPalette }
@@ -5358,6 +5392,7 @@ Return ONLY valid JSON with zero markdown, matching this exact shape (omit array
     // by the UI — not a usable result, so the charge is refunded.
     const _rsUsable = !!(market || competitors.length || customerSignals.length || advertisingPatterns.length || trends.length || opportunities.length);
     if (!_rsUsable) paidActions.markFailed('research_no_usable_data');
+    else if (req.user) onboarding.recordFirstValue(req.user.id, 'research'); // fire-and-forget activation marker
     if (reservation) creditManager.finalizeCreditLog(reservation, 'ai_analysis', { provider: 'aiml', success: _rsUsable, route: req.path }).catch(() => {});
     res.json({
       question,
@@ -6404,6 +6439,7 @@ Reply ONLY with valid JSON array (no markdown, no extra text):
     const pkg = await _generateAdPackage({ user: req.user, product, goal, platform, brandCore, productImages, platformObjective, campaignType, metaStructure, campaignStructure, metaPlacement, brandIdentityDisabled, pageContext, referenceAdContext, researchContext });
     console.log(`[create-ad] Package ready — keys: ${Object.keys(pkg).join(', ')} | visualConcepts: ${(pkg.visualConcepts||[]).length}`);
     _consumeOnboardingFreeGen(req);
+    if (req.user) onboarding.recordFirstValue(req.user.id, 'create'); // fire-and-forget activation marker
     if (reservation) creditManager.finalizeCreditLog(reservation, 'campaign_generation', { provider: 'aiml', success: true, route: req.path }).catch(() => {});
     return res.json({ ok: true, data: pkg });
   } catch (err) {
@@ -15903,31 +15939,37 @@ app.put('/api/user/preferences', async (req, res) => {
   }
 });
 
-// â”€â”€ Onboarding Rebuild â”€â”€ primary goal + server-trusted completion â”€â”€â”€â”€
-// Two small, focused routes. Neither touches credits/subscription_status —
-// Free provisioning already goes through the existing, audited
-// POST /api/select-free-plan (ensure_free_daily_cycle), and paid
-// provisioning already goes through the existing Stripe webhook. These
-// routes only ever read subscription_status (never write it) and only ever
-// write onboarding_completed / primary_goal, both scoped to the caller's
-// own row via the verified JWT (getUserFromToken) â€” no user id is ever
-// read from the request body, so a caller can never touch anyone else's
-// onboarding state.
-const ONBOARDING_GOALS = ['create', 'research', 'launch', 'campaigns', 'autopilot', 'business'];
+// ── Onboarding ── welcome eligibility, completion, activation events ──
+// Logic lives in services/onboarding.js. None of these routes touch credits
+// or subscription_status, and the user is always the verified JWT's — no
+// user id is ever read from the request body.
 
+// What the welcome screen should do for the signed-in account.
+app.get('/api/onboarding/state', async (req, res) => {
+  try {
+    const user = await getUserFromToken(req);
+    if (!user) return res.status(401).json({ error: 'Authentication required' });
+    const state = await onboarding.getState(user.id, user.created_at);
+    const fa = await firstAd.status(user.id); // { available } — off unless FREE_FIRST_AD_ENABLED
+    state.freeFirstAd = { available: !!fa.available };
+    res.json(state);
+  } catch (err) {
+    console.error('[onboarding/state GET]', err.message);
+    res.status(500).json({ error: 'Could not load onboarding state.' });
+  }
+});
+
+// Older goal step (kept for clients that still send it).
 app.put('/api/onboarding/goal', async (req, res) => {
   try {
     const user = await getUserFromToken(req);
     if (!user) return res.status(401).json({ error: 'Authentication required' });
     const goal = req.body && req.body.goal;
-    if (!ONBOARDING_GOALS.includes(goal)) {
-      return res.status(400).json({ error: 'goal must be one of: ' + ONBOARDING_GOALS.join(', ') });
+    if (!onboarding.LEGACY_GOALS.includes(goal)) {
+      return res.status(400).json({ error: 'goal must be one of: ' + onboarding.LEGACY_GOALS.join(', ') });
     }
     const { data, error } = await supabaseAdmin.from('profiles').update({ primary_goal: goal }).eq('id', user.id).select('primary_goal').maybeSingle();
-    // Same "column doesn't exist yet" degrade as /api/user/preferences above â€”
-    // see docs/migrations/2026-09-onboarding-primary-goal.sql. Onboarding
-    // must still be able to complete even before that migration is applied;
-    // the frontend treats columnMissing as a soft failure, not a hard block.
+    // See docs/migrations/2026-09-onboarding-primary-goal.sql.
     if (error && /primary_goal/.test(error.message || '')) {
       return res.json({ primary_goal: goal, columnMissing: true });
     }
@@ -15935,35 +15977,112 @@ app.put('/api/onboarding/goal', async (req, res) => {
     res.json({ primary_goal: (data && data.primary_goal) || goal });
   } catch (err) {
     console.error('[onboarding/goal PUT]', err.message);
-    res.status(500).json({ error: 'Could not save that right now â€” please try again.' });
+    res.status(500).json({ error: 'Could not save that right now. Please try again.' });
   }
 });
 
-// Marks onboarding complete for the authenticated account. Idempotent by
-// construction â€” it only ever sets one boolean field to true and triggers
-// no other side effect (no credit grant, no event, no email), so calling it
-// twice (double click, a Stripe-redirect duplicate, a retried network
-// request) is always safe and never double-provisions anything. The
-// frontend only calls this after a genuinely completed path: immediately
-// after POST /api/select-free-plan succeeds (Free), or after re-reading
-// subscription_status from the DB and confirming it's a real paid plan
-// (Stripe webhook already landed) â€” never merely because Checkout opened.
+// Marks onboarding complete. Body (optional): { goal: 'create'|'research'|
+// 'explore' } from the welcome screen, or { skipped: true }. Without a body it
+// behaves as before (older clients). Idempotent; no credit grant, no other
+// side effect.
 app.post('/api/onboarding/complete', async (req, res) => {
   try {
     const user = await getUserFromToken(req);
     if (!user) return res.status(401).json({ error: 'Authentication required' });
-    const { data, error } = await supabaseAdmin.from('profiles').update({ onboarding_completed: true }).eq('id', user.id).select('onboarding_completed, primary_goal, subscription_status').maybeSingle();
-    if (error) throw error;
-    res.json({
-      onboarding_completed: true,
-      primary_goal: data && data.primary_goal,
-      subscription_status: data && data.subscription_status,
-    });
+    const body = req.body || {};
+    if (body.goal !== undefined && !onboarding.WELCOME_GOALS[body.goal]) {
+      return res.status(400).json({ error: 'goal must be one of: ' + Object.keys(onboarding.WELCOME_GOALS).join(', ') });
+    }
+    res.json(await onboarding.complete(user.id, body.goal || null));
   } catch (err) {
     console.error('[onboarding/complete POST]', err.message);
-    res.status(500).json({ error: 'Could not complete onboarding right now â€” please try again.' });
+    res.status(500).json({ error: 'Could not complete onboarding right now. Please try again.' });
   }
 });
+
+// Activation analytics. Allowlisted event names, properties reduced to short
+// tokens (services/onboarding.js). Anonymous only for page visits. Always
+// answers 204 for accepted-but-unstored events so analytics can never break
+// the client.
+app.post('/api/events', async (req, res) => {
+  try {
+    const auth = req.headers.authorization || '';
+    const user = auth ? await getUserFromToken(req) : null;
+    // Render sits behind a proxy (no 'trust proxy' here): anonymous callers
+    // are keyed by the forwarded client address, and — since that header can
+    // be spoofed — all anonymous events also share one global cap.
+    const fwd = String(req.headers['x-forwarded-for'] || '').split(',')[0].trim();
+    const key = user ? 'u:' + user.id : 'ip:' + (fwd || req.ip || '');
+    if (!onboarding.allowEvent(key) || (!user && !onboarding.allowEvent('anon:all', 600))) return res.status(429).json({ error: 'Too many events' });
+    const body = req.body || {};
+    if (body.event === 'session_linked') {
+      if (!user) return res.status(401).json({ error: 'Authentication required' });
+      await onboarding.linkSession(user.id, body.sessionId);
+      return res.status(204).end();
+    }
+    const ev = onboarding.acceptClientEvent(body, user && user.id);
+    if (ev.error === 'auth_required') return res.status(401).json({ error: 'Authentication required' });
+    if (ev.error) return res.status(400).json({ error: 'Unknown event' });
+    await onboarding.recordEvent(ev);
+    res.status(204).end();
+  } catch (err) {
+    console.warn('[events POST]', err.message);
+    res.status(204).end();
+  }
+});
+
+
+// ── Email preferences & unsubscribe (services/email/lifecycle.js) ─────
+// Unsubscribe links are signed per user (EMAIL_UNSUBSCRIBE_SECRET). GET shows
+// a confirmation page; POST is the RFC 8058 one-click (List-Unsubscribe-Post).
+// Both only ever turn marketing email OFF — service emails (account, billing)
+// are unaffected.
+function _unsubPage(title, text) {
+  return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${title}</title></head>` +
+    `<body style="margin:0;background:#F6F3EE;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif;color:#18181A">` +
+    `<div style="max-width:480px;margin:72px auto;padding:32px 28px;background:#fff;border:1px solid #E7E1D8;border-radius:16px">` +
+    `<h1 style="margin:0 0 12px;font-family:Georgia,serif;font-weight:400;font-size:26px">${title}</h1><p style="margin:0;font-size:15px;line-height:1.6;color:#6B6B6B">${text}</p>` +
+    `<p style="margin:20px 0 0"><a href="https://orivenai.com/app" style="color:#18181A">Open OrivenAI</a></p></div></body></html>`;
+}
+async function _unsubscribe(req, res, html) {
+  const u = String((req.query && req.query.u) || ''), t = String((req.query && req.query.t) || '');
+  if (!/^[0-9a-f-]{36}$/i.test(u) || !emailLifecycle.checkUnsubToken(u, t)) {
+    return html ? res.status(400).send(_unsubPage('Link not valid', 'This unsubscribe link isn’t valid. You can turn product emails off in Settings in the app.')) : res.status(400).end();
+  }
+  try {
+    await emailLifecycle.setConsent(u, false, 'unsubscribe_link');
+    return html ? res.send(_unsubPage('You’re unsubscribed', 'You won’t receive product emails from OrivenAI any more. Account and billing emails will still reach you.')) : res.status(200).end();
+  } catch (err) {
+    console.error('[Unsubscribe]', err.message);
+    return html ? res.status(500).send(_unsubPage('Something went wrong', 'Please try again, or turn product emails off in Settings.')) : res.status(500).end();
+  }
+}
+app.get('/api/email/unsubscribe', (req, res) => _unsubscribe(req, res, true));
+app.post('/api/email/unsubscribe', (req, res) => _unsubscribe(req, res, false));
+
+// Signed-in user's marketing-email preference. Body: { marketing: boolean }
+app.get('/api/email/preferences', async (req, res) => {
+  const user = await getUserFromToken(req);
+  if (!user) return res.status(401).json({ error: 'Authentication required' });
+  const { data, error } = await supabaseAdmin.from('profiles').select('marketing_opt_in').eq('id', user.id).maybeSingle();
+  if (error) return res.json({ marketing: false, available: false });
+  res.json({ marketing: !!(data && data.marketing_opt_in === true), available: true });
+});
+app.put('/api/email/preferences', async (req, res) => {
+  const user = await getUserFromToken(req);
+  if (!user) return res.status(401).json({ error: 'Authentication required' });
+  const want = req.body && req.body.marketing;
+  if (typeof want !== 'boolean') return res.status(400).json({ error: 'marketing must be true or false' });
+  try {
+    const ok = await emailLifecycle.setConsent(user.id, want, 'settings');
+    if (!ok) return res.status(503).json({ error: 'Email preferences are not available yet.' });
+    res.json({ marketing: want });
+  } catch (err) {
+    console.error('[EmailPrefs]', err.message);
+    res.status(500).json({ error: 'Could not save that right now.' });
+  }
+});
+
 
 // â”€â”€ POST /api/account/delete â”€â”€ permanent, user-initiated deletion â”€â”€â”€â”€
 // SECURITY: identity comes ONLY from the Supabase JWT via getUserFromToken
@@ -16966,12 +17085,26 @@ function _scheduleBackgroundJob(name, expression, fn, options) {
 // where email_verified = false AND created_at < 14 days ago.
 // Refunds paid actions left in progress by a crashed/hung request and
 // settles abandoned async video jobs (services/paidActions.js sweep).
+// Lifecycle emails (services/email/lifecycle.js). Registered ONLY when
+// EMAIL_LIFECYCLE_ENABLED=true; sending additionally needs EMAIL_MODE=test|live
+// plus RESEND_API_KEY/EMAIL_FROM. Default: nothing is scheduled.
+if (String(process.env.EMAIL_LIFECYCLE_ENABLED || '').trim().toLowerCase() === 'true') {
+  _scheduleBackgroundJob('email-lifecycle', '*/15 * * * *', () => emailLifecycle.runOnce()
+    .then((s) => { if (s.due || s.failed) console.log('[EmailLifecycle]', JSON.stringify({ mode: emailSender.mode(), considered: s.considered, due: s.due, sent: s.sent, skipped: s.skipped, failed: s.failed })); })
+    .catch((err) => console.error('[EmailLifecycle] run failed:', err.message)));
+}
+
 _scheduleBackgroundJob('paid-actions-sweep', '*/15 * * * *', () => {
   const aimlSweep = require('./providers/aimlProvider');
   return paidActions.sweep({ getVideoStatus: (id) => aimlSweep.getVideoStatus(id) }).catch((err) => console.error('[paidActions] sweep failed:', err.message));
 });
 
-_scheduleBackgroundJob('unverified-account-cleanup', '0 2 * * *', async () => {
+// Deleting accounts is destructive and has never actually run in production
+// (the email_verified column did not exist until the 2026-10 signup fix), so
+// it stays off unless UNVERIFIED_ACCOUNT_CLEANUP=true is set deliberately.
+// Accounts created before verification worked have email_verified = NULL
+// and are never matched (.eq false).
+if (String(process.env.UNVERIFIED_ACCOUNT_CLEANUP || '').trim().toLowerCase() === 'true') _scheduleBackgroundJob('unverified-account-cleanup', '0 2 * * *', async () => {
   const cutoff = new Date(Date.now() - 14 * 24 * 60 * 60 * 1000).toISOString();
   console.log(`[Cron] Cleanup run â€” cutoff: ${cutoff}`);
   try {
