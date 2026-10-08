@@ -9,7 +9,7 @@ Every route below returns `401` when called without a valid token, verified via 
 
 ## Auth & account
 
-`/api/signup`, `/api/verify-email`, `/api/resend-verification`, `/api/send-invite`, `/api/create-checkout-session`, `/api/get-subscription`, `/api/schedule-plan-change`, `/api/cancel-plan-change`, `/api/get-usage`, `/api/increment-usage`, `/api/stripe-webhook`.
+`/api/signup`, `/api/verify-email`, `/api/resend-verification`, `/api/create-checkout-session`, `/api/get-subscription`, `/api/schedule-plan-change`, `/api/cancel-plan-change`, `/api/get-usage`, `/api/increment-usage`, `/api/stripe-webhook`.
 
 ## Platform connections
 
@@ -21,7 +21,7 @@ Per platform: `GET .../campaigns`, `GET .../campaign/:id`, `PATCH .../campaign/:
 
 ## AI generation (Creative Engine core, V5–V8)
 
-`/api/generate-web`, `/api/generate-text`, `/api/generate-email`, `/api/generate-deck`, `/api/generate-poster`, `/api/generate-infographic`, `/api/generate-image`, `/api/generate-ad`, `/api/generate-campaign`, `/api/generate-logo`, `/api/generate-brandcore`, `/api/brand-check`, `/api/competitor-intelligence`, `/api/generate-ugc*`, `/api/video-ads/*`, `/api/motion-graphics/*`, `/api/product-shoots/generate`. Every one of these injects real Business Brain context via `_gatherBusinessContext` (V8 Phase 1) and records its output to `creative_assets` via `_recordCreativeAsset`.
+`/api/generate-web`, `/api/generate-text`, `/api/generate-email`, `/api/generate-deck`, `/api/generate-poster`, `/api/generate-infographic`, `/api/generate-image`, `/api/generate-ad`, `/api/generate-campaign`, `/api/generate-logo`, `/api/generate-brandcore`, `/api/brand-check`, `/api/competitor-intelligence`, `/api/generate-ugc-video`, `/api/ugc-video-status/:id`, `/api/video-ads/*`, `/api/motion-graphics/*`, `/api/product-shoots/generate`. Every one of these injects real Business Brain context via `_gatherBusinessContext` (V8 Phase 1) and records its output to `creative_assets` via `_recordCreativeAsset`.
 
 ## Creative Engine (V8 Phase 1 & 2)
 

@@ -25,7 +25,7 @@ Supabase, service-role access only. **There is no migrations tool in this codeba
 ## Local development
 
 ```bash
-cd oriven-backand-clean/server
+cd oriven-backend/server
 npm install
 npm start
 ```

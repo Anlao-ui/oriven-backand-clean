@@ -175,7 +175,7 @@ Live-verified end to end (`tests/launch-readiness-gate.test.js`, real browser + 
 
 ## Testing
 
-Backend (`oriven-backand-clean/server/tests/`, run via `npm test` in that directory):
+Backend (`oriven-backend/server/tests/`, run via `npm test` in that directory):
 
 | File | Checks | What it proves |
 |---|---|---|

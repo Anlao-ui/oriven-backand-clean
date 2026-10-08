@@ -25,7 +25,7 @@ Written at the end of V10 (Production Readiness). Honest status, not aspirationa
 - [x] Removed the unused `posters-image` modelRouter task (posters generate via HTML, never called this task).
 - [x] Removed confirmed-orphaned CSS (`.st-canvas`/`.st-content-col`/`.st-intel-col` — verified zero references in any `.js` or `.html` file before removal; the similarly-named `.se-*`/`.snav-item` classes were checked too and found to be **live**, used by `settings.js`'s dynamically-rendered sidebar — not removed).
 - [ ] `@anthropic-ai/sdk` and `openai` are listed in `package.json` but never imported anywhere (confirmed by grep) — safe to remove, not done this pass to avoid an untested dependency change this close to launch.
-- [ ] `oriven-backand-clean-backup/` is a confirmed-stale mirror directory, never touched across this entire project — flagged, not deleted; that's your call.
+- [x] `oriven-backand-clean-backup/` (a stale older clone of this repo) was removed after verifying its history is contained in this repo.
 
 ## Database (Epic 8 — reviewed, no changes needed)
 

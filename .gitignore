@@ -1,6 +1,18 @@
-server/.env
+# Secrets
 .env
+.env.*
+!.env.example
+server/.env
 
-server/node_modules/
+# Dependencies
 node_modules/
+server/node_modules/
+
+# Logs & test output
 *.log
+test-results/
+coverage/
+
+# OS / editor noise
+.DS_Store
+Thumbs.db

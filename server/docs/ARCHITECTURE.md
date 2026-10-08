@@ -6,8 +6,8 @@ This describes the system as it actually exists, not an aspirational design. It 
 
 Oriven is split across **two separate git repositories**, not one monorepo:
 
-- **Frontend** — `C:\files` (this repo's parent when checked out alongside the server). A single large multi-page app (`app.html`, ~13,000+ lines) plus one JavaScript file per major feature area (`app.js`, `auth.js`, `create.js`, `workspace.js`, `autopilot.js`, `settings.js`, `guide.js`, `assistant.js`, `guest.js`, `ads.js`, `productshoots.js`, `ugc.js`, `videoads.js`, `motiongraphics.js`, `inspiration.js`, `competitor.js`, `create-flow.js`, `team.js`, `usage.js`, `paywall.js`, `supabase.js`, `tracking.js`, `plans.js`) and one stylesheet (`styles.css`).
-- **Backend** — this repo (`oriven-backand-clean/server`). A single Express app (`server.js`, ~9,500+ lines) plus `services/` (shared engines) and `tools/` (Tool Router tool definitions).
+- **Frontend** — the sibling `oriven-frontend` repo (`C:\files\oriven-frontend` locally; GitHub `oriven-frontend-clean`, deployed by Netlify). A single large multi-page app (`app.html`, ~13,000+ lines) plus one JavaScript file per major feature area (`app.js`, `auth.js`, `create.js`, `workspace.js`, `autopilot.js`, `settings.js`, `guest.js`, `ads.js`, `productshoots.js`, `videoads.js`, `motiongraphics.js`, `inspiration.js`, `competitor.js`, `usage.js`, `paywall.js`, `supabase.js`, `tracking.js`, `plans.js`, …) in `js/`, stylesheets in `css/` (main: `css/styles.css`), and media in `assets/` (`assets/films/` landing product films, `assets/ads/` landing ad-showcase creatives; `assets/orivenlogo.png` stays at its public URL).
+- **Backend** — this repo (`oriven-backend/server` locally; GitHub `oriven-backand-clean`, deployed by Render). A single Express app (`server.js`, ~9,500+ lines) plus `services/` (shared engines) and `tools/` (Tool Router tool definitions).
 
 At the time of writing, **neither repo has been committed past its last real commit** — everything from V6 (Marketing Intelligence) onward exists only as uncommitted working-tree changes. See `PRODUCTION_CHECKLIST.md`.
 

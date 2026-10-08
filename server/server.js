@@ -6,8 +6,8 @@ const nodemailer = require('nodemailer');
 const crypto     = require('crypto');
 const path       = require('path');
 const cron       = require('node-cron');
-// Resolve .env from the frontend root (two levels up: server/ â†’ oriven-backand-clean/ â†’ C:\files).
-// Frontend is the single source of truth for .env.
+// Resolve .env from the workspace root, two levels up
+// (server/ -> oriven-backend/ -> C:\files), shared by the local workspace.
 // NOTE: dotenv does NOT override variables already present in the process
 // environment (e.g. set by Render dashboard). If a key shows the wrong value
 // at runtime, update it in the Render dashboard â€” not just in .env.
@@ -218,7 +218,15 @@ app.use(cors());
 // so relative /api/... URLs from the browser resolve to this process.
 // Must come before express.json() but after cors() so CORS headers
 // are present on static responses too.
-app.use(express.static(path.resolve(__dirname, '..', '..')));
+// Local development only: the frontend lives in the sibling
+// oriven-frontend folder of the workspace (FRONTEND_DIR overrides). In
+// production the frontend is served by Netlify and none of these files exist
+// next to the backend, so this changes nothing there.
+const LOCAL_FRONTEND_DIR = process.env.FRONTEND_DIR || (function () {
+  const sibling = path.resolve(__dirname, '..', '..', 'oriven-frontend');
+  return require('fs').existsSync(sibling) ? sibling : path.resolve(__dirname, '..', '..');
+})();
+app.use(express.static(LOCAL_FRONTEND_DIR));
 
 // â”€â”€ Stripe webhook â€” must be registered BEFORE express.json() â”€â”€
 app.post('/api/stripe-webhook', express.raw({ type: 'application/json' }), async (req, res) => {
@@ -2804,246 +2812,6 @@ app.post('/api/resend-verification', async (req, res) => {
   }
 });
 
-// â”€â”€ POST /api/send-invite â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-// Sends a team invite email via Outlook SMTP.
-// Body: { name, email, role, message, workspaceName }
-//
-// REQUIRED MIGRATION -- the secure token-based accept flow below needs 5
-// columns on team_members that may not exist yet on every environment:
-//
-//   ALTER TABLE team_members
-//     ADD COLUMN IF NOT EXISTS invite_token      text,
-//     ADD COLUMN IF NOT EXISTS invite_expires_at timestamptz,
-//     ADD COLUMN IF NOT EXISTS workspace_name    text,
-//     ADD COLUMN IF NOT EXISTS accepted_user_id  uuid,
-//     ADD COLUMN IF NOT EXISTS accepted_at       timestamptz;
-//   CREATE INDEX IF NOT EXISTS team_members_invite_token_idx
-//     ON team_members(invite_token);
-//
-// Without this migration, /api/send-invite's insert (invite_token/
-// invite_expires_at/workspace_name) and /api/invite/:token's lookup will
-// fail against a stale schema -- run this before deploying this feature.
-// -- GET /api/team/members -----------------------------------------
-// Lists the caller's own team (pending + accepted seats only -- revoked
-// seats don't count against the limit and aren't shown).
-app.get('/api/team/members', requireSubscription, async (req, res) => {
-  try {
-    const { data, error } = await supabaseAdmin.from('team_members')
-      .select('id, invitee_name, invitee_email, role, status, created_at')
-      .eq('owner_user_id', req.user.id)
-      .in('status', ['pending', 'accepted'])
-      .order('created_at', { ascending: true });
-    if (error) throw error;
-    res.json({ members: data || [] });
-  } catch (err) {
-    console.error('[Team] GET members error:', err.message);
-    res.status(500).json({ error: 'Could not load team members' });
-  }
-});
-
-// -- DELETE /api/team/members/:id -----------------------------------
-app.delete('/api/team/members/:id', requireSubscription, async (req, res) => {
-  try {
-    const { data, error } = await supabaseAdmin.from('team_members')
-      .update({ status: 'revoked' })
-      .eq('id', req.params.id)
-      .eq('owner_user_id', req.user.id)
-      .select('id')
-      .maybeSingle();
-    if (error) throw error;
-    if (!data) return res.status(404).json({ error: 'Team member not found' });
-    res.json({ ok: true });
-  } catch (err) {
-    console.error('[Team] DELETE member error:', err.message);
-    res.status(500).json({ error: 'Could not remove that team member' });
-  }
-});
-
-app.post('/api/send-invite', requireSubscription, async (req, res) => {
-  const { name, email, role, message, workspaceName } = req.body || {};
-
-  if (!email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
-    return res.status(400).json({ error: 'A valid email address is required' });
-  }
-
-  // Seat limit -- the single source of truth for plan seat counts is
-  // creditManager.PLAN_TEAM_SEATS (starter:1, creator:1, professional:10),
-  // the same config the credit system itself uses. The UI shows the same
-  // numbers from plans.js's ORIVEN_PLANS[plan].teamMembers, kept in sync
-  // manually with this table -- this is the real, server-side enforcement
-  // that actually blocks a 2nd Starter/Creator seat or an 11th Professional one.
-  try {
-    const { data: profile } = await supabaseAdmin.from('profiles').select('subscription_status').eq('id', req.user.id).maybeSingle();
-    const plan = (profile && profile.subscription_status) || 'free';
-    const seatLimit = creditManager.PLAN_TEAM_SEATS[plan] || 0;
-    const { count, error: countErr } = await supabaseAdmin.from('team_members')
-      .select('id', { count: 'exact', head: true })
-      .eq('owner_user_id', req.user.id)
-      .in('status', ['pending', 'accepted']);
-    if (countErr) throw countErr;
-    // +1 accounts for the account owner, who is always seat 1 -- e.g.
-    // Professional's "up to 10 team members" means 10 total including the owner.
-    if ((count || 0) + 1 >= seatLimit) {
-      return res.status(403).json({ error: `Your ${plan} plan allows up to ${seatLimit} team member${seatLimit === 1 ? '' : 's'} (including you). Upgrade to invite more.`, code: 'TEAM_SEAT_LIMIT' });
-    }
-  } catch (err) {
-    console.error('[Invite] Seat limit check error:', err.message);
-    return res.status(500).json({ error: 'Could not verify your team seat limit right now.' });
-  }
-
-  const smtpUser = process.env.SMTP_USER;
-  const smtpPass = process.env.SMTP_PASS;
-
-  if (!smtpUser || !smtpPass) {
-    console.error('[Invite] âŒ SMTP credentials not configured â€” set SMTP_USER and SMTP_PASS in .env');
-    return res.status(503).json({ error: 'Email service not configured' });
-  }
-
-  const transporter = _smtpTransporter();
-
-  const recipientName    = name  || email.split('@')[0];
-  const senderWorkspace  = workspaceName || 'ORIVEN Workspace';
-  const roleLabel        = role  || 'Member';
-  const personalNote     = message ? `<p style="margin:0 0 14px;color:#374151;font-size:14px;line-height:1.6;font-style:italic;">"${message}"</p>` : '';
-
-  // Secure, single-use, expiring token -- the invite link must not just
-  // drop the recipient on the generic /app URL (which had no connection
-  // to this specific invitation, this workspace, or even this email
-  // address). 14 days, matching the existing email-verification link's
-  // own expiry convention (_verificationEmailHtml / verification_token).
-  const inviteToken = crypto.randomBytes(32).toString('hex');
-  const inviteExpiresAt = new Date(Date.now() + 14 * 24 * 60 * 60 * 1000).toISOString();
-  const acceptUrl = `${FRONTEND_URL}?invite_token=${inviteToken}`;
-
-  const html = `<!DOCTYPE html>
-<html lang="en">
-<head><meta charset="UTF-8"><title>You're invited to ${senderWorkspace}</title></head>
-<body style="margin:0;padding:0;background:#F6F3EE;font-family:'Geist',Helvetica,Arial,sans-serif;">
-  <div style="max-width:520px;margin:40px auto;background:#fff;border-radius:12px;overflow:hidden;box-shadow:0 2px 16px rgba(0,0,0,.07);">
-
-    <!-- Header -->
-    <div style="background:#0A0A0A;padding:28px 32px;">
-      <div style="font-size:20px;font-weight:700;color:#B7FF2A;letter-spacing:-.01em;">ORIVEN</div>
-      <div style="font-size:12px;color:rgba(255,255,255,.5);margin-top:3px;letter-spacing:.04em;">AI BRAND STUDIO</div>
-    </div>
-
-    <!-- Body -->
-    <div style="padding:32px 32px 28px;">
-      <h1 style="margin:0 0 10px;font-size:22px;font-weight:700;color:#18181A;line-height:1.25;">
-        You've been invited to join<br><span style="color:#18181A;">${senderWorkspace}</span>
-      </h1>
-      <p style="margin:0 0 22px;color:#555;font-size:14px;line-height:1.6;">
-        Hi ${recipientName}, you've been invited to collaborate as a <strong>${roleLabel}</strong> in the
-        ${senderWorkspace} workspace on ORIVEN.
-      </p>
-
-      ${personalNote}
-
-      <!-- Role chip -->
-      <div style="display:inline-block;background:rgba(183,255,42,0.1);border:1px solid rgba(183,255,42,0.3);border-radius:20px;padding:5px 14px;font-size:12px;font-weight:600;color:#3A7A06;margin-bottom:24px;">
-        Role: ${roleLabel}
-      </div>
-
-      <!-- CTA -->
-      <div style="text-align:center;margin:8px 0 28px;">
-        <a href="${acceptUrl}" style="display:inline-block;background:#B7FF2A;color:#000;font-size:14px;font-weight:600;text-decoration:none;padding:13px 32px;border-radius:8px;letter-spacing:.01em;">
-          Accept Invitation &rarr;
-        </a>
-      </div>
-
-      <p style="margin:0;font-size:12px;color:#999;line-height:1.6;border-top:1px solid #F0EDE8;padding-top:18px;">
-        If you weren't expecting this invite, you can ignore this email.<br>
-        Questions? Reply to <a href="mailto:contact@orivenai.com" style="color:#555;">contact@orivenai.com</a>
-      </p>
-    </div>
-  </div>
-</body>
-</html>`;
-
-  try {
-    await transporter.sendMail({
-      from:    process.env.SMTP_FROM || `ORIVEN <${smtpUser}>`,
-      to:      email,
-      subject: `You've been invited to ${senderWorkspace} on ORIVEN`,
-      html:    html,
-      text:    `Hi ${recipientName},\n\nYou've been invited to join "${senderWorkspace}" on ORIVEN as a ${roleLabel}.\n\nAccept your invitation:\n${acceptUrl}\n\nThis link is valid for 14 days.\n\nâ€” The ORIVEN Team`
-    });
-
-    const { data: memberRow, error: insertErr } = await supabaseAdmin.from('team_members').insert({
-      owner_user_id: req.user.id, invitee_email: email, invitee_name: name || null, role: roleLabel, status: 'pending',
-      invite_token: inviteToken, invite_expires_at: inviteExpiresAt, workspace_name: senderWorkspace,
-    }).select('id, invitee_name, invitee_email, role, status, created_at').maybeSingle();
-    if (insertErr) console.error('[Invite] Email sent but DB insert failed (non-fatal, seat count may under-report):', insertErr.message);
-
-    console.log(`[Invite] âœ… Invite sent to ${email} (role: ${roleLabel}, workspace: ${senderWorkspace})`);
-    res.json({ ok: true, member: memberRow || null });
-  } catch (err) {
-    console.error('[Invite] âŒ Failed to send invite email:', err.message);
-    res.status(500).json({ error: 'Could not send that invite right now. Please try again.' });
-  }
-});
-
-// â”€â”€ GET /api/invite/:token â”€â”€ public lookup, no auth required (the
-// recipient hasn't necessarily signed up/in yet when the accept-invite
-// landing page first loads and needs to show "Jane invited you to X"). ONLY
-// returns the minimal display info a not-yet-authenticated visitor needs
-// -- never the owner's user id or any other account data.
-app.get('/api/invite/:token', async (req, res) => {
-  try {
-    const { data: invite, error } = await supabaseAdmin.from('team_members')
-      .select('invitee_email, role, status, workspace_name, invite_expires_at')
-      .eq('invite_token', req.params.token).maybeSingle();
-    if (error) throw error;
-    if (!invite) return res.status(404).json({ error: 'This invitation link is invalid.' });
-    if (invite.status !== 'pending') return res.status(410).json({ error: 'This invitation has already been ' + invite.status + '.' });
-    if (invite.invite_expires_at && new Date(invite.invite_expires_at) < new Date()) {
-      return res.status(410).json({ error: 'This invitation has expired. Ask the workspace owner to send a new one.' });
-    }
-    res.json({
-      valid: true,
-      email: invite.invitee_email,
-      role: invite.role,
-      workspaceName: invite.workspace_name || 'ORIVEN Workspace',
-    });
-  } catch (err) {
-    console.error('[Invite] Lookup error:', err.message);
-    res.status(500).json({ error: 'Could not look up that invitation right now.' });
-  }
-});
-
-// â”€â”€ POST /api/invite/:token/accept â”€â”€ requires the recipient to already
-// be authenticated (either just signed up via /api/signup or signed in
-// with an existing account) -- the real security boundary: the
-// AUTHENTICATED user's own email must exactly match the invitation's
-// invitee_email, so only the actual invited person can accept it,
-// regardless of what token they happen to have.
-app.post('/api/invite/:token/accept', requireSubscription, async (req, res) => {
-  try {
-    const { data: invite, error } = await supabaseAdmin.from('team_members')
-      .select('id, owner_user_id, invitee_email, status, invite_expires_at').eq('invite_token', req.params.token).maybeSingle();
-    if (error) throw error;
-    if (!invite) return res.status(404).json({ error: 'This invitation link is invalid.' });
-    if (invite.status !== 'pending') return res.status(410).json({ error: 'This invitation has already been ' + invite.status + '.' });
-    if (invite.invite_expires_at && new Date(invite.invite_expires_at) < new Date()) {
-      return res.status(410).json({ error: 'This invitation has expired.' });
-    }
-    if ((req.user.email || '').toLowerCase() !== (invite.invitee_email || '').toLowerCase()) {
-      return res.status(403).json({ error: 'This invitation was sent to a different email address. Sign in with ' + invite.invitee_email + ' to accept it.' });
-    }
-
-    const { error: updateErr } = await supabaseAdmin.from('team_members')
-      .update({ status: 'accepted', accepted_user_id: req.user.id, accepted_at: new Date().toISOString() })
-      .eq('id', invite.id);
-    if (updateErr) throw updateErr;
-
-    console.log(`[Invite] Accepted invitation ${invite.id} for owner ${invite.owner_user_id} by ${req.user.email}`);
-    res.json({ ok: true });
-  } catch (err) {
-    console.error('[Invite] Accept error:', err.message);
-    res.status(500).json({ error: 'Could not accept that invitation right now.' });
-  }
-});
-
 // â”€â”€ AI Logo Generation â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 // Receives: { brandName, description, logoStyle, styleDirection, colorPalette }
 //   OR, for an image-to-image transform of an existing icon:
@@ -3159,309 +2927,6 @@ Brand description: ${description || 'a professional brand'}`;
 // â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 // UGC â€” AI VIDEO GENERATION (AIML / Kling)
 // â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
-
-// Static creator presets â€” displayed in the UGC avatar picker.
-// Avatar-based video is no longer used; these represent creator styles
-// that inform the video prompt sent to Kling.
-const UGC_PRESET_AVATARS = [
-  { avatar_id: 'creator_founder',   avatar_name: 'Startup Founder',    gender: 'neutral' },
-  { avatar_id: 'creator_lifestyle', avatar_name: 'Lifestyle Creator',   gender: 'neutral' },
-  { avatar_id: 'creator_tech',      avatar_name: 'Tech Reviewer',       gender: 'neutral' },
-  { avatar_id: 'creator_fitness',   avatar_name: 'Fitness Creator',     gender: 'neutral' },
-];
-
-const UGC_PRESET_VOICES = [
-  { voice_id: 'v_warm',       name: 'Warm',       language: 'English', gender: 'female' },
-  { voice_id: 'v_dynamic',    name: 'Dynamic',    language: 'English', gender: 'male'   },
-  { voice_id: 'v_confident',  name: 'Confident',  language: 'English', gender: 'male'   },
-  { voice_id: 'v_energetic',  name: 'Energetic',  language: 'English', gender: 'female' },
-];
-
-// â”€â”€ GET /api/ugc-avatars â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-app.get('/api/ugc-avatars', async (req, res) => {
-  const user = await getUserFromToken(req);
-  if (!user) return res.status(401).json({ error: 'Unauthorized' });
-  return res.json({ avatars: UGC_PRESET_AVATARS });
-});
-
-// â”€â”€ GET /api/ugc-voices â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-app.get('/api/ugc-voices', async (req, res) => {
-  const user = await getUserFromToken(req);
-  if (!user) return res.status(401).json({ error: 'Unauthorized' });
-  return res.json({ voices: UGC_PRESET_VOICES });
-});
-
-console.log("UGC ROUTE REGISTERED");
-
-// â”€â”€ POST /api/generate-ugc â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-// AIML writes the script, Kling (via AIML) generates the video.
-// Frontend calls one endpoint, gets back a videoId to poll.
-app.post('/api/generate-ugc', requireSubIfAuthed, paidActions.laneGuard('video'), async (req, res) => {
-  const user = await getUserFromToken(req);
-
-  if (!user) {
-    return res.status(401).json({ error: 'Unauthorized' });
-  }
-
-  console.log("UGC ROUTE HIT");
-  console.log("UGC BODY", JSON.stringify(req.body));
-
-  const { adFeeling, adGoal, adContext, avatarId, voiceId, avatarStyle,
-          brandName, brandDesc,
-          brandTone, brandToneOfVoice, brandPersonality,
-          brandAudience, brandPositioning, brandPromise, brandDiff,
-          brandVisualDir, brandWords,
-          background, customScript, format } = req.body || {};
-
-  const formatAspect = { vertical: '9:16', square: '1:1', landscape: '16:9' };
-  const aspectRatio  = formatAspect[format] || '9:16';
-  console.log('[UGC] Received â†’ adFeeling:', adFeeling, '| adGoal:', adGoal, '| format:', format, '| aspect:', aspectRatio, '| scriptMode:', customScript ? 'custom' : 'ai');
-
-  // â”€â”€ Cinematic brief registry â€” each style is a full creative direction â”€â”€
-  const CREATOR_BRIEFS = {
-    startup_founder: {
-      context:   'A bold startup founder speaking directly from their workspace â€” authentic, disruptive, has been in the trenches and knows the audience\'s exact pain point.',
-      hookStyle: 'Lead with the problem the audience already knows. One line. Then flip it hard.',
-      language:  'Founder energy: "we built this", "shipped it last week", "changed the way I work completely"',
-      ctaStyle:  'Direct and urgent: "try it now", "link in bio", "ship faster starting today"',
-    },
-    podcast_creator: {
-      context:   'A trusted podcast host mid-recommendation â€” relaxed, genuinely enthusiastic, talking like they\'re in the middle of a real conversation with a close friend.',
-      hookStyle: 'Start mid-story or mid-thought. Like you jumped into a conversation already in progress.',
-      language:  'Warm and authentic: "honestly", "I\'ve been using this for months now", "you need to hear about this"',
-      ctaStyle:  'Soft confidence: "worth checking out", "grab the link below", "you\'ll thank me later"',
-    },
-    fitness_creator: {
-      context:   'A results-obsessed fitness creator in their element â€” pumped, direct, every single word carries physical energy and drive.',
-      hookStyle: 'Open with a transformation or a challenge. Make them feel the intensity in the first sentence.',
-      language:  'Active and relentless: "gains", "no excuses", "I don\'t stop until", "results speak for themselves"',
-      ctaStyle:  'No hesitation: "get it now", "stop waiting", "your move"',
-    },
-    luxury_influencer: {
-      context:   'A luxury lifestyle creator speaking from a premium environment â€” measured, deliberate, every word is intentional and earns its place.',
-      hookStyle: 'Paint the aspirational scene first. Let the audience want the life before they hear anything about the product.',
-      language:  'Elevated and sparse: "exceptional", "the kind of quality that stays with you", "not for everyone â€” and that\'s the point"',
-      ctaStyle:  'Restrained and exclusive: "discover it", "if you know, you know", "for those who notice the difference"',
-    },
-    tech_reviewer: {
-      context:   'An authoritative tech reviewer who has tested everything, cuts through the noise, and only recommends what genuinely works.',
-      hookStyle: 'Lead with your boldest claim immediately, then back it up with specifics. Credibility through detail.',
-      language:  'Informed and precise: "tested this for 30 days straight", "here\'s what actually surprised me", "the feature that changes everything"',
-      ctaStyle:  'Confident endorsement: "worth every penny", "link in the description", "upgraded and never looked back"',
-    },
-    street_creator: {
-      context:   'A spontaneous street creator filming on-the-go â€” raw, unfiltered energy, just discovered something and physically cannot wait to share it.',
-      hookStyle: 'React first. "Okay waitâ€”" or "I need to stop and talk about this right now" â€” pull them into the urgency.',
-      language:  'Raw and viral: "no cap", "lowkey obsessed", "fr fr", "I can\'t believe this actually works"',
-      ctaStyle:  'Impulsive and urgent: "grab it fr", "link in bio right now", "you\'re welcome in advance"',
-    },
-    vacation_creator: {
-      context:   'A travel creator on location â€” relaxed, fully in their element, makes the audience want the experience before they even know what the product is.',
-      hookStyle: 'Pull them into the scene. Set where you are and how it feels before revealing anything.',
-      language:  'Lifestyle and discovery: "couldn\'t leave without it", "this changed how I travel", "the vibe here is completely different"',
-      ctaStyle:  'Aspirational close: "take me back", "get yours before they\'re gone", "you genuinely deserve this"',
-    },
-    office_creator: {
-      context:   'A sharp professional in a clean modern workspace â€” focused, outcome-driven, respects the audience\'s time and treats them as intelligent adults.',
-      hookStyle: 'Name the professional pain point in the first sentence. Time is the asset â€” get to the solution fast.',
-      language:  'Direct and measurable: "saves me two hours every day", "our entire team switched", "the ROI showed up immediately"',
-      ctaStyle:  'Measured and clear: "try it free", "book the demo", "your workflow will thank you"',
-    },
-  };
-
-  let reservation;
-  try {
-    reservation = await creditManager.reserveCredits(user, 'video_generation');
-  } catch (err) {
-    if (err instanceof creditManager.InsufficientCreditsError) return res.status(402).json({ error: 'Out of credits', code: 'CREDITS_EXHAUSTED', balance: err.balance });
-    console.warn('[UGC] Credit reservation error:', err.message);
-  }
-
-  // â”€â”€ Step 1: Script â€” use provided or generate with AI â”€â”€â”€â”€â”€â”€â”€â”€
-  let script;
-  if (customScript && customScript.trim()) {
-    script = customScript.trim();
-    console.log('[UGC] Using custom script (', script.length, 'chars )');
-  } else {
-    try {
-      // Ad feeling â†’ directorial instruction (energy, pacing, sentence structure)
-      const feelingInstruction = {
-        viral:       'Make this spread. Rapid-fire energy, punchy hooks designed to be shared. Short sentences. Bold, declarative statements.',
-        cinematic:   'Write like a film director narrating a moment â€” evocative, visual language. Every sentence paints a picture. Slow and deliberate. Emotionally charged.',
-        emotional:   'Lead with heart. Personal story, raw honesty, vulnerability that earns real connection. Make them feel something before you ask them to do anything.',
-        aggressive:  'No warmup. Direct, hard-hitting, zero fluff. Bold claims, urgency in every line. This is a closer â€” make them feel like they\'re missing out right now.',
-        luxury:      'Nothing is rushed. Sparse, aspirational language where every word earns its place. The silence between sentences matters. Elevated throughout.',
-        startup:     'Scrappy and exciting. Disruptive framing, founder-level conviction, the energy of someone who genuinely believes they\'re changing something.',
-        friendly:    'Warm, genuine, completely likeable. Feels exactly like a trusted friend giving an honest recommendation with zero agenda.',
-        high_energy: 'Maximum energy from the first word. Fast pace, exclamation, nonstop forward momentum. There is no gear below fifth.',
-      }[adFeeling] || 'Write in a genuine, natural first-person voice with authentic energy.';
-
-      // Ad goal â†’ hook angle + CTA direction
-      const goalInstruction = {
-        sales:     'GOAL: Drive immediate purchase. Build desire fast, remove hesitation, close with urgency. CTA should push "buy now", "get it", "grab yours".',
-        awareness: 'GOAL: Build brand recall and desire. Plant the seed â€” intrigue over hard sell. CTA should invite discovery: "check it out", "learn more", "look it up".',
-        downloads: 'GOAL: Drive app installs. Highlight how fast and easy it is to get started. CTA should push "download it", "get the app", "it\'s free to start".',
-        clicks:    'GOAL: Pull to a link or page. Create enough curiosity that clicking feels inevitable. CTA should be "link in bio", "tap the link", "click below".',
-        launch:    'GOAL: Announce a new launch. Create FOMO and excitement for something that just dropped. CTA should signal scarcity or newness: "just launched", "early access", "be first".',
-      }[adGoal] || '';
-
-      // Build brand context block â€” prefer new BrandCore fields, fall back to legacy fields
-      const effectiveTone = brandToneOfVoice || brandTone || '';
-      const effectivePos  = brandPositioning || brandPromise || brandDiff || '';
-
-      const brandLines = [
-        brandName        ? `Brand: ${brandName}` : '',
-        brandDesc        ? `What it does: ${brandDesc}` : '',
-        effectiveTone    ? `Tone of Voice: ${effectiveTone}` : '',
-        brandPersonality ? `Brand Personality: ${brandPersonality}` : '',
-        brandAudience    ? `Target Audience: ${brandAudience}` : '',
-        effectivePos     ? `Positioning: ${effectivePos}` : '',
-        brandVisualDir   ? `Visual Direction: ${brandVisualDir}` : '',
-        brandWords       ? `Key Vocabulary: ${brandWords}` : '',
-      ].filter(Boolean);
-
-      const _bizCtx = await _creativeContext(user.id);
-      const system = `You are an expert UGC ad scriptwriter and creative director for TikTok, Instagram Reels, and YouTube Shorts.
-${brandLines.length ? '\nBRAND CONTEXT â€” write as if you live inside this brand:\n' + brandLines.map(l => '- ' + l).join('\n') : ''}
-${_bizCtx ? '\nBUSINESS KNOWLEDGE (real, stored data about this business):\n' + _bizCtx.text + '\n' : ''}
-AD FEELING â€” apply this to every sentence (HIGHEST PRIORITY): ${feelingInstruction}
-${goalInstruction ? '\nAD GOAL â€” shape your hook angle and CTA around this: ' + goalInstruction : ''}
-Script rules:
-- Open with a strong attention-grabbing hook that stops the scroll in the first 3 seconds
-- Speak in a genuine first-person voice as an authentic creator living in this brand's world
-- Weave in the brand's vocabulary and tone naturally â€” not as a checklist, as character
-- End with a clear, natural call-to-action aligned with the goal above
-- First person only â€” no "you should" constructions at the start
-- No stage directions, brackets, parenthetical actions, or scene descriptions
-- Output ONLY the spoken script â€” nothing else, no titles, no labels
-- Target 8â€“12 sentences for a 30â€“45 second read`;
-
-      const userMsg = [
-        'Write a UGC ad script.',
-        adContext ? `Additional context: ${adContext}` : '',
-        `Ad feeling: ${adFeeling || 'viral'}`,
-        adGoal    ? `Ad goal: ${adGoal}` : '',
-        '',
-        'Output ONLY the spoken script.',
-      ].filter(Boolean).join('\n');
-
-      script = (await _aimlText('ugc-script', system, userMsg, { max_tokens: 1024 })).trim();
-      if (!script) {
-        if (reservation) creditManager.finalizeCreditLog(reservation, 'video_generation', { success: false, error: 'empty script', route: req.path }).catch(() => {});
-        return res.status(500).json({ error: 'AIML returned an empty script' });
-      }
-      console.log('[UGC] Script generated (', script.length, 'chars ) | feeling:', adFeeling, '| goal:', adGoal || 'none');
-    } catch (err) {
-      console.error('[UGC] Script generation error:', err.message);
-      if (reservation) creditManager.finalizeCreditLog(reservation, 'video_generation', { success: false, error: err.message, route: req.path }).catch(() => {});
-      return res.status(500).json({ error: 'Could not write that script right now. Please try again.' });
-    }
-  }
-
-  // â”€â”€ Step 2: Generate video via AIML (Kling) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-  try {
-    const aiml      = require('./providers/aimlProvider');
-    const router    = require('./services/modelRouter');
-    const vidRoute  = router.routeTask('ugc-video');
-    const videoPrompt = `${adFeeling ? adFeeling + ' style' : 'energetic'} social media ad video. ${script.slice(0, 300)}`;
-    console.log('[UGC] Submitting to AIML Kling | model:', vidRoute.model, '| aspect:', aspectRatio);
-    const { generationId } = await aiml.generateVideo(videoPrompt, {
-      model:        vidRoute.model,
-      aspect_ratio: aspectRatio,
-      duration:     5,
-    });
-    console.log('[UGC] Video submitted to AIML:', generationId, '| user:', user.id);
-    _recordCreativeAsset(user.id, { kind: 'ugc', title: (adContext || script).slice(0, 80), content: { script, generationId }, source_route: '/api/generate-ugc' });
-    if (reservation) creditManager.finalizeCreditLog(reservation, 'video_generation', { provider: 'aiml', model: 'kling', success: true, route: req.path }).catch(() => {});
-    paidActions.awaitAsync(generationId); // charge settles when the job completes/fails (status endpoint)
-    return res.json({ ok: true, videoId: generationId, status: 'processing' });
-  } catch (err) {
-    console.error('[UGC] AIML video submission error:', err.message);
-    if (reservation) creditManager.finalizeCreditLog(reservation, 'video_generation', { success: false, error: err.message, route: req.path }).catch(() => {});
-    return res.status(500).json({ error: 'Could not submit that video right now. Please try again.' });
-  }
-});
-
-// â”€â”€ POST /api/generate-ugc-script â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-// Standalone script-only endpoint (used by test page / direct integrations).
-// Aligned with the simplified UGC flow â€” no product/niche/audience required.
-app.post('/api/generate-ugc-script', requireSubIfAuthed, async (req, res) => {
-  const user = await getUserFromToken(req);
-  if (!user) return res.status(401).json({ error: 'Unauthorized' });
-
-  const { creatorStyle, adFeeling, brandName, brandDesc } = req.body || {};
-
-  const CREATOR_BRIEFS = {
-    startup_founder:   { context: 'A bold startup founder speaking directly from their workspace â€” authentic, disruptive, knows the audience\'s pain point firsthand.', hookStyle: 'Lead with the problem the audience already knows. One line. Then flip it.', language: 'Founder energy: "we built this", "shipped it", "changed the way I work"', ctaStyle: 'Direct and urgent: "try it now", "link in bio", "ship faster today"' },
-    podcast_creator:   { context: 'A trusted podcast host mid-recommendation â€” relaxed, genuine, talking like they\'re in conversation with a close friend.', hookStyle: 'Start mid-story or mid-thought. Like jumping into a conversation already in progress.', language: 'Warm: "honestly", "I\'ve been using this for months", "you need to hear this"', ctaStyle: 'Soft confidence: "worth checking out", "grab the link", "you\'ll thank me"' },
-    fitness_creator:   { context: 'A results-obsessed fitness creator in their element â€” pumped, direct, every word carries physical energy.', hookStyle: 'Open with a transformation claim or challenge. Make them feel the intensity.', language: 'Active: "gains", "no excuses", "results don\'t lie"', ctaStyle: 'No hesitation: "get it now", "stop waiting", "your move"' },
-    luxury_influencer: { context: 'A luxury lifestyle creator in a premium environment â€” measured, deliberate, every word is intentional.', hookStyle: 'Paint the aspirational scene first. Let the audience want the life before the product.', language: 'Elevated: "exceptional", "the kind of quality that stays with you", "not for everyone"', ctaStyle: 'Restrained: "discover it", "if you know, you know", "for those who notice"' },
-    tech_reviewer:     { context: 'An authoritative tech reviewer who only recommends what genuinely works. Credibility through specificity.', hookStyle: 'Lead with the boldest claim immediately, then back it up with detail.', language: 'Precise: "tested for 30 days", "here\'s what surprised me", "the feature that matters"', ctaStyle: 'Confident: "worth every penny", "link in description", "never looked back"' },
-    street_creator:    { context: 'A spontaneous street creator filming on-the-go â€” raw, just discovered something and can\'t wait to share it.', hookStyle: 'React first. "Okay waitâ€”" or "I need to talk about this right now".', language: 'Raw: "no cap", "lowkey obsessed", "fr fr", "can\'t believe this works"', ctaStyle: 'Urgent: "grab it fr", "link in bio now", "you\'re welcome"' },
-    vacation_creator:  { context: 'A travel creator on location â€” relaxed, makes the audience want the experience before they know the product.', hookStyle: 'Set the scene first. Pull them into where you are and how it feels.', language: 'Lifestyle: "couldn\'t leave without it", "changed how I travel", "the vibe is different"', ctaStyle: 'Aspirational: "get yours", "you deserve this", "take me back"' },
-    office_creator:    { context: 'A sharp professional in a clean workspace â€” focused, outcome-driven, respects the audience\'s time.', hookStyle: 'Name the pain point in the first sentence. Get to the solution fast.', language: 'Measurable: "saves me two hours daily", "whole team switched", "ROI showed up immediately"', ctaStyle: 'Clear: "try it free", "book the demo", "your workflow will thank you"' },
-  };
-
-  const feelingInstruction = {
-    viral:       'Make this spread. Rapid-fire energy, punchy hooks designed to be shared. Short sentences, bold statements.',
-    cinematic:   'Write like a film director â€” evocative, visual language. Every sentence paints a picture. Slow, deliberate, emotionally charged.',
-    emotional:   'Lead with heart. Raw honesty and vulnerability that earns real connection.',
-    aggressive:  'No warmup. Direct, hard-hitting, urgency in every line. Make them feel like they\'re missing out right now.',
-    luxury:      'Nothing is rushed. Sparse, aspirational language where every word earns its place.',
-    startup:     'Scrappy and exciting. Disruptive framing, founder conviction, energy of someone changing something.',
-    friendly:    'Warm, genuine, completely likeable â€” a trusted friend giving an honest recommendation.',
-    high_energy: 'Maximum energy from the first word. Fast pace, nonstop forward momentum. No lower gear.',
-  }[adFeeling] || 'Write in a genuine, natural first-person voice.';
-
-  const brief = CREATOR_BRIEFS[creatorStyle] || {};
-  const _bizCtx = await _creativeContext(user.id);
-
-  const system = `You are an expert UGC ad scriptwriter and creative director for TikTok, Instagram Reels, and YouTube Shorts.
-
-CREATOR PROFILE: ${brief.context || 'An authentic creator speaking directly to camera.'}
-HOOK STYLE: ${brief.hookStyle || 'Open with a strong attention-grabbing hook.'}
-LANGUAGE GUIDE: ${brief.language || 'Conversational, first-person, authentic.'}
-CTA STYLE: ${brief.ctaStyle || 'End with a clear, natural call-to-action.'}
-${_bizCtx ? '\nBUSINESS KNOWLEDGE (real, stored data about this business):\n' + _bizCtx.text + '\n' : ''}
-AD FEELING (HIGHEST PRIORITY): ${feelingInstruction}
-
-Rules: first-person only, no stage directions, no brackets, output ONLY the spoken script, 8â€“12 sentences.`;
-
-  const userMsg = [
-    'Write a UGC ad script.',
-    brandName ? `Brand: ${brandName}` : '',
-    brandDesc ? `About: ${brandDesc}` : '',
-    `Creator: ${(creatorStyle || '').replace(/_/g, ' ')}`,
-    `Feeling: ${adFeeling || 'viral'}`,
-    '',
-    'Output ONLY the spoken script.',
-  ].filter(Boolean).join('\n');
-
-  let reservation;
-  try {
-    reservation = await creditManager.reserveCredits(user, 'campaign_improvement');
-  } catch (err) {
-    if (err instanceof creditManager.InsufficientCreditsError) return res.status(402).json({ error: 'Out of credits', code: 'CREDITS_EXHAUSTED', balance: err.balance });
-    return res.status(500).json({ error: 'Could not verify credits right now.' });
-  }
-
-  try {
-    const script = (await _aimlText('ugc-script', system, userMsg, { max_tokens: 1024 })).trim();
-    if (!script) {
-      creditManager.finalizeCreditLog(reservation, 'campaign_improvement', { success: false, error: 'empty script', route: req.path }).catch(() => {});
-      return res.status(500).json({ error: 'Empty script generated' });
-    }
-
-    console.log('[UGC] Script generated | user:', user.id);
-    _recordCreativeAsset(user.id, { kind: 'script', title: (brandName || creatorStyle || 'UGC script').slice(0, 80), content: { text: script }, source_route: '/api/generate-ugc-script' });
-    creditManager.finalizeCreditLog(reservation, 'campaign_improvement', { provider: 'aiml', success: true, route: req.path }).catch(() => {});
-    return res.json({ ok: true, script });
-  } catch (err) {
-    console.error('[UGC] Script generation error:', err.message);
-    creditManager.finalizeCreditLog(reservation, 'campaign_improvement', { success: false, error: err.message, route: req.path }).catch(() => {});
-    return res.status(500).json({ error: 'Could not generate that script right now. Please try again.' });
-  }
-});
 
 // â”€â”€ POST /api/generate-ugc-video â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 // Generates a video from a script via AIML (Kling text-to-video).
@@ -8759,14 +8224,14 @@ app.post('/api/publish/tiktok', requireSubOrFreeStrict, async (req, res) => {
 });
 
 // â”€â”€ Public routes â€” all served by index.html (router handles view) â”€â”€
-app.get('/signup',     function(req, res) { res.sendFile(path.resolve(__dirname, '..', '..', 'index.html')); });
-app.get('/login',      function(req, res) { res.sendFile(path.resolve(__dirname, '..', '..', 'index.html')); });
+app.get('/signup',     function(req, res) { res.sendFile(path.resolve(LOCAL_FRONTEND_DIR, 'index.html')); });
+app.get('/login',      function(req, res) { res.sendFile(path.resolve(LOCAL_FRONTEND_DIR, 'index.html')); });
 app.get('/plan',       function(req, res) { res.redirect(302, '/app'); });
 app.get('/onboarding', function(req, res) { res.redirect(302, '/app?tour=1'); });
 
 // â”€â”€ /app â†’ ORIVEN application â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 app.get('/app', function(req, res) {
-  res.sendFile(path.resolve(__dirname, '..', '..', 'app.html'));
+  res.sendFile(path.resolve(LOCAL_FRONTEND_DIR, 'app.html'));
 });
 
 // â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
@@ -17445,7 +16910,7 @@ app.use(function(req, res) {
   }
 
   // Local dev fallback â€” serve the requested file; 404 cleanly if missing.
-  var filePath = path.resolve(__dirname, '..', '..', req.path === '/' ? 'index.html' : req.path.replace(/^\//, ''));
+  var filePath = path.resolve(LOCAL_FRONTEND_DIR, req.path === '/' ? 'index.html' : req.path.replace(/^\//, ''));
   res.sendFile(filePath, function(err) {
     if (err) {
       res.status(404).send('Not found');
