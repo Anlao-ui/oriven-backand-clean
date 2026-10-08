@@ -362,6 +362,28 @@ const TASKS = {
 
 };
 
+// ── Cost tiering (AI cost optimization) ────────────────────────
+// Simple transformation work (Tier C: writing an image/video/logo prompt,
+// an email draft) and invisible or background narrative (Tier D: dashboard
+// briefings, forecast wording, business insights/reflection, Autopilot
+// write-ups and briefs) does not need the premium model. These tasks run on
+// a verified cheaper Claude model: AIMLAPI id 'claude-haiku-4-5' (listed by
+// GET https://api.aimlapi.com/models as an alias of anthropic/claude-haiku-4.5,
+// same chat-completions endpoint; AIMLAPI price $1.3754 / $6.877 per 1M
+// input/output tokens vs $6.877 / $34.385 for claude-opus-4-8). Create,
+// Research, chat, campaign copy and account analysis stay on the premium
+// model.
+//   AI_FAST_MODEL=<id>          use a different verified cheap model
+//   AI_FAST_MODEL_DISABLED=true route every task back to the premium model
+// If the cheap model is rejected by the provider (model unavailable), the
+// call is retried once on the premium model (fallbackModel, see server.js).
+const FAST_TASKS = [
+  'visuals-copy', 'logo-copy', 'product-shoots-copy', 'motion-graphics-copy', 'video-ads-copy', 'email',
+  'home-briefing', 'forecast', 'business-insights', 'business-reflection', 'autopilot-recommendation', 'autopilot-brief',
+];
+MODELS.aiml.fast = process.env.AI_FAST_MODEL || 'claude-haiku-4-5';
+function _fastEnabled() { return process.env.AI_FAST_MODEL_DISABLED !== 'true'; }
+
 // ── routeTask() ───────────────────────────────────────────────
 function routeTask(type) {
   const task = TASKS[type];
@@ -371,9 +393,12 @@ function routeTask(type) {
       `Valid types: ${Object.keys(TASKS).join(', ')}`
     );
   }
+  const fast = FAST_TASKS.includes(type) && _fastEnabled();
   return {
     provider: task.provider,
-    model:    task.model,
+    model:    fast ? MODELS.aiml.fast : task.model,
+    fallbackModel: fast ? task.model : null,
+    tier:     fast ? 'fast' : 'premium',
     endpoint: task.endpoint || null,
     type:     task.type,
     label:    task.label,
@@ -386,6 +411,7 @@ function logSummary() {
   console.log('── Model Router ──────────────────────────────────────');
   console.log('[Router] Provider             : AIML (single gateway)');
   console.log('[Router] AIML text model      :', MODELS.aiml.text);
+  console.log('[Router] AIML fast model      :', _fastEnabled() ? MODELS.aiml.fast + ' (' + FAST_TASKS.length + ' tasks)' : 'disabled (AI_FAST_MODEL_DISABLED)');
   console.log('[Router] AIML code model      :', MODELS.aiml.code);
   console.log('[Router] AIML image model     :', MODELS.aiml.image);
   console.log('[Router] AIML video model     :', MODELS.aiml.video);
@@ -394,4 +420,4 @@ function logSummary() {
   console.log('');
 }
 
-module.exports = { MODELS, TASKS, routeTask, logSummary };
+module.exports = { MODELS, TASKS, FAST_TASKS, routeTask, logSummary };

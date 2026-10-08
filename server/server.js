@@ -837,15 +837,34 @@ async function _aimlText(taskType, system, user, opts = {}) {
   const aiml   = require('./providers/aimlProvider');
   const model  = opts.model || route.model;
   const p = aiUsage.prepareText({ task: taskType, model, system, user });
-  let data;
+  let data, usedModel = model;
   try {
     data = await aiml.generateText(p.system, p.user, { model: route.model, ...opts, returnFull: true });
   } catch (err) {
     aiUsage.record({ task: taskType, model, promptChars: p.promptChars, success: false, reason: 'provider_error' });
-    throw err;
+    // Cost-tiered tasks run on a cheaper model (services/modelRouter.js). If
+    // the provider rejects that model itself (unavailable/renamed), retry
+    // once on the premium model so the feature keeps working.
+    if (!(route.fallbackModel && !opts.model && _isModelRejected(err))) throw err;
+    console.warn('[AIUsage] ' + JSON.stringify({ event: 'model_fallback', task: taskType, from: model, to: route.fallbackModel, status: err.status || null }));
+    usedModel = route.fallbackModel;
+    try {
+      data = await aiml.generateText(p.system, p.user, { ...opts, model: route.fallbackModel, returnFull: true });
+    } catch (err2) {
+      aiUsage.record({ task: taskType, model: usedModel, promptChars: p.promptChars, success: false, reason: 'provider_error' });
+      throw err2;
+    }
   }
-  aiUsage.record({ task: taskType, model, data, promptChars: p.promptChars, success: true });
+  aiUsage.record({ task: taskType, model: usedModel, data, promptChars: p.promptChars, success: true });
   return _aimlUnwrap(data, opts);
+}
+
+// True when the provider refused the requested MODEL (not the account, not a
+// timeout, not capacity) — the only case where the premium fallback applies.
+function _isModelRejected(err) {
+  if (!err || err.providerAccount || err.timeout || err.busy || err.code === 'AI_SPEND_LIMIT') return false;
+  if (err.status === 404) return true;
+  return (err.status === 400 || err.status === 422) && /model/i.test(String(err.message || ''));
 }
 
 // Same-input memo for the uncharged, read-only AI narratives (forecast,
@@ -859,22 +878,37 @@ async function _aimlText(taskType, system, user, opts = {}) {
 const _AI_MEMO_TTL_MS = 6 * 60 * 60 * 1000;
 const _AI_MEMO_MAX = 500;
 const _aiMemo = new Map();
+const _aiMemoInflight = new Map();
+// opts.memoKey: cache by PURPOSE instead of exact prompt text. Page-load
+// narratives (briefings, insights) embed live numbers that change every few
+// minutes for an active advertiser, so an exact-prompt key regenerated them
+// on nearly every page load. With a purpose key the narrative is reused for
+// opts.memoTtlMs; the live numbers themselves are still shown fresh by the UI.
+// Concurrent identical requests share one in-flight call.
 async function _aimlTextMemo(taskType, system, user, opts = {}) {
   const ctx = aiUsage.current();
   const uid = ctx && ctx.userId;
-  if (!uid) return _aimlText(taskType, system, user, opts);
-  const key = crypto.createHash('sha256').update(JSON.stringify([uid, taskType, opts.model || '', opts.max_tokens || '', system || '', user || ''])).digest('hex');
+  const { memoKey, memoTtlMs, ...callOpts } = opts;
+  if (!uid) return _aimlText(taskType, system, user, callOpts);
+  const key = crypto.createHash('sha256').update(JSON.stringify(memoKey
+    ? [uid, taskType, 'k', memoKey]
+    : [uid, taskType, callOpts.model || '', callOpts.max_tokens || '', system || '', user || ''])).digest('hex');
   const hit = _aiMemo.get(key);
   if (hit && hit.expires > Date.now()) {
     console.log('[AIUsage] ' + JSON.stringify({ ts: new Date().toISOString(), event: 'ai_memo_hit', task: taskType, route: ctx.route || undefined, userId: uid }));
     return hit.value;
   }
-  const value = await _aimlText(taskType, system, user, opts);
-  if (typeof value === 'string' && value.trim()) {
-    if (_aiMemo.size >= _AI_MEMO_MAX) _aiMemo.delete(_aiMemo.keys().next().value);
-    _aiMemo.set(key, { value, expires: Date.now() + _AI_MEMO_TTL_MS });
-  }
-  return value;
+  if (_aiMemoInflight.has(key)) return _aiMemoInflight.get(key);
+  const pending = (async () => {
+    const value = await _aimlText(taskType, system, user, callOpts);
+    if (typeof value === 'string' && value.trim()) {
+      if (_aiMemo.size >= _AI_MEMO_MAX) _aiMemo.delete(_aiMemo.keys().next().value);
+      _aiMemo.set(key, { value, expires: Date.now() + (memoTtlMs || _AI_MEMO_TTL_MS) });
+    }
+    return value;
+  })().finally(() => _aiMemoInflight.delete(key));
+  _aiMemoInflight.set(key, pending);
+  return pending;
 }
 
 async function _aimlImage(taskType, prompt, opts = {}) {
@@ -11612,7 +11646,11 @@ app.get('/api/meta/campaigns', async (req, res) => {
 // Mirrors _analyzeGoogleAccount's shape/contract exactly so callers
 // (POST /api/meta/analyze, GET /api/intelligence/home) can treat Google
 // and Meta analysis interchangeably.
-async function _analyzeMetaAccount(user, range, customSince, customUntil) {
+// _opts.reuseNarrative: a previous analysis whose AI narrative (score,
+// findings, recommendations, strengths/weaknesses/opportunities, creative
+// notes) is reused — the campaign metrics/priorities/totals are still
+// fetched fresh and computed deterministically, but no AI call is made.
+async function _analyzeMetaAccount(user, range, customSince, customUntil, _opts) {
   const dr = resolveDateRange(range, customSince, customUntil);
   range = dr.key;
   const { accessToken, accountId, accountName } = await _getMetaAccess(user);
@@ -11715,6 +11753,10 @@ Score guide: 70+ good, 45-69 average, below 45 poor. Weight: CTR quality 25%, co
 Rules: max 6 findings, max 6 recommendations, 3 strengths, 3 weaknesses, 3 opportunities, max 5 creativeNotes (only for creatives genuinely worth flagging). Reference real names and numbers. Do NOT include a confidence field anywhere — confidence is calculated separately from real data, never state or imply a certainty level yourself. If minimal data, say so explicitly in whyNow/ifIgnored rather than overstating certainty.`;
 
   // V7 Phase 1 â€” light Context Engine V2 touch, same as Google's analyze fn.
+  let parsed;
+  if (_opts && _opts.reuseNarrative) {
+    parsed = _narrativeFrom(_opts.reuseNarrative);
+  } else {
   const _bizCtx = await _gatherBusinessContext(user.id).catch(() => null);
 
   const userMsg = `Account: ${accountName} (ID: ${accountId}) | Period: ${range}${_bizCtx ? `\n\nBUSINESS CONTEXT (if competitor info is present, use it only for strategic positioning — never to copy or replicate competitor messaging):\n${_bizCtx.text}` : ''}
@@ -11729,7 +11771,6 @@ ${adLines.length > 0 ? adLines.join('\n') : 'No ad-level data'}`;
 
   const raw = await _aimlText('text-copy', system, userMsg, { max_tokens: 2200 });
 
-  let parsed;
   try {
     parsed = JSON.parse(raw.replace(/^```json\s*/i, '').replace(/```\s*$/, '').trim());
   } catch (_) {
@@ -11741,6 +11782,7 @@ ${adLines.length > 0 ? adLines.join('\n') : 'No ad-level data'}`;
       throw parseErr;
     }
     parsed = JSON.parse(m[0]);
+  }
   }
 
   // V6 Phase 2 â€” Campaign Priority (calculated, not AI-assigned)
@@ -14915,7 +14957,7 @@ app.get('/api/ads/campaign/:id/assets', async (req, res) => {
 // ── Google Ads account analysis — live data + AI narrative ──────
 // Used by: POST /api/ads/analyze (below) and GET /api/intelligence/home
 // (V6 Home Dashboard). Extracted so both callers share one implementation.
-async function _analyzeGoogleAccount(user, range, customSince, customUntil) {
+async function _analyzeGoogleAccount(user, range, customSince, customUntil, _opts) {
     const dr = resolveDateRange(range, customSince, customUntil);
     range = dr.key;
     const { accessToken, customerId, accountName, loginCustomerId } = await _getGadsAccess(user);
@@ -15096,6 +15138,10 @@ Rules: max 6 findings, max 6 recommendations, 3 strengths, 3 weaknesses, 3 oppor
     // V7 Phase 1 â€” light Context Engine V2 touch: real product/audience
     // names so recommendations can reference the actual business, not a
     // full context dump into an already-large prompt.
+    let parsed;
+    if (_opts && _opts.reuseNarrative) {
+      parsed = _narrativeFrom(_opts.reuseNarrative);
+    } else {
     const _bizCtx = await _gatherBusinessContext(user.id).catch(() => null);
 
     const userMsg = `Account: ${accountName} (ID: ${customerId}) | Period: ${range}${_bizCtx ? `\n\nBUSINESS CONTEXT (if competitor info is present, use it only for strategic positioning — never to copy or replicate competitor messaging):\n${_bizCtx.text}` : ''}
@@ -15119,7 +15165,6 @@ ${adLines.length > 0 ? adLines.join('\n') : 'No ad-level data'}`;
 
     const raw = await _aimlText('text-copy', system, userMsg, { max_tokens: 2400 });
 
-    let parsed;
     try {
       parsed = JSON.parse(raw.replace(/^```json\s*/i, '').replace(/```\s*$/, '').trim());
     } catch (_) {
@@ -15131,6 +15176,7 @@ ${adLines.length > 0 ? adLines.join('\n') : 'No ad-level data'}`;
         throw parseErr;
       }
       parsed = JSON.parse(m[0]);
+    }
     }
 
     // V6 Phase 2 â€” Campaign Priority (calculated, not AI-assigned)
@@ -15556,7 +15602,7 @@ app.get('/api/intelligence/forecast', requireSubIfAuthed, async (req, res) => {
     try {
       const system = `You are Oriven, writing a one-sentence "reasoning" and up to 3 "keyAssumptions" for an ALREADY-COMPUTED forecast. Do not change or invent any numbers â€” only explain the ones given. Return ONLY valid JSON, no markdown, no code fences: {"reasoning": "one sentence", "keyAssumptions": ["short assumption", "..."]}`;
       const userMsg = `Platform: ${platform === 'google' ? 'Google Ads' : 'Meta Ads'}\nHorizon: ${horizon} days\nForecast: spend â‚¬${forecast.spend.toFixed(2)}, clicks ${forecast.clicks}, conversions ${forecast.conversions}, CTR ${forecast.ctr.toFixed(2)}%${forecast.roas != null ? ', ROAS ' + forecast.roas.toFixed(2) + 'x' : ''}\nBased on: ${forecast.confidenceBasis}\nConfidence: ${forecast.confidence}%`;
-      const raw = await _aimlTextMemo('forecast', system, userMsg, { max_tokens: 300 });
+      const raw = await _aimlTextMemo('forecast', system, userMsg, { max_tokens: 300, memoKey: 'forecast|' + platform + '|' + horizon, memoTtlMs: 12 * 60 * 60 * 1000 });
       const cleaned = raw.replace(/^```(?:json)?\s*/i, '').replace(/```\s*$/, '').trim();
       const parsed = JSON.parse(cleaned);
       if (parsed.reasoning) reasoning = parsed.reasoning;
@@ -16061,8 +16107,10 @@ Structure:
   "recommendedActions": [ { "title": "short imperative, e.g. 'Increase Meta budget'", "why": "one sentence reason grounded in the data", "message": "the exact plain-language instruction to send to Oriven Chat to carry this out" } ]
 }
 Rules: max 5 summaryItems, max 4 recommendedActions, prioritize the highest-impact items, be specific with real numbers and platform names, never fabricate a number that isn't in the data below.`;
-        const userMsg = `Time of day: ${timeGreeting}\n\nPLATFORM DATA:\n${platformSummaryLines.join('\n')}`;
-        const raw = await _aimlTextMemo('home-briefing', system, userMsg, { max_tokens: 900 });
+        // The greeting is returned separately (deterministic); it never changed
+        // the briefing's content, so it no longer varies the prompt.
+        const userMsg = `PLATFORM DATA:\n${platformSummaryLines.join('\n')}`;
+        const raw = await _aimlTextMemo('home-briefing', system, userMsg, { max_tokens: 900, memoKey: 'home|' + (hasGoogle ? 'g' : '') + (hasMeta ? 'm' : ''), memoTtlMs: 3 * 60 * 60 * 1000 });
         const cleaned = raw.replace(/^```(?:json)?\s*/i, '').replace(/```\s*$/, '').trim();
         const parsed = JSON.parse(cleaned);
         narrative.summaryItems = parsed.summaryItems || [];
@@ -16117,7 +16165,7 @@ app.get('/api/intelligence/briefing', requireSubIfAuthed, async (req, res) => {
     try {
       const system = `You are Oriven, writing a ${period} executive marketing brief from REAL data already computed below â€” a marketing director's report, not a dashboard dump. Do not invent numbers. Return ONLY valid JSON, no markdown: { "headline": "one sentence", "wins": ["..."], "losses": ["..."], "recommendations": ["..."], "nextActions": ["..."] }. Max 4 items per list.`;
       const userMsg = `Period: ${period}\n\n${lines.join('\n') || 'No platform data available.'}`;
-      const raw = await _aimlTextMemo('home-briefing', system, userMsg, { max_tokens: 900 });
+      const raw = await _aimlTextMemo('home-briefing', system, userMsg, { max_tokens: 900, memoKey: 'brief|' + period + '|' + (hasGoogle ? 'g' : '') + (hasMeta ? 'm' : ''), memoTtlMs: 3 * 60 * 60 * 1000 });
       const cleaned = raw.replace(/^```(?:json)?\s*/i, '').replace(/```\s*$/, '').trim();
       const parsed = JSON.parse(cleaned);
       brief = { headline: parsed.headline || '', wins: parsed.wins || [], losses: parsed.losses || [], recommendations: parsed.recommendations || [], nextActions: parsed.nextActions || [] };
@@ -17097,7 +17145,7 @@ app.get('/api/business/insights', async (req, res) => {
 
     const system = `You are a marketing analyst. Given a business's stored knowledge and its REAL recent ad performance (already fetched, not guessed), produce up to 4 short narrative insights connecting the two — e.g. which product/audience seems to be working on which platform. Reply ONLY with valid JSON, no markdown: { "insights": [{"title":"...","detail":"..."}] }. Ground every claim in the real data given; never invent numbers.`;
     const userMsg = `BUSINESS KNOWLEDGE:\n${bizCtx.text}\n\nRECENT PERFORMANCE:\n${perfLines.join('\n')}${relationships.length ? `\n\nLIKELY CAMPAIGN-PRODUCT LINKS (name-matched, not certain): ${relationships.map(r => `"${r.campaign}" ~ "${r.product}"`).join(', ')}` : ''}`;
-    const raw = await _aimlTextMemo('business-insights', system, userMsg, { max_tokens: 700 });
+    const raw = await _aimlTextMemo('business-insights', system, userMsg, { max_tokens: 700, memoKey: 'insights', memoTtlMs: 12 * 60 * 60 * 1000 });
     const cleaned = raw.replace(/^```(?:json)?\s*/i, '').replace(/```\s*$/, '').trim();
     let parsed = { insights: [] };
     try { parsed = JSON.parse(cleaned); } catch (_) { console.warn('[business/insights] AI response unparseable'); }
@@ -17273,7 +17321,7 @@ app.get('/api/business/reflection', async (req, res) => {
 
     const system = `You are a marketing strategist writing ${periodFraming} for a business you advise. Given real accumulated learnings and real recent performance (already computed, not guessed), write a short reflection: what was learned, what's still true, and one concrete recommendation for next period. Reply ONLY with valid JSON, no markdown: { "learned": ["...","..."], "recommendation": "..." }. Ground every statement in the data given; never invent numbers or claims not supported by it.`;
     const userMsg = `PERIOD: ${period}\n\nACCUMULATED LEARNINGS:\n${learningLines}${perfLines ? `\n\nRECENT PERFORMANCE:\n${perfLines}` : ''}`;
-    const raw = await _aimlTextMemo('business-reflection', system, userMsg, { max_tokens: 700 });
+    const raw = await _aimlTextMemo('business-reflection', system, userMsg, { max_tokens: 700, memoKey: 'reflection', memoTtlMs: 12 * 60 * 60 * 1000 });
     const cleaned = raw.replace(/^```(?:json)?\s*/i, '').replace(/```\s*$/, '').trim();
     let parsed = { learned: [], recommendation: '' };
     try { parsed = JSON.parse(cleaned); } catch (_) { console.warn('[business/reflection] AI response unparseable'); }
@@ -18145,8 +18193,43 @@ async function _evaluateAutomationRules(user, platform, campaigns) {
 // can shift a day even with identical totals, so the TTL catches that).
 const _ANALYSIS_RANGE_DAYS = { LAST_7_DAYS: 7, LAST_30_DAYS: 30, LAST_90_DAYS: 90, LAST_12_MONTHS: 365 };
 const _ANALYSIS_CACHE_TTL_MS = 4 * 60 * 60 * 1000;
-
+// The AI narrative of an account analysis (the only expensive part) is
+// regenerated at most once per ANALYSIS_NARRATIVE_MAX_AGE_HOURS (default 24)
+// per user/platform/range. Within that window a changed account (new
+// spend, the normal case for an active advertiser) only refreshes the
+// deterministic metrics, priorities and totals — which is what Autopilot
+// rules and the dashboards read — and reuses the narrative. Previously every
+// page load and every 4-hourly monitoring run with changed totals re-ran the
+// premium model. The narrative is generated lazily — only when the user
+// opens a page that shows it — never by the background monitoring job
+// (opts.background), so accounts nobody looks at cost nothing. Free
+// accounts never trigger it in background or page-load paths
+// (deterministic signals only); the explicit, metered Analyze action is
+// unaffected.
+function _narrativeMaxAgeMs() {
+  const h = Number(process.env.ANALYSIS_NARRATIVE_MAX_AGE_HOURS);
+  return (Number.isFinite(h) && h > 0 ? h : 24) * 60 * 60 * 1000;
+}
+function _narrativeFrom(prev) {
+  prev = prev || {};
+  return {
+    score: prev.score || 0,
+    findings: prev.findings || [], recommendations: prev.recommendations || [],
+    strengths: prev.strengths || [], weaknesses: prev.weaknesses || [], opportunities: prev.opportunities || [],
+    creativeNotes: (prev.creatives || []).filter((c) => c && c.recommendation).map((c) => ({ name: c.name, note: c.recommendation })),
+  };
+}
+const _analysisInflight = new Map();
 async function getOrRefreshAnalysis(user, platform, range, opts) {
+  // Concurrent callers (several dashboard endpoints load at once) share one
+  // computation per user/platform/range instead of each running it.
+  const key = [user.id, platform, range || 'LAST_7_DAYS', opts && opts.forceRefresh ? 'force' : '', opts && opts.background ? 'bg' : ''].join('|');
+  if (_analysisInflight.has(key)) return _analysisInflight.get(key);
+  const p = _getOrRefreshAnalysis(user, platform, range, opts).finally(() => _analysisInflight.delete(key));
+  _analysisInflight.set(key, p);
+  return p;
+}
+async function _getOrRefreshAnalysis(user, platform, range, opts) {
   opts = opts || {};
   const forceRefresh = !!opts.forceRefresh;
   const rangeKey = range || 'LAST_7_DAYS';
@@ -18171,22 +18254,43 @@ async function getOrRefreshAnalysis(user, platform, range, opts) {
     console.warn(`[analysisCache] Could not fetch totals for fingerprint (${platform}, ${user.id}):`, err.message);
   }
 
-  if (!forceRefresh && fingerprint) {
-    try {
-      const { data: cached } = await supabaseAdmin.from('platform_analysis_cache')
-        .select('*').eq('user_id', user.id).eq('platform', platform).eq('date_range', rangeKey).maybeSingle();
-      const cacheAgeOk = cached && (Date.now() - new Date(cached.created_at).getTime() < _ANALYSIS_CACHE_TTL_MS);
-      if (cached && cached.input_fingerprint === fingerprint && cacheAgeOk) {
-        return cached.analysis;
-      }
-    } catch (err) {
-      console.warn(`[analysisCache] Cache read failed (${platform}, ${user.id}):`, err.message);
-    }
+  let cached = null;
+  try {
+    const { data } = await supabaseAdmin.from('platform_analysis_cache')
+      .select('*').eq('user_id', user.id).eq('platform', platform).eq('date_range', rangeKey).maybeSingle();
+    cached = data || null;
+  } catch (err) {
+    console.warn(`[analysisCache] Cache read failed (${platform}, ${user.id}):`, err.message);
   }
+  // Narrative policy (see _narrativeMaxAgeMs above).
+  let aiAllowed = true;
+  try {
+    const { data: prof } = await supabaseAdmin.from('profiles').select('subscription_status').eq('id', user.id).maybeSingle();
+    aiAllowed = PAID_PLANS.includes(prof && prof.subscription_status);
+  } catch (_) { /* unknown plan: allow, as before */ }
+  // narrativeAt is set only when a real AI narrative was generated (null for
+  // deterministic-only analyses). Rows written before this field existed are
+  // aged by their created_at.
+  const prevA = cached && cached.analysis;
+  const prevNarrativeAt = prevA ? (Object.prototype.hasOwnProperty.call(prevA, 'narrativeAt') ? prevA.narrativeAt : cached.created_at) : null;
+  const narrativeFresh = prevNarrativeAt && (Date.now() - new Date(prevNarrativeAt).getTime() < _narrativeMaxAgeMs());
+  // Unchanged account (same totals) within 4h: reuse the stored analysis as
+  // is — but only if it satisfies this caller (a page load for a paid
+  // account needs a fresh narrative, not a background metrics-only row).
+  if (!forceRefresh && fingerprint && cached) {
+    const cacheAgeOk = Date.now() - new Date(cached.created_at).getTime() < _ANALYSIS_CACHE_TTL_MS;
+    const satisfies = opts.background || !aiAllowed || narrativeFresh;
+    if (cached.input_fingerprint === fingerprint && cacheAgeOk && satisfies) return cached.analysis;
+  }
+  let reuse = null;
+  if (!forceRefresh && cached && cached.analysis && (narrativeFresh || !aiAllowed || opts.background)) reuse = cached.analysis;
+  else if (!aiAllowed || opts.background) reuse = {}; // Free / background: deterministic metrics only
 
+  const analyzeOpts = reuse ? { reuseNarrative: reuse } : undefined;
   const analysis = platform === 'google'
-    ? await _analyzeGoogleAccount(user, rangeKey)
-    : await _analyzeMetaAccount(user, rangeKey);
+    ? await _analyzeGoogleAccount(user, rangeKey, undefined, undefined, analyzeOpts)
+    : await _analyzeMetaAccount(user, rangeKey, undefined, undefined, analyzeOpts);
+  analysis.narrativeAt = !reuse ? new Date().toISOString() : (reuse === prevA ? prevNarrativeAt : null);
 
   if (fingerprint) {
     supabaseAdmin.from('platform_analysis_cache').upsert({
@@ -18202,7 +18306,10 @@ async function getOrRefreshAnalysis(user, platform, range, opts) {
 async function _monitorPlatform(user, platform, opts) {
   opts = opts || {};
   try {
-    const analysis = await getOrRefreshAnalysis(user, platform, 'LAST_7_DAYS');
+    // background: refresh metrics (what Autopilot rules read) without ever
+    // generating the AI narrative — that happens lazily when the user opens
+    // a page that shows it, so inactive accounts cost nothing.
+    const analysis = await getOrRefreshAnalysis(user, platform, 'LAST_7_DAYS', { background: true });
 
     const since = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
     const { data: recent } = await supabaseAdmin.from('intelligence_events')

@@ -19,14 +19,17 @@
 // not replace, the AIMLAPI dashboard.
 
 const PRICES = {
-  // USD per 1M tokens (input, output) — Anthropic list prices; AIMLAPI
-  // resells at its own rate, so real cost is somewhat higher.
-  'claude-opus-4-8': { in: 5, out: 25 },
-  'perplexity/sonar': { in: 1, out: 1, perCall: 0.005 },
-  'Qwen3-Coder-480B-A35B-Instruct': { in: 0.5, out: 2 },
-  // Flat per-call estimates where tokens aren't reported.
-  'openai/gpt-image-2.5-sunburst': { perCall: 0.05 },
-  'kling-video/v1.6/pro/text-to-video': { perCall: 0.5 },
+  // USD per 1M tokens (input, output) — AIMLAPI's published prices
+  // (https://aimlapi.com/ai-ml-api-pricing, checked 2026-10-07).
+  'claude-opus-4-8': { in: 6.877, out: 34.385 },
+  'claude-haiku-4-5': { in: 1.3754, out: 6.877 },
+  'perplexity/sonar': { in: 1.3, out: 1.3, perCall: 0.005 }, // perCall: search fee estimate (not on the price page)
+  'Qwen3-Coder-480B-A35B-Instruct': { in: 0.5, out: 2 },     // estimate — not verified on the price page
+  // Per-call estimates where tokens aren't reported: GPT-Image 2.5 is
+  // $39 per 1M output (image) tokens (~1-4k tokens per image → $0.04-0.16);
+  // Kling v1.6 Pro is $0.1274 per second (5s clip).
+  'openai/gpt-image-2.5-sunburst': { perCall: 0.08 },
+  'kling-video/v1.6/pro/text-to-video': { perCall: 0.637 },
 };
 // When a text call reports no usage, assume this many tokens.
 const FALLBACK_TOKENS = { in: 4000, out: 2000 };
