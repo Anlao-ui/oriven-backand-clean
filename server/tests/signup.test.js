@@ -28,6 +28,10 @@ const tokenFromMail = (m) => (String(m && m.text || '').match(/verify_token=([a-
   const tok = tokenFromMail(H.mail[0]);
   check('verification email sent once, link carries the token', H.mail.length === 1 && !!tok && accounts.hashToken(tok) === p1.verification_token_hash);
   check('raw token not stored anywhere in the profile', !JSON.stringify(p1).includes(tok));
+  // Regression: the link must open the app (/app reads verify_token); the
+  // landing page (/) ignores the token, so a root link never verifies.
+  check('verification link points to <FRONTEND_URL>/app?verify_token=… (SMTP)', String(H.mail[0].text).includes('http://localhost:8899/app?verify_token=' + tok) && !/localhost:8899\/?\?verify_token=/.test(H.mail[0].text), String(H.mail[0].text).match(/https?:\/\/\S+/));
+  check('…in the HTML version too', String(H.mail[0].html).includes('http://localhost:8899/app?verify_token=' + tok));
   check('signup_completed event recorded', H.rows('events').some((e) => e.event_name === 'signup_completed' && e.user_id === u1.id));
   check('no marketing consent without opt-in', !p1.marketing_opt_in);
 

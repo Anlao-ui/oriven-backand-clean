@@ -2707,7 +2707,8 @@ app.post('/api/support/admin-reply', async (req, res) => {
 // deliver to this address, the existing SMTP path otherwise (or if Resend
 // fails). Never throws.
 async function _sendVerificationEmail({ to, firstName, token, smtpReady }) {
-  const verifyUrl = `${FRONTEND_URL}?verify_token=${token}`;
+  // The app (/app) reads verify_token on load; the landing page (/) does not.
+  const verifyUrl = `${String(FRONTEND_URL).replace(/\/+$/, '')}/app?verify_token=${token}`;
   const smtpSend = smtpReady ? () => _smtpTransporter().sendMail({
     from:    process.env.SMTP_FROM || `ORIVEN <${process.env.SMTP_USER}>`,
     to,

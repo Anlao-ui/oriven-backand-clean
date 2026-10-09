@@ -114,6 +114,8 @@ const setEnv = (o) => { for (const [k, v] of Object.entries(o)) { if (v == null)
   check('…without marketing consent (transactional)', !prof('v1@example.invalid').marketing_opt_in);
   const t1 = tokenFrom(v1 && v1.text);
   check('link token matches the stored HASH (raw token not stored)', t1 && accounts.hashToken(t1) === prof('v1@example.invalid').verification_token_hash && !JSON.stringify(prof('v1@example.invalid')).includes(t1));
+  // Regression: the link must open the app (/app reads verify_token), never the landing page.
+  check('Resend verification link points to https://orivenai.com/app?verify_token=…', v1 && String(v1.text).includes('https://orivenai.com/app?verify_token=' + t1) && !/orivenai\.com\/?\?verify_token=/.test(v1.text), v1 && String(v1.text).match(/https?:\/\/\S+/));
   check('idempotency key derived from the token hash', v1 && v1.key === 'oriven:live:verify:' + prof('v1@example.invalid').verification_token_hash.slice(0, 32), v1 && v1.key);
   r = await H.call('POST', '/api/verify-email', null, { token: t1 });
   check('the Resend link verifies the address', r.status === 200 && prof('v1@example.invalid').email_verified === true);
@@ -151,6 +153,7 @@ const setEnv = (o) => { for (const [k, v] of Object.entries(o)) { if (v == null)
   const oldHash = prof('v5@example.invalid').verification_token_hash;
   r = await H.call('POST', '/api/resend-verification', tok5);
   check('after the cooldown → one new email with a new token', r.status === 200 && resend.sent.length === n + 1 && prof('v5@example.invalid').verification_token_hash !== oldHash);
+  check('resent link also points to /app?verify_token=…', /https:\/\/orivenai\.com\/app\?verify_token=[a-f0-9]{64}/.test(resend.sent[n].text));
   const again = await sender.send({ to: 'v5@example.invalid', subject: 's', html: 'h', text: 't', idempotencyKey: resend.sent[n].key });
   check('same token resent → Resend dedupes (same email id, nothing new)', again.id === 'em_' + (n + 1) && resend.sent.length === n + 1);
 
