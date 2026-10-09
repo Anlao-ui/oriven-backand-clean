@@ -36,6 +36,13 @@ Extracted directly from `process.env.*` references across `server.js`, `provider
 | `STRIPE_WEBHOOK_SECRET` | Verifies `/api/stripe-webhook` signatures. |
 | `STRIPE_PRICE_STARTER` / `STRIPE_PRICE_CREATOR` / `STRIPE_PRICE_PROFESSIONAL` | Price IDs for the three paid plans. |
 
+## Free first ad (onboarding)
+
+| Variable | Purpose |
+|---|---|
+| `FREE_FIRST_AD_ENABLED` | `true` turns on the one free ad image for new Free accounts (`services/firstAd.js`) and the "Create Your First Ad" onboarding flow. Off by default. |
+| `FREE_FIRST_AD_SINCE` | Launch cutoff, ISO time (e.g. `2026-10-12T09:00:00Z`). Only accounts created on or after it qualify. Required: unset or invalid = nobody qualifies, even with the flag on. Set it to the moment you enable the feature; never move it earlier. |
+
 ## Email
 
 | Variable | Purpose |

@@ -958,7 +958,10 @@ async function _aimlImage(taskType, prompt, opts = {}) {
     aiUsage.record({ task: taskType, model, promptChars: p.promptChars, success: false, reason: 'provider_error' });
     throw err;
   }
-  aiUsage.record({ task: taskType, model, promptChars: p.promptChars, success: true });
+  const line = aiUsage.record({ task: taskType, model, promptChars: p.promptChars, success: true, data: urls && urls.usage ? { usage: urls.usage } : null });
+  // Last image's usage on this request (read by the free first-ad log).
+  const ctx = aiUsage.current();
+  if (ctx && line) ctx.lastImage = { model, usage: { completionTokens: line.completionTokens, totalTokens: line.totalTokens, reported: line.tokensReported }, estCostUsd: line.estCostUsd };
   return urls[0] || null;
 }
 
@@ -1473,6 +1476,7 @@ app.post('/api/generate-image', requireSubOrFree, paidActions.laneGuard('image')
     console.log('[Image] AIML â†’ image ready');
     _recordCreativeAsset(req.user && req.user.id, { kind: imageType || 'image', title: prompt.slice(0, 80), content: { url: imageUrl }, source_route: '/api/generate-image' });
     if (reservation) creditManager.finalizeCreditLog(reservation, 'image_generation', { provider: 'aiml', success: true, route: req.path }).catch(() => {});
+    if (firstAdClaim) { const li = (aiUsage.current() || {}).lastImage || {}; firstAd.recordSuccess(firstAdClaim, li); }
     res.json({ imageUrl });
   } catch (err) {
     console.error('[Image] AIML error:', err.message);
@@ -15962,8 +15966,11 @@ app.get('/api/onboarding/state', async (req, res) => {
     const user = await getUserFromToken(req);
     if (!user) return res.status(401).json({ error: 'Authentication required' });
     const state = await onboarding.getState(user.id, user.created_at);
-    const fa = await firstAd.status(user.id); // { available } — off unless FREE_FIRST_AD_ENABLED
-    state.freeFirstAd = { available: !!fa.available };
+    const fa = await firstAd.status(user.id); // { available, reason } — off unless FREE_FIRST_AD_ENABLED
+    // used: the free image was claimed by a successful image (or both
+    // attempts failed). Server data only — the browser can't reset either.
+    state.freeFirstAd = { available: !!fa.available, used: fa.reason === 'used' || fa.reason === 'attempts_used' };
+    state.stage = onboarding.stage(state, fa);
     res.json(state);
   } catch (err) {
     console.error('[onboarding/state GET]', err.message);

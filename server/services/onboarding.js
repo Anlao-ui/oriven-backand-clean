@@ -61,6 +61,26 @@ function eligibility(profile, now) {
   return { eligible: true, reason: 'new_account', newAccount };
 }
 
+// Pure: where an eligible account is in the welcome flow, from server data
+// only (never from the browser). freeFirstAd: services/firstAd.js status().
+//   'done'        — not eligible (completed, or an existing account)
+//   'first_ad'    — chose "Create Your First Ad", the free image is still
+//                   available: the app opens Create, no plan step yet
+//   'choose_plan' — chose it and the free image was used (or both attempts
+//                   failed): the app shows the plan step after the ad
+//   'welcome'     — everything else: show the welcome modal
+// The first-ad path needs the free image (FREE_FIRST_AD_ENABLED); without
+// it, a "create" choice falls back to the plan step first ('welcome').
+function stage(state, freeFirstAd) {
+  if (!state || !state.eligible) return 'done';
+  const fa = freeFirstAd || {};
+  if (state.goal === 'create' && (state.plan || 'free') === 'free') {
+    if (fa.reason === 'used' || fa.reason === 'attempts_used') return 'choose_plan';
+    if (fa.available) return 'first_ad';
+  }
+  return 'welcome';
+}
+
 const _isMissingColumn = (err, col) => !!err && (err.code === '42703' || err.code === 'PGRST204' || new RegExp(col).test(err.message || ''));
 
 // authCreatedAt: the auth user's own creation time, used when the profile
@@ -207,6 +227,6 @@ function allowEvent(key, limit = 60, windowMs = 60000) {
 }
 
 module.exports = {
-  init, since, eligibility, getState, complete, recordEvent, acceptClientEvent, linkSession,
+  init, since, eligibility, stage, getState, complete, recordEvent, acceptClientEvent, linkSession,
   recordFirstValue, allowEvent, WELCOME_GOALS, LEGACY_GOALS, CLIENT_EVENTS, _sanitizeProps,
 };

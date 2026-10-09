@@ -441,6 +441,8 @@ async function generateImage(prompt, options = {}) {
   const urls  = items.map(item => (typeof item === 'string' ? item : (item.url || item.b64_json))).filter(Boolean);
 
   if (!urls.length) throw new Error('AIML API returned no image URLs for model ' + model + '.');
+  // Provider-reported usage, if any (logging/cost tracking only; not part of the array's values).
+  Object.defineProperty(urls, 'usage', { value: (data && data.usage) || null, enumerable: false });
   return urls;
 }
 
