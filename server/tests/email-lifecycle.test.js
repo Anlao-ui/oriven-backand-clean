@@ -50,6 +50,33 @@ const P = (id, created, extra) => Object.assign({ id, email: id + '@example.inva
   check('names are HTML-escaped', !/<script>x/.test(w.html) && /&lt;script&gt;/.test(w.html));
   check('free first ad mentioned only when available', /free/.test(T.render('first_ad_reminder', { freeFirstAd: true }, { appUrl: 'a' }).subject) && !/free/i.test(T.render('first_ad_reminder', { freeFirstAd: false }, { appUrl: 'a' }).html.replace(/Free plan/g, '')));
 
+  // Plan-aware copy: a paid account never reads Free-plan text.
+  const CTX = { appUrl: 'https://orivenai.com/app', unsubscribeUrl: 'https://x/u' };
+  for (const plan of ['starter', 'creator', 'professional']) {
+    const r = T.render('first_ad_reminder', { plan, freeFirstAd: true }, CTX);
+    check(`first-ad reminder (${plan}): no Free-plan or free-ad text, shows its own credits`, !/free/i.test(r.html + r.text + r.subject) && r.html.includes(T.PLAN_INTRO[plan].name + ' plan includes') && r.text.includes(T.PLAN_INTRO[plan].credits.toLocaleString('en-US') + ' credits'), r.text);
+  }
+  const rf = T.render('first_ad_reminder', { plan: 'free' }, CTX);
+  check('first-ad reminder (free): one campaign every 24 hours (matches the server gate)', /one campaign every 24 hours/.test(rf.html) && /one campaign every 24 hours/.test(rf.text));
+
+  // Plan facts match billing and entitlements.
+  const CM = require(H.SERVER_DIR + '/services/creditManager.js');
+  const ENT = require(H.SERVER_DIR + '/services/planEntitlements.js').PLAN_ENTITLEMENTS;
+  check('credits match creditManager.PLAN_ALLOWANCES', ['starter', 'creator', 'professional'].every((k) => T.PLAN_INTRO[k].credits === CM.PLAN_ALLOWANCES[k]) && /10 credits a day/.test(T.render('upgrade_education', { action: 'research' }, CTX).html) && CM.PLAN_ALLOWANCES.free === 10);
+  check('prices: Starter €9.95, Creator €29.95, Professional €59.95', T.PLAN_INTRO.starter.price === '9.95' && T.PLAN_INTRO.creator.price === '29.95' && T.PLAN_INTRO.professional.price === '59.95');
+  const po = (k) => T.render('paid_onboarding', { plan: k }, CTX).html;
+  check('Oriven Chat only promised where the plan has it', ['starter', 'creator', 'professional'].every((k) => /Oriven Chat/.test(po(k)) === ENT[k].orivenChat));
+  check('Priority Support only promised on Professional', ['starter', 'creator', 'professional'].every((k) => /Priority Support/.test(po(k)) === ENT[k].prioritySupport));
+  check('Autopilot described as Meta and Google only', ['starter', 'creator'].every((k) => /Meta (and|or) Google/.test(po(k))) && !/TikTok[^<]*Autopilot|Autopilot[^<]*TikTok/.test(po('starter')));
+  const ue = T.render('upgrade_education', { action: 'research', plan: 'starter' }, CTX);
+  check('upgrade email: €9.95/month and 1,000 credits, English number format', /€9\.95/.test(ue.html) && /1,000 credits/.test(ue.html) && !/1\.000/.test(ue.html + ue.text));
+  const all = Object.keys(T.TEMPLATES).map((k) => T.render(k, { firstName: 'Sam', plan: 'starter', kind: 'create', action: 'research', verifyUrl: 'https://orivenai.com/app?verify_token=abc' }, Object.assign({ postalAddress: 'OrivenAI B.V. · Street 1, Town' }, CTX)));
+  check('every email: mobile layout, preheader, postal address in HTML and text', all.every((o) => /max-width:620px/.test(o.html) && /display:none;max-height:0/.test(o.html) && o.html.includes('Street 1, Town') && o.text.includes('Street 1, Town')));
+  check('marketing plain-text versions carry the unsubscribe link too', all.filter((o) => o.category === 'marketing').every((o) => o.text.includes('Unsubscribe: https://x/u')));
+  check('service emails carry no unsubscribe link (they are not promotion)', all.filter((o) => o.category === 'service').every((o) => !/x\/u/.test(o.html + o.text)));
+  check('every link is absolute https or mailto', all.every((o) => (o.html.match(/href="([^"]+)"/g) || []).every((h) => /href="(https:\/\/|mailto:)/.test(h))));
+  check('one lime primary button per email at most', all.every((o) => (o.html.match(/class="btn"/g) || []).length <= 1));
+
   log('\nC. Triggers (live mode against the mocked Resend — nothing leaves this process)');
   process.env.EMAIL_MODE = 'live'; process.env.RESEND_API_KEY = 're_test_mock'; process.env.EMAIL_FROM = 'OrivenAI <hello@mail.orivenai.com>';
   H.rows('profiles').length = 0; H.rows('email_sends').length = 0;

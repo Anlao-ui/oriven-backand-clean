@@ -102,11 +102,11 @@ function decide(profile, facts, now) {
       cand.push({ template: 'first_success', key: 'first_success', data: { kind: profile.first_value_kind, researchIncluded: PAID.includes(plan) } });
     }
     if (!firstValue && age >= 2 * DAY && age <= 14 * DAY) {
-      cand.push({ template: 'first_ad_reminder', key: 'first_ad_reminder', data: { freeFirstAd: !!facts.freeFirstAd } });
+      cand.push({ template: 'first_ad_reminder', key: 'first_ad_reminder', data: { freeFirstAd: !!facts.freeFirstAd, plan } });
     }
     if (plan === 'free' && facts.paywalls) {
       const top = Object.keys(facts.paywalls).filter((a) => facts.paywalls[a] >= 3).sort((a, b) => facts.paywalls[b] - facts.paywalls[a])[0];
-      if (top) cand.push({ template: 'upgrade_education', key: 'upgrade:' + top + ':' + Math.floor(now / (30 * DAY)), data: { action: top, plan: 'starter', price: '9.95' } });
+      if (top) cand.push({ template: 'upgrade_education', key: 'upgrade:' + top + ':' + Math.floor(now / (30 * DAY)), data: { action: top, plan: 'starter' } }); // price + credits come from templates.PLAN_INTRO
     }
     const last = facts.lastActivityAt ? Date.parse(facts.lastActivityAt) : null;
     if (last && now - last >= 21 * DAY && age >= 21 * DAY) {
