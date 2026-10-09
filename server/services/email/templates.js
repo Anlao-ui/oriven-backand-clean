@@ -38,9 +38,9 @@ const fmt = (n) => Number(n).toLocaleString('en-US'); // 1000 → "1,000"
 const PLAN_INTRO = {
   starter: { name: 'Starter', price: '9.95', credits: 1000,
     unlocks: ['Research: investigate your market, competitors and audience', 'Autopilot: rules that watch your Meta and Google campaigns'] },
-  creator: { name: 'Creator', price: '29.95', credits: 2500,
+  creator: { name: 'Creator', price: '19.95', credits: 2500,
     unlocks: ['Everything in Starter: Research and Autopilot', 'Oriven Chat, your advertising assistant inside the app'] },
-  professional: { name: 'Professional', price: '59.95', credits: 4000,
+  professional: { name: 'Professional', price: '34.95', credits: 4000,
     unlocks: ['Everything in Creator: Research, Autopilot and Oriven Chat', 'Notifications and Priority Support'] },
 };
 const FREE = { name: 'Free', creditsPerDay: 10 };

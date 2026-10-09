@@ -63,7 +63,7 @@ const P = (id, created, extra) => Object.assign({ id, email: id + '@example.inva
   const CM = require(H.SERVER_DIR + '/services/creditManager.js');
   const ENT = require(H.SERVER_DIR + '/services/planEntitlements.js').PLAN_ENTITLEMENTS;
   check('credits match creditManager.PLAN_ALLOWANCES', ['starter', 'creator', 'professional'].every((k) => T.PLAN_INTRO[k].credits === CM.PLAN_ALLOWANCES[k]) && /10 credits a day/.test(T.render('upgrade_education', { action: 'research' }, CTX).html) && CM.PLAN_ALLOWANCES.free === 10);
-  check('prices: Starter €9.95, Creator €29.95, Professional €59.95', T.PLAN_INTRO.starter.price === '9.95' && T.PLAN_INTRO.creator.price === '29.95' && T.PLAN_INTRO.professional.price === '59.95');
+  check('prices: Starter €9.95, Creator €19.95, Professional €34.95 (the live pricing in plans.js)', T.PLAN_INTRO.starter.price === '9.95' && T.PLAN_INTRO.creator.price === '19.95' && T.PLAN_INTRO.professional.price === '34.95');
   const po = (k) => T.render('paid_onboarding', { plan: k }, CTX).html;
   check('Oriven Chat only promised where the plan has it', ['starter', 'creator', 'professional'].every((k) => /Oriven Chat/.test(po(k)) === ENT[k].orivenChat));
   check('Priority Support only promised on Professional', ['starter', 'creator', 'professional'].every((k) => /Priority Support/.test(po(k)) === ENT[k].prioritySupport));

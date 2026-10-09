@@ -165,8 +165,8 @@ paidActions.init({ db: supabaseAdmin, creditManager, getUser: getUserFromToken }
   // Stripe Price IDs â€” set these in Render environment variables.
   // Create prices in Stripe Dashboard â†’ Products, then copy the price_... ID.
   // STRIPE_PRICE_STARTER      â†’ Starter plan       â‚¬9.95/month
-  // STRIPE_PRICE_CREATOR      â†’ Creator plan        â‚¬29.95/month
-  // STRIPE_PRICE_PROFESSIONAL â†’ Professional plan   â‚¬59.95/month
+  // STRIPE_PRICE_CREATOR      â†’ Creator plan        â‚¬19.95/month
+  // STRIPE_PRICE_PROFESSIONAL â†’ Professional plan   â‚¬34.95/month
   // Agency is Contact Sales â€” no Stripe price ID required.
   const _price = (k) => console.log(' ', k, '=', process.env[k] || 'âŒ NOT SET');
   _price('STRIPE_PRICE_STARTER');
