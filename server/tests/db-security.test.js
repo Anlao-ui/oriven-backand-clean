@@ -25,7 +25,7 @@ try { PGlite = require(process.env.PGLITE_PATH || '@electric-sql/pglite').PGlite
 let pass = 0, fail = 0;
 const check = (n, ok, info) => { ok ? pass++ : fail++; console.log((ok ? '  PASS — ' : '  FAIL — ') + n + (ok || info === undefined ? '' : ' :: ' + JSON.stringify(info).slice(0, 300))); };
 const A = '11111111-1111-4111-8111-111111111111', B = '22222222-2222-4222-8222-222222222222', C = '33333333-3333-4333-8333-333333333333';
-const ORDER = ['2026-10-onboarding-activation.sql', '2026-10-signup-verification.sql', '2026-10-email-lifecycle.sql', '2026-10-free-first-ad.sql', '2026-10-profiles-lockdown.sql'];
+const ORDER = ['2026-10-onboarding-activation.sql', '2026-10-signup-verification.sql', '2026-10-email-lifecycle.sql', '2026-10-free-first-ad.sql', '2026-10-profiles-lockdown.sql', '2026-10-analytics.sql'];
 
 (async () => {
   const db = new PGlite();
@@ -141,6 +141,31 @@ const ORDER = ['2026-10-onboarding-activation.sql', '2026-10-signup-verification
   r = await asRole('service_role', `INSERT INTO public.email_suppressions (email_hash, reason) VALUES ('abc', 'hard_bounce')`);
   check('service role: suppression insert', r.ok, r);
 
+  console.log('\nF2. Analytics migration (site_pageviews, one-time events, summary function)');
+  r = await asUser(A, `SELECT count(*) FROM public.site_pageviews`);
+  check('site_pageviews: browser SELECT → denied', !r.ok && /permission denied/.test(r.error), r);
+  r = await asUser(A, `INSERT INTO public.site_pageviews (path, visitor_hash) VALUES ('/', 'x')`);
+  check('site_pageviews: browser INSERT → denied', !r.ok && /permission denied/.test(r.error), r);
+  r = await asRole('anon', `SELECT public.analytics_site_summary(now() - interval '1 day', now())`);
+  const r2 = await asUser(A, `SELECT public.analytics_site_summary(now() - interval '1 day', now())`);
+  check('analytics_site_summary: anon and signed-in users can not execute it', !r.ok && !r2.ok && /permission denied/.test(r.error + r2.error), [r.error, r2.error]);
+  r = await asUser(A, `UPDATE public.profiles SET acq_channel = 'google_ads' WHERE id = '${A}'`);
+  check('attribution columns are not writable from the browser', !r.ok);
+  await asRole('service_role', `INSERT INTO public.site_pageviews (path, entry, channel, visitor_hash, created_at) VALUES
+    ('/', true, 'google_organic', 'h1', now() - interval '2 hours'), ('/pricing', false, 'direct', 'h1', now() - interval '1 hour'),
+    ('/learn/', true, 'linkedin', 'h2', now() - interval '1 hour'), ('/', true, 'direct', 'h3', now() - interval '3 days')`);
+  await asRole('service_role', `INSERT INTO public.site_pageviews (kind, path, visitor_hash) VALUES ('signup_started', '/signup', 'h2')`);
+  r = await asRole('service_role', `SELECT public.analytics_site_summary(now() - interval '1 day', now()) AS s`);
+  const sm = r.ok && r.rows[0].s;
+  check('summary: 3 page views, 2 visitors, 2 entries, 1 signup start in the last day', sm && Number(sm.pageviews) === 3 && Number(sm.visitors) === 2 && Number(sm.entries) === 2 && Number(sm.signupStarts) === 1, sm);
+  check('summary: channels and landing pages from entries only', sm && JSON.stringify(sm.channels.map((x) => x.channel).sort()) === '["google_organic","linkedin"]' && sm.landingPages.length === 2, sm && sm.channels);
+  r = await asRole('service_role', `INSERT INTO public.events (event_name, user_id) VALUES ('email_verified', '${B}')`);
+  const d1 = await asRole('service_role', `INSERT INTO public.events (event_name, user_id) VALUES ('email_verified', '${B}')`);
+  const d2 = await asRole('service_role', `INSERT INTO public.events (event_name, user_id) VALUES ('checkout_started', '${B}'), ('checkout_started', '${B}')`);
+  check('one-time events unique per user (duplicate → 23505); repeatable events allowed', r.ok && !d1.ok && /duplicate key/.test(d1.error) && d2.ok, [r, d1.error, d2.error]);
+  r = await asRole('service_role', `INSERT INTO public.site_pageviews (path, visitor_hash, channel) VALUES ('/' || repeat('x', 300), 'h', 'direct')`);
+  check('oversized values rejected by the table itself', !r.ok, r);
+
   console.log('\nG. Existing data and re-running');
   await db.exec(`UPDATE public.profiles SET onboarding_completed = false, primary_goal = null WHERE id = '${C}'; DELETE FROM public.profiles WHERE id = '55555555-5555-4555-8555-555555555555';`);
   check('existing customer rows unchanged by the migrations (plan, credits, Stripe ids, pending plan)', (await snapshot()) === before);
@@ -162,8 +187,8 @@ const ORDER = ['2026-10-onboarding-activation.sql', '2026-10-signup-verification
   check('authenticated has only SELECT on profiles', JSON.stringify(grants) === '["SELECT"]', grants);
   const colw = (await db.query(`SELECT count(*)::int AS n FROM information_schema.column_privileges WHERE table_schema='public' AND table_name='profiles' AND grantee IN ('anon','authenticated') AND privilege_type IN ('INSERT','UPDATE','REFERENCES')`)).rows[0].n;
   check('no column-level write grants left for browser roles', colw === 0, colw);
-  const rls = (await db.query(`SELECT relname FROM pg_class WHERE relname IN ('profiles','events','email_sends','email_suppressions','free_first_ad_claims') AND relrowsecurity ORDER BY 1`)).rows.map((x) => x.relname);
-  check('row-level security on for all five tables', rls.length === 5, rls);
+  const rls = (await db.query(`SELECT relname FROM pg_class WHERE relname IN ('profiles','events','email_sends','email_suppressions','free_first_ad_claims','site_pageviews') AND relrowsecurity ORDER BY 1`)).rows.map((x) => x.relname);
+  check('row-level security on for all six tables', rls.length === 6, rls);
 
   console.log(`\n${pass + fail} checks run, ${pass} passed, ${fail} failed.`);
   process.exit(fail ? 1 : 0);

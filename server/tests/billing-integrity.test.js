@@ -117,7 +117,10 @@ class StripeMock {
   constructor(key) {
     if (/^sk_live/.test(key)) throw new Error('LIVE KEY USED IN TEST');
     this.webhooks = new RealStripe('sk_test_mock_only').webhooks;
-    this.checkout = { sessions: { create: async (p) => { S.calls.push(['checkout.create', p]); maybeFail('checkout'); return { id: 'cs_' + S.calls.length, url: 'https://checkout.stripe.test/cs' }; } } };
+    this.checkout = { sessions: {
+      create: async (p) => { S.calls.push(['checkout.create', p]); maybeFail('checkout'); return { id: 'cs_' + S.calls.length, url: 'https://checkout.stripe.test/cs' }; },
+      retrieve: async (id) => { S.calls.push(['checkout.retrieve', id]); if (!S.sessions[id]) throw stripeErr('No such checkout session', { statusCode: 404 }); return clone(S.sessions[id]); },
+    } };
     this.billingPortal = { sessions: { create: async (p) => { S.calls.push(['portal.create', p]); return { url: 'https://billing.stripe.test/' + p.customer }; } } };
     this.subscriptions = {
       retrieve: async (id) => { S.calls.push(['sub.retrieve', id]); maybeFail('retrieve'); if (!S.subs[id]) throw stripeErr('No such subscription', { statusCode: 404, code: 'resource_missing' }); return clone(S.subs[id]); },
@@ -166,7 +169,7 @@ function P(id, plan, extra) {
 }
 function reset() {
   for (const k of Object.keys(TABLES)) delete TABLES[k];
-  S.subs = {}; S.schedules = {}; S.calls.length = 0; S.fail = {}; rpcCalls.length = 0;
+  S.subs = {}; S.schedules = {}; S.sessions = {}; S.calls.length = 0; S.fail = {}; rpcCalls.length = 0;
   // A: free user.  B: Starter on Stripe (period P1, 1000 credits).  M: manually granted Creator (no Stripe).
   rows('profiles').push(
     P('uA', 'free'),
@@ -352,6 +355,58 @@ const invoice = (sub, reason, extra) => Object.assign({ id: 'in_' + Math.random(
   S.subs.sub_Z.items.data[0].price.id = 'price_unknown';
   await hook('checkout.session.completed', checkoutSession('uA', S.subs.sub_Z));
   check('unknown price on a NEW subscription → no plan granted', prof('uA').subscription_status === 'free' && prof('uA').credits_balance === 0, prof('uA'));
+
+  out('\nConversion events from verified Stripe state');
+  reset();
+  const ev = (name, user) => rows('events').filter((e) => e.event_name === name && (!user || e.user_id === user));
+  S.subs.sub_A = mkSub('sub_A', 'cus_A', 'starter', 'active', P1, { userId: 'uA' });
+  const csA = checkoutSession('uA', S.subs.sub_A, { id: 'cs_live_AAAAAAAAAAAAAAAA' });
+  await hook('checkout.session.completed', csA, 'evt_conv_1');
+  check('checkout completed → plan active + checkout_completed, subscription_activated, first_paid_subscription (plan starter)',
+    prof('uA').subscription_status === 'starter' && ev('checkout_completed', 'uA').length === 1 && ev('subscription_activated', 'uA').length === 1 && ev('first_paid_subscription', 'uA').length === 1
+    && ev('subscription_activated', 'uA')[0].props.plan === 'starter', rows('events').map((e) => e.event_name));
+  await hook('checkout.session.completed', csA, 'evt_conv_1');
+  check('same Stripe event replayed → no duplicate events', ev('subscription_activated', 'uA').length === 1 && ev('checkout_completed', 'uA').length === 1);
+  await hook('invoice.payment_succeeded', invoice(S.subs.sub_A, 'subscription_create'), 'evt_conv_2');
+  check('invoice for the same activation → no second subscription_activated', ev('subscription_activated', 'uA').length === 1);
+  Object.assign(S.subs.sub_A, mkSub('sub_A', 'cus_A', 'creator', 'active', P1, { userId: 'uA' }));
+  await hook('customer.subscription.updated', clone(S.subs.sub_A), 'evt_conv_3');
+  check('plan change starter → creator → subscription_changed {plan: creator, from: starter}', ev('subscription_changed', 'uA').length === 1 && ev('subscription_changed', 'uA')[0].props.plan === 'creator' && ev('subscription_changed', 'uA')[0].props.from === 'starter');
+  S.subs.sub_A.cancel_at_period_end = true;
+  await hook('customer.subscription.updated', clone(S.subs.sub_A), 'evt_conv_4');
+  await hook('customer.subscription.updated', clone(S.subs.sub_A), 'evt_conv_5');
+  check('cancellation scheduled → subscription_cancel_scheduled once (second update: already pending)', ev('subscription_cancel_scheduled', 'uA').length === 1);
+  await hook('invoice.payment_failed', invoice(S.subs.sub_A, 'subscription_cycle'), 'evt_conv_6');
+  await hook('invoice.payment_failed', invoice(S.subs.sub_A, 'subscription_cycle'), 'evt_conv_6');
+  check('payment failed → payment_failed once (replay ignored), plan unchanged', ev('payment_failed', 'uA').length === 1 && prof('uA').subscription_status === 'creator');
+  await hook('customer.subscription.deleted', clone(Object.assign(S.subs.sub_A, { status: 'canceled' })), 'evt_conv_7');
+  check('subscription deleted → subscription_canceled {from: creator}, plan Free', ev('subscription_canceled', 'uA').length === 1 && ev('subscription_canceled', 'uA')[0].props.from === 'creator' && prof('uA').subscription_status === 'free');
+  check('webhook events logged for idempotency (stripe_webhook_events)', rows('stripe_webhook_events').filter((r) => /^evt_conv_/.test(r.id)).length === 7, rows('stripe_webhook_events').map((r) => r.id));
+
+  out('\nCheckout sync (plan activation without relying on webhook delivery)');
+  reset();
+  S.subs.sub_A = mkSub('sub_A', 'cus_A', 'professional', 'active', P1, { userId: 'uA' });
+  S.sessions.cs_live_SYNC0000000001 = checkoutSession('uA', S.subs.sub_A, { id: 'cs_live_SYNC0000000001', metadata: { userId: 'uA', plan: 'professional' } });
+  r = await call('POST', '/api/billing/sync-checkout', null, { session_id: 'cs_live_SYNC0000000001' });
+  check('no session token → 401', r.status === 401 && prof('uA').subscription_status === 'free');
+  r = await call('POST', '/api/billing/sync-checkout', 'tok_uA', { session_id: 'not-a-session' });
+  check('malformed session id → 400, no Stripe call', r.status === 400 && !stripeCalls('checkout.retrieve').length);
+  r = await call('POST', '/api/billing/sync-checkout', 'tok_uB', { session_id: 'cs_live_SYNC0000000001' });
+  check("another user's session → 404, nothing applied", r.status === 404 && prof('uA').subscription_status === 'free' && prof('uB').subscription_status === 'starter');
+  r = await call('POST', '/api/billing/sync-checkout', 'tok_uA', { session_id: 'cs_live_SYNC0000000001' });
+  check('own paid session → plan active (professional), credits granted once', r.status === 200 && r.body.plan === 'professional' && prof('uA').subscription_status === 'professional' && prof('uA').credits_balance === 4000, [r, prof('uA')]);
+  r = await call('POST', '/api/billing/sync-checkout', 'tok_uA', { session_id: 'cs_live_SYNC0000000001' });
+  await hook('checkout.session.completed', S.sessions.cs_live_SYNC0000000001, 'evt_sync_1');
+  check('sync again + the webhook later → no second grant, one activation event', prof('uA').credits_balance === 4000 && ev('subscription_activated', 'uA').length === 1 && ev('first_paid_subscription', 'uA').length === 1, [prof('uA').credits_balance, ev('subscription_activated', 'uA').length]);
+  S.subs.sub_U = mkSub('sub_U', 'cus_U', 'starter', 'incomplete', P1, { userId: 'uM' });
+  S.sessions.cs_live_UNPAID00000001 = checkoutSession('uM', S.subs.sub_U, { id: 'cs_live_UNPAID00000001', payment_status: 'unpaid' });
+  r = await call('POST', '/api/billing/sync-checkout', 'tok_uM', { session_id: 'cs_live_UNPAID00000001' });
+  check('unpaid session → nothing granted (skipped)', r.status === 200 && r.body.skipped === 'payment_unpaid' && prof('uM').subscription_status === 'creator');
+  r = await call('POST', '/api/create-checkout-session', 'tok_uA', { plan: 'starter' });
+  check('success URL carries the session id placeholder for the sync', stripeCalls('checkout.create').length === 0 || /session_id=\{CHECKOUT_SESSION_ID\}/.test(stripeCalls('checkout.create').slice(-1)[0][1].success_url));
+  reset();
+  r = await call('POST', '/api/create-checkout-session', 'tok_uA', { plan: 'creator' });
+  check('checkout started → server-side checkout_started {plan: creator}', r.status === 200 && ev('checkout_started', 'uA').length === 1 && ev('checkout_started', 'uA')[0].props.plan === 'creator' && /session_id=\{CHECKOUT_SESSION_ID\}/.test(stripeCalls('checkout.create')[0][1].success_url), [r.status, rows('events')]);
 
   out('\nPreserved behaviour');
   const cm = require(path.join(SERVER_DIR, 'services/creditManager.js'));

@@ -35,12 +35,14 @@ const CLIENT_EVENTS = new Set([
   'visited_site', 'created_account', 'started_generation', 'completed_generation',
   'onboarding_shown', 'onboarding_goal_selected', 'onboarding_dismissed',
   'create_started', 'research_started',
-  'paywall_shown', 'plan_selected', 'checkout_started', 'checkout_completed', 'checkout_canceled',
+  // checkout_started / checkout_completed are recorded by the server only
+  // (session creation + verified Stripe state); browser copies are dropped.
+  'paywall_shown', 'plan_selected', 'checkout_canceled',
   'draft_restored', 'next_step_clicked',
 ]);
 // Events that may be sent before sign-in.
 const ANONYMOUS_EVENTS = new Set(['visited_site']);
-const PROP_KEYS = new Set(['goal', 'action', 'plan', 'source', 'reason', 'kind', 'required', 'balance', 'target']);
+const PROP_KEYS = new Set(['goal', 'action', 'plan', 'source', 'reason', 'kind', 'required', 'balance', 'target', 'channel', 'from']);
 
 let _db = null;
 function init({ db }) { _db = db; }
@@ -156,6 +158,9 @@ async function recordEvent({ name, userId, sessionId, props }) {
     const { error } = await _db.from('events').insert({
       event_name: name, user_id: userId || null, session_id: _sessionId(sessionId), props: _sanitizeProps(props),
     });
+    // 23505: a one-time conversion event already recorded for this user
+    // (events_once_per_user_idx) — a retry or replay, not an error.
+    if (error && error.code === '23505') return;
     if (error && (error.code === 'PGRST205' || error.code === '42P01')) {
       if (!_warnedNoTable) { _warnedNoTable = true; console.warn('[Activation] events table missing — run docs/migrations/2026-10-onboarding-activation.sql'); }
     } else if (error && _isMissingColumn(error, 'props')) {

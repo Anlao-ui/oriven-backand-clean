@@ -214,6 +214,8 @@ stripeBilling.init({ stripe, db: supabaseAdmin, creditManager, planByPriceId: PL
 onboarding.init({ db: supabaseAdmin });
 accounts.init({ db: supabaseAdmin });
 firstAd.init({ db: supabaseAdmin });
+const analytics = require('./services/analytics');
+analytics.init({ db: supabaseAdmin, stripe });
 emailLifecycle.init({ db: supabaseAdmin });
 
 // Per-request AI usage context (route + user id) for [AIUsage] telemetry.
@@ -258,17 +260,12 @@ app.post('/api/stripe-webhook', express.raw({ type: 'application/json' }), async
     'invoice.payment_succeeded': stripeBilling.onInvoicePaid,
     'customer.subscription.updated': stripeBilling.onSubscriptionUpdated,
     'customer.subscription.deleted': stripeBilling.onSubscriptionDeleted,
+    // No entitlement change (Stripe retries, then updates the subscription);
+    // identifies the account for the payment_failed conversion event.
+    'invoice.payment_failed': stripeBilling.onInvoicePaymentFailed,
   };
   const handler = HANDLERS[event.type];
-  if (!handler) {
-    if (event.type === 'invoice.payment_failed') {
-      // No entitlement change: Stripe retries the payment and moves the
-      // subscription to past_due / unpaid / canceled, which the
-      // subscription.updated/deleted handlers apply. No credits are granted.
-      console.warn('[Webhook] invoice.payment_failed', event.id);
-    }
-    return res.json({ received: true });
-  }
+  if (!handler) return res.json({ received: true });
 
   // 3. Each event id is processed once (Stripe delivers at least once).
   const claim = await stripeBilling.claimEvent(event);
@@ -279,6 +276,7 @@ app.post('/api/stripe-webhook', express.raw({ type: 'application/json' }), async
     const result = await handler(event.data.object);
     await stripeBilling.finishEvent(event, true);
     console.log('[Webhook]', event.type, event.id, JSON.stringify(result || {}));
+    _billingConversionEvents(event.type, result);
     return res.json({ received: true });
   } catch (err) {
     // Failed mid-way: report failure so Stripe retries. Every step is
@@ -286,6 +284,57 @@ app.post('/api/stripe-webhook', express.raw({ type: 'application/json' }), async
     await stripeBilling.finishEvent(event, false, err.message);
     console.error('[Webhook]', event.type, event.id, 'failed — Stripe will retry:', err.message);
     return res.status(500).json({ error: 'Webhook processing failed' });
+  }
+});
+
+// Conversion events from VERIFIED billing state changes (Stripe webhook or
+// the checkout sync below). Each Stripe event is processed once
+// (stripe_webhook_events), and a state change happens once, so a replay or
+// the second of two paths finds changed=false and records nothing.
+const _PAID_PLANS_EV = ['starter', 'creator', 'professional'];
+function _billingConversionEvents(type, r) {
+  try {
+    if (!r || !r.userId) return;
+    const rec = (name, props) => onboarding.recordEvent({ name, userId: r.userId, props });
+    if (type === 'checkout.session.completed' && _PAID_PLANS_EV.includes(r.plan)) rec('checkout_completed', { plan: r.plan });
+    if (r.paymentFailed) rec('payment_failed', r.plan ? { plan: r.plan } : undefined);
+    if (r.cancelScheduled) rec('subscription_cancel_scheduled', r.plan ? { plan: r.plan } : undefined);
+    if (!r.changed) return;
+    const before = r.before || 'free', after = r.plan;
+    if (!_PAID_PLANS_EV.includes(before) && _PAID_PLANS_EV.includes(after)) { rec('subscription_activated', { plan: after }); rec('first_paid_subscription', { plan: after }); }
+    else if (_PAID_PLANS_EV.includes(before) && _PAID_PLANS_EV.includes(after) && before !== after) rec('subscription_changed', { plan: after, from: before });
+    else if (_PAID_PLANS_EV.includes(before) && after === 'free') rec('subscription_canceled', { from: before });
+  } catch (err) { console.warn('[Analytics] billing event not recorded:', err.message); }
+}
+
+// ── POST /api/billing/sync-checkout ──────────────────────────────────
+// Safety net for plan activation that doesn't depend on webhook delivery:
+// back from Stripe Checkout (success_url carries ?session_id=), the app asks
+// the server to reconcile that one session. The server reads the session
+// from Stripe itself, accepts it only if it belongs to the signed-in user,
+// and applies it through the same reconciliation as the webhook
+// (stripeBilling.onCheckoutCompleted: paid sessions only, ownership checks,
+// idempotent credit grant). Running both paths can't grant anything twice.
+app.post('/api/billing/sync-checkout', express.json({ limit: '4kb' }), async (req, res) => { // registered before the global JSON parser
+  const user = await getUserFromToken(req);
+  if (!user) return res.status(401).json({ error: 'Authentication required' });
+  if (!analytics.allow('sync:' + user.id, 10, 60e3)) return res.status(429).json({ error: 'Too many requests' });
+  const sessionId = req.body && req.body.session_id;
+  if (typeof sessionId !== 'string' || !/^cs_(test|live)_[A-Za-z0-9]{10,200}$/.test(sessionId)) return res.status(400).json({ error: 'Invalid session' });
+  try {
+    const session = await stripe.checkout.sessions.retrieve(sessionId);
+    const owner = (session.metadata && session.metadata.userId) || null;
+    if (owner !== user.id || (session.client_reference_id && session.client_reference_id !== user.id)) {
+      console.warn('[CheckoutSync] session does not belong to the caller | user:', user.id);
+      return res.status(404).json({ error: 'Session not found' });
+    }
+    const result = await stripeBilling.onCheckoutCompleted(session);
+    console.log('[CheckoutSync]', JSON.stringify(Object.assign({ user: user.id }, result || {})));
+    _billingConversionEvents('checkout.session.completed', result);
+    res.json({ ok: true, plan: (result && result.plan) || null, skipped: (result && result.skipped) || null });
+  } catch (err) {
+    console.error('[CheckoutSync] error:', err.message);
+    res.status(502).json({ error: 'Could not confirm the payment right now.' });
   }
 });
 
@@ -2086,7 +2135,9 @@ app.post('/api/create-checkout-session', async (req, res) => {
       client_reference_id: user.id,
       metadata: { userId: user.id, plan },
       subscription_data: { metadata: { userId: user.id, plan } },
-      success_url: `${FRONTEND_URL}/app?success=true`,
+      // session_id lets the app reconcile this checkout directly
+      // (/api/billing/sync-checkout) even if a webhook is delayed or misrouted.
+      success_url: `${FRONTEND_URL}/app?success=true&session_id={CHECKOUT_SESSION_ID}`,
       cancel_url:  `${FRONTEND_URL}/app?canceled=true`,
     };
     if (profile && profile.stripe_customer_id) {
@@ -2099,6 +2150,7 @@ app.post('/api/create-checkout-session', async (req, res) => {
     }
     const session = await stripe.checkout.sessions.create(params);
     console.log('[Checkout] Session created for user', user.id, '| plan:', plan);
+    onboarding.recordEvent({ name: 'checkout_started', userId: user.id, props: { plan } });
     res.json({ url: session.url });
   } catch (err) {
     console.error('[Checkout] Stripe error creating session:', err.message, '| type:', err.type || '-', '| code:', err.code || '-');
@@ -2760,11 +2812,13 @@ app.post('/api/signup', async (req, res) => {
   }
 
   const user = authData.user;
-  onboarding.recordEvent({ name: 'signup_completed', userId: user.id }); // activation funnel; fire-and-forget
 
   const smtpReady = !!(process.env.SMTP_USER && process.env.SMTP_PASS);
   const token = emailVerification.canSendVerification(email, smtpReady) ? accounts.newToken() : null;
   const profile = await accounts.createProfile({ userId: user.id, firstName, lastName, email, tokenHash: token ? accounts.hashToken(token) : null });
+  // First-touch attribution (sanitized, insert-only) + the signup conversion.
+  const acqChannel = profile.ok ? await analytics.recordSignupAttribution(user.id, req.body && req.body.attribution) : null;
+  onboarding.recordEvent({ name: 'signup_completed', userId: user.id, props: acqChannel ? { channel: acqChannel } : undefined }); // activation funnel; fire-and-forget
   if (!profile.ok) {
     // The account exists and can sign in; the app creates a minimal profile
     // on first load. Logged for follow-up, never silently ignored.
@@ -2799,7 +2853,9 @@ app.post('/api/profile/ensure', async (req, res) => {
   const user = await getUserFromToken(req);
   if (!user) return res.status(401).json({ error: 'Authentication required' });
   try {
-    res.json(await accounts.ensureProfile(user));
+    const r = await accounts.ensureProfile(user);
+    if (r.created) await analytics.recordSignupAttribution(user.id, req.body && req.body.attribution);
+    res.json(r);
   } catch (err) {
     console.error('[ProfileEnsure]', err.code || err.message);
     res.status(500).json({ error: 'Could not prepare your account right now.' });
@@ -2817,7 +2873,8 @@ app.post('/api/verify-email', async (req, res) => {
     if (found.error === 'expired') return res.status(410).json({ error: 'This verification link has expired. Request a new one from the app.' });
     if (found.error === 'unavailable') return res.status(503).json({ error: 'Could not verify right now. Please try again.' });
     if (found.error) return res.status(404).json({ error: 'Verification link is invalid or has already been used' });
-    await accounts.markVerified(found.userId);
+    const newlyVerified = await accounts.markVerified(found.userId);
+    if (newlyVerified) onboarding.recordEvent({ name: 'email_verified', userId: found.userId });
     console.log('[VerifyEmail] Email verified for user:', found.userId);
     res.json({ ok: true });
   } catch (err) {
@@ -6372,6 +6429,7 @@ async function _handleProviderUnavailable(reservation, featureKey, err, req, res
   });
 }
 
+const _firstAdStartedSeen = new Set();
 app.post('/api/ai/create-ad', requireSubOrOnboardingGen, paidActions.laneGuard('create-ad'), async (req, res) => {
   console.log('[create-ad] ← route handler entered');
   console.log('[create-ad] req.body keys:', Object.keys(req.body || {}));
@@ -6381,6 +6439,10 @@ app.post('/api/ai/create-ad', requireSubOrOnboardingGen, paidActions.laneGuard('
     console.log('[create-ad] 400 — product missing');
     return res.status(400).json({ error: 'product is required' });
   }
+
+  // Conversion funnel: an account's first campaign build attempt (one-time
+  // event — events_once_per_user_idx; the Set avoids repeat inserts per process).
+  if (req.user && !_firstAdStartedSeen.has(req.user.id)) { _firstAdStartedSeen.add(req.user.id); onboarding.recordEvent({ name: 'first_ad_started', userId: req.user.id }); }
 
   const brandSection = _buildCampaignBrandSection(brandCore);
   const _bizCtx = req.user ? await _gatherBusinessContext(req.user.id, { skipBrandVoice: !!brandIdentityDisabled }).catch(() => null) : null;
@@ -16000,6 +16062,56 @@ app.put('/api/onboarding/goal', async (req, res) => {
   }
 });
 
+// ── POST /api/t — cookieless site page views (marketing site) ─────────
+// Sent with navigator.sendBeacon (text/plain, no preflight, no cookies, no
+// auth). Stores no IP address: only a daily-rotating visitor hash, the path,
+// channel/UTM values and the referrer host (services/analytics.js). Bots are
+// dropped; rate limited per address and globally. Always answers 204.
+app.post('/api/t', express.text({ type: '*/*', limit: '2kb' }), async (req, res) => {
+  res.status(204).end();
+  try {
+    const ip = String(req.headers['x-forwarded-for'] || '').split(',')[0].trim() || req.ip || '';
+    if (!analytics.allow('t:' + ip, 120, 60e3) || !analytics.allow('t:all', 6000, 60e3)) return;
+    if (req.headers.dnt === '1' || req.headers['sec-gpc'] === '1') return; // honour Do Not Track / Global Privacy Control
+    let body = req.body; if (typeof body === 'string') { try { body = JSON.parse(body); } catch (_) { return; } }
+    await analytics.recordSiteHit(body, { ip, ua: String(req.headers['user-agent'] || '').slice(0, 300) });
+  } catch (err) { console.warn('[Analytics] page view error:', err.message); }
+});
+
+// ── Owner analytics (admin only) ───────────────────────────────────────
+// Admins are Supabase user ids listed in ADMIN_USER_IDS, checked here on the
+// server after the session token is verified. Aggregates only — no emails,
+// names or ids are returned.
+async function _requireAdmin(req, res) {
+  const user = await getUserFromToken(req);
+  if (!user) { res.status(401).json({ error: 'Authentication required' }); return null; }
+  if (!analytics.allow('admin:' + user.id, 60, 60e3)) { res.status(429).json({ error: 'Too many requests' }); return null; }
+  if (!analytics.isAdmin(user.id)) {
+    console.warn('[Admin] refused | user:', user.id);
+    res.status(403).json({ error: 'Not authorized' }); return null;
+  }
+  return user;
+}
+app.get('/api/admin/me', async (req, res) => {
+  const user = await getUserFromToken(req);
+  if (!user) return res.status(401).json({ error: 'Authentication required' });
+  if (!analytics.allow('admin:' + user.id, 60, 60e3)) return res.status(429).json({ error: 'Too many requests' });
+  res.json({ admin: analytics.isAdmin(user.id) });
+});
+app.get('/api/admin/analytics', async (req, res) => {
+  const user = await _requireAdmin(req, res);
+  if (!user) return;
+  const range = analytics.parseRange(req.query);
+  if (!range) return res.status(400).json({ error: 'Invalid date range (max 366 days).' });
+  try {
+    res.set('Cache-Control', 'no-store');
+    res.json(await analytics.dashboard(range));
+  } catch (err) {
+    console.error('[Admin] analytics error:', err.message);
+    res.status(500).json({ error: 'Could not load analytics.' });
+  }
+});
+
 // Marks onboarding complete. Body (optional): { goal: 'create'|'research'|
 // 'explore' } from the welcome screen, or { skipped: true }. Without a body it
 // behaves as before (older clients). Idempotent; no credit grant, no other
@@ -16012,7 +16124,9 @@ app.post('/api/onboarding/complete', async (req, res) => {
     if (body.goal !== undefined && !onboarding.WELCOME_GOALS[body.goal]) {
       return res.status(400).json({ error: 'goal must be one of: ' + Object.keys(onboarding.WELCOME_GOALS).join(', ') });
     }
-    res.json(await onboarding.complete(user.id, body.goal || null));
+    const result = await onboarding.complete(user.id, body.goal || null);
+    onboarding.recordEvent({ name: 'onboarding_completed', userId: user.id, props: body.goal ? { goal: body.goal } : (body.skipped ? { reason: 'skipped' } : undefined) });
+    res.json(result);
   } catch (err) {
     console.error('[onboarding/complete POST]', err.message);
     res.status(500).json({ error: 'Could not complete onboarding right now. Please try again.' });
@@ -17170,6 +17284,13 @@ if (String(process.env.UNVERIFIED_ACCOUNT_CLEANUP || '').trim().toLowerCase() ==
 // credits_cycle_end by the plan's period length added to the OLD
 // credits_cycle_end (not to now()), so a delayed cron run doesn't drift the
 // billing anchor day forward.
+// Analytics retention: raw cookieless page views are kept for 13 months.
+_scheduleBackgroundJob('analytics-retention', '30 3 * * *', async () => {
+  const cutoff = new Date(Date.now() - 395 * 864e5).toISOString();
+  const { error } = await supabaseAdmin.from('site_pageviews').delete().lt('created_at', cutoff);
+  if (error && !/site_pageviews|PGRST205|42P01/.test((error.code || '') + (error.message || ''))) console.warn('[Analytics] retention cleanup failed:', error.message);
+});
+
 _scheduleBackgroundJob('credit-cycle-safety-net', '0 3 * * *', async () => {
   try {
     const { data: overdue, error } = await supabaseAdmin.from('profiles')

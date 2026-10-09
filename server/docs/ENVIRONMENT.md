@@ -36,6 +36,13 @@ Extracted directly from `process.env.*` references across `server.js`, `provider
 | `STRIPE_WEBHOOK_SECRET` | Verifies `/api/stripe-webhook` signatures. |
 | `STRIPE_PRICE_STARTER` / `STRIPE_PRICE_CREATOR` / `STRIPE_PRICE_PROFESSIONAL` | Price IDs for the three paid plans. |
 
+## Analytics (owner dashboard, cookieless statistics)
+
+| Variable | Purpose |
+|---|---|
+| `ADMIN_USER_IDS` | Comma-separated Supabase user ids allowed to open the owner analytics (`/admin/` → `/api/admin/analytics`). Checked on the server. Unset = nobody. |
+| `ANALYTICS_SALT` | Secret used to derive the daily-rotating visitor hash for cookieless page views. Set a long random value; without it a key-derived fallback is used. Never log or share it. |
+
 ## Free first ad (onboarding)
 
 | Variable | Purpose |

@@ -130,7 +130,7 @@ async function applySubscription(sub, profile, opts) {
     alert('unmapped_price_kept_current_plan', { sub: sub.id, price: priceIdOf(sub), plan: before });
     plan = before;
   }
-  const out = { userId: profile.id, status, plan: before, changed: false, credits: null };
+  const out = { userId: profile.id, status, before, plan: before, changed: false, credits: null };
 
   if (REVOKE.includes(status)) {
     if (before !== 'free') {
@@ -231,7 +231,10 @@ async function onSubscriptionUpdated(subEvt) {
     : await q.update({ pending_plan: null, pending_plan_date: null }).eq('id', profile.id).eq('stripe_subscription_id', subEvt.id).eq('pending_plan', 'free');
   if (cErr) throw cErr;
   // Plan label follows Stripe; credits wait for a confirmed payment.
-  return applySubscription(subEvt, Object.assign({}, profile, cancelIso ? { pending_plan: 'free' } : {}), { paymentConfirmed: false });
+  const res = await applySubscription(subEvt, Object.assign({}, profile, cancelIso ? { pending_plan: 'free' } : {}), { paymentConfirmed: false });
+  // Analytics: a cancellation was newly scheduled (not already pending).
+  if (cancelIso && profile.pending_plan !== 'free') res.cancelScheduled = true;
+  return res;
 }
 
 async function onSubscriptionDeleted(subEvt) {
@@ -240,7 +243,18 @@ async function onSubscriptionDeleted(subEvt) {
   const { error } = await _db.from('profiles').update({ subscription_status: 'free', pending_plan: null, pending_plan_date: null })
     .eq('id', profile.id).eq('stripe_subscription_id', subEvt.id);
   if (error) throw error;
-  return { userId: profile.id, plan: 'free', changed: profile.subscription_status !== 'free' };
+  return { userId: profile.id, before: profile.subscription_status || 'free', plan: 'free', changed: profile.subscription_status !== 'free' };
+}
+
+// invoice.payment_failed: no entitlement change (Stripe retries and then
+// moves the subscription to past_due/unpaid/canceled, which the subscription
+// handlers apply). Only identifies the account for analytics.
+async function onInvoicePaymentFailed(inv) {
+  const subId = subscriptionIdOfInvoice(inv);
+  if (!subId) return { skipped: 'not_a_subscription_invoice' };
+  const profile = await profileBySubscription(subId);
+  if (!profile) return { skipped: 'unlinked_subscription' };
+  return { userId: profile.id, plan: profile.subscription_status || null, paymentFailed: true };
 }
 
 const GRANTING_REASONS = ['subscription_create', 'subscription_cycle', 'subscription_update'];
@@ -288,6 +302,6 @@ async function reconcileOverdue(profile) {
 module.exports = {
   init, ACTIVE, LIVE, REVOKE, planOf, periodOf, priceIdOf, scheduledCancelIso,
   profileBySubscription, applySubscription, claimEvent, finishEvent,
-  onCheckoutCompleted, onSubscriptionUpdated, onSubscriptionDeleted, onInvoicePaid, reconcileOverdue,
+  onCheckoutCompleted, onSubscriptionUpdated, onSubscriptionDeleted, onInvoicePaid, onInvoicePaymentFailed, reconcileOverdue,
   _resetForTests: () => { _eventsTable = 'unknown'; },
 };

@@ -112,10 +112,17 @@ async function findToken(token) {
   return { userId: data.id };
 }
 
+// Returns true when this call verified the address (false if it already was).
 async function markVerified(userId) {
-  const { error } = await _db.from('profiles')
-    .update({ email_verified: true, verification_token_hash: null }).eq('id', userId);
+  const now = new Date().toISOString();
+  let { data, error } = await _db.from('profiles')
+    .update({ email_verified: true, verification_token_hash: null, email_verified_at: now }).eq('id', userId)
+    .select('id');
+  if (error && _isMissingColumn(error)) {
+    ({ data, error } = await _db.from('profiles').update({ email_verified: true, verification_token_hash: null }).eq('id', userId).select('id'));
+  }
   if (error) throw error;
+  return Array.isArray(data) ? data.length > 0 : true;
 }
 
 // Stores a fresh token for resend. Returns false if verification storage

@@ -155,6 +155,7 @@ async function claim(userId) {
 // model (AIMLAPI does not return a billed amount per request).
 function recordSuccess(reservation, { model, usage, estCostUsd } = {}) {
   if (!reservation || reservation.featureKey !== 'free_first_ad_image') return;
+  onboarding.recordEvent({ name: 'free_first_ad_succeeded', userId: reservation.userId, props: { kind: 'image' } });
   _log('log', 'succeeded', {
     acct: reservation.acct, attempt: reservation.attempt, model: model || null,
     imageTokens: usage && usage.completionTokens != null ? usage.completionTokens : null,
