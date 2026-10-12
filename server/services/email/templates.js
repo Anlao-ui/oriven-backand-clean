@@ -311,4 +311,34 @@ function render(key, data, ctx) {
   return t(data || {}, ctx || {});
 }
 
-module.exports = { render, TEMPLATES, PLAN_INTRO, esc };
+// ── Supabase Auth email templates ────────────────────────────────────
+// Not sent by this server: Supabase Auth sends these (custom SMTP through
+// Resend) and fills in its own Go-template variables. The HTML is pasted into
+// Supabase → Authentication → Emails; scripts/supabase-email-templates.js
+// writes it to docs/email/ so the dashboard copy can be compared with the
+// source. {{ .ConfirmationURL }} is Supabase's one-time recovery link — the
+// token, its expiry and single use stay entirely with Supabase.
+const SUPABASE_URL_VAR = '{{ .ConfirmationURL }}';
+const SUPABASE_AUTH = {
+  reset_password() {
+    const url = SUPABASE_URL_VAR;
+    const body =
+      p('We received a request to reset the password for your OrivenAI account.') +
+      p('Choose a new password with the button below. For your security, the link can be used only once and expires after a short time.') +
+      button('Reset Password', url) +
+      small(`If the button doesn’t work, paste this address into your browser:<br><a href="${url}" style="color:${C.muted};word-break:break-all">${url}</a>`) +
+      small('If you did not request this change, you can safely ignore this email. Your password stays the same.');
+    return {
+      subject: 'Reset your OrivenAI password',
+      html: layout({ eyebrow: 'Your account', heading: 'Reset your password', preheader: 'A secure link to choose a new password for your OrivenAI account.',
+        body, ctx: {}, category: 'service', why: 'You’re receiving this because a password reset was requested for this address on OrivenAI.' }),
+    };
+  },
+};
+function supabaseAuthTemplate(kind) {
+  const t = SUPABASE_AUTH[kind];
+  if (!t) throw new Error('unknown Supabase auth template: ' + kind);
+  return t();
+}
+
+module.exports = { render, TEMPLATES, PLAN_INTRO, esc, supabaseAuthTemplate, SUPABASE_URL_VAR };
