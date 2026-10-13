@@ -75,25 +75,40 @@ async function createProfile({ userId, firstName, lastName, email, tokenHash }) 
   return { ok: false, verification: false, error };
 }
 
-// Makes sure the signed-in user has a profile row (the app calls this when
-// it finds none — e.g. signup's profile write failed). Insert-only: an
-// existing row is never touched, so this can't change a plan, credits or
-// anything else. Browsers have no write access to profiles at all
-// (docs/migrations/2026-10-profiles-lockdown.sql); this is the only way a
-// missing row gets created. Returns { ok, created }.
-async function ensureProfile(user) {
-  const { data: existing, error: e1 } = await _db.from('profiles').select('id').eq('id', user.id).maybeSingle();
-  if (e1) throw e1;
-  if (existing) return { ok: true, created: false };
+// Makes sure the signed-in user has a complete profile row (called on the
+// first authenticated request of each user per server process, and by the
+// app when it finds none). A missing row is inserted from Auth (email,
+// name); an existing row is never overwritten — only identity fields that
+// are still empty (a bare row created by a route's upsert before the
+// profile existed) are filled from Auth. Plan, credits, Stripe ids,
+// onboarding and every other column are never touched. Browsers have no
+// write access to profiles (docs/migrations/2026-10-profiles-lockdown.sql).
+// Returns { ok, created, filled? }.
+function _identityFromAuth(user) {
   const meta = user.user_metadata || {};
-  const row = {
-    id: user.id,
+  return {
     email: user.email ? String(user.email).toLowerCase() : null,
-    first_name: typeof meta.first_name === 'string' ? meta.first_name.slice(0, 80) : null,
+    first_name: typeof meta.first_name === 'string' && meta.first_name ? meta.first_name.slice(0, 80) : null,
     last_name: typeof meta.last_name === 'string' && meta.last_name ? meta.last_name.slice(0, 80) : null,
-    subscription_status: 'free',
-    onboarding_completed: false,
   };
+}
+async function ensureProfile(user) {
+  const { data: existing, error: e1 } = await _db.from('profiles').select('id, email, first_name, last_name').eq('id', user.id).maybeSingle();
+  if (e1) throw e1;
+  const ident = _identityFromAuth(user);
+  if (existing) {
+    const patch = {};
+    for (const k of Object.keys(ident)) if (!existing[k] && ident[k]) patch[k] = ident[k];
+    if (!Object.keys(patch).length) return { ok: true, created: false };
+    // Each filled column is guarded by "still empty", so a concurrent real
+    // write is never overwritten.
+    let q = _db.from('profiles').update(patch).eq('id', user.id);
+    for (const k of Object.keys(patch)) q = q.is(k, null);
+    const { error: e2 } = await q;
+    if (e2) throw e2;
+    return { ok: true, created: false, filled: Object.keys(patch) };
+  }
+  const row = Object.assign({ id: user.id }, ident, { subscription_status: 'free', onboarding_completed: false });
   const { error } = await _db.from('profiles').upsert(row, { onConflict: 'id', ignoreDuplicates: true });
   if (error) throw error;
   return { ok: true, created: true };

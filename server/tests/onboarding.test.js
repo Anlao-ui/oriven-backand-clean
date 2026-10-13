@@ -169,7 +169,10 @@ const snapshotMoney = () => JSON.stringify(rows('profiles').map((p) => [p.id, p.
   r = await call('GET', '/api/onboarding/state', 'tok_newFree');
   check('state reports newAccount, plan, goal, firstValueAt', r.body.newAccount === true && r.body.plan === 'free' && r.body.goal === null && r.body.firstValueAt === null, r.body);
   r = await call('GET', '/api/onboarding/state', 'tok_newFree');
-  check('repeated state reads (refresh/login/other device) stay eligible and write nothing', r.body.eligible === true && writes.length === 0, writes);
+  // The only writes allowed: the one-time sign-in fill of EMPTY identity
+  // fields from Auth (accounts.ensureProfile) — never onboarding, plan or credits.
+  const identityOnly = (w) => w[0] === 'profiles' && w[1] === 'update' && Object.keys(w[2]).every((k) => ['email', 'first_name', 'last_name'].includes(k));
+  check('repeated state reads (refresh/login/other device) stay eligible and write nothing (beyond filling empty identity fields)', r.body.eligible === true && writes.every(identityOnly), writes);
 
   out('\nC. POST /api/onboarding/complete');
   reset();

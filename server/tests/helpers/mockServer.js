@@ -108,7 +108,7 @@ function boot({ port, env }) {
           AUTH.users.push(user); TOKENS['tok_' + user.id] = user;
           return { data: { user }, error: null };
         },
-        deleteUser: async (id) => { AUTH.deleted.push(id); return { error: null }; },
+        deleteUser: async (id) => { if (AUTH.deleteFail) { const m = AUTH.deleteFail; AUTH.deleteFail = null; return { error: { message: m } }; } AUTH.deleted.push(id); return { error: null }; },
         listUsers: async () => ({ data: { users: AUTH.users }, error: null }),
       },
     },

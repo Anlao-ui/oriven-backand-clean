@@ -539,8 +539,32 @@ async function _getUserFromTokenUncached(req) {
     const { data, error } = await supabaseAdmin.auth.getUser(token);
     if (error || !data.user) return null;
     aiUsage.setUser(data.user.id);
+    const ensured = await _ensureProfileOnce(data.user);
+    if (ensured && ensured.created) req._orvProfileCreated = true; // /api/profile/ensure reports it (signup attribution)
     return data.user;
   } catch (_) { return null; }
+}
+
+// Every signed-in account must have a profiles row. Checked once per user per
+// process on their first authenticated request (before any route's own
+// profile upserts run, so a missing row is created complete — email and
+// name from Auth — rather than as a bare row). Insert-only for a missing
+// row; an existing row only gets empty identity fields filled
+// (accounts.ensureProfile). Never blocks the request on failure.
+const _profileEnsured = new Map(); // userId -> Promise
+function _ensureProfileOnce(user) {
+  let p = _profileEnsured.get(user.id);
+  if (!p) {
+    p = accounts.ensureProfile(user).then((r) => {
+      if (r && r.created) console.warn('[ProfileEnsure] created missing profile for', user.id);
+      else if (r && r.filled) console.warn('[ProfileEnsure] filled empty identity fields for', user.id, r.filled.join(','));
+      return r;
+    }).catch((err) => { _profileEnsured.delete(user.id); console.error('[ProfileEnsure] failed for', user.id, ':', err.code || err.message); return null; });
+    _profileEnsured.set(user.id, p);
+    if (_profileEnsured.size > 50000) _profileEnsured.delete(_profileEnsured.keys().next().value);
+    return p;
+  }
+  return p.then(() => null); // later requests wait for the same check but don't report its outcome
 }
 
 // â”€â”€ Subscription enforcement middleware â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
@@ -2883,7 +2907,10 @@ app.post('/api/profile/ensure', async (req, res) => {
   if (!user) return res.status(401).json({ error: 'Authentication required' });
   try {
     const r = await accounts.ensureProfile(user);
-    if (r.created) await analytics.recordSignupAttribution(user.id, req.body && req.body.attribution);
+    if (req._orvProfileCreated) r.created = true; // created moments ago by the sign-in check (getUserFromToken)
+    // The row may have been created by the sign-in check on an earlier request;
+    // attribution only fills an empty acq_channel, so recording it is safe either way.
+    if (r.created || (req.body && req.body.attribution)) await analytics.recordSignupAttribution(user.id, req.body && req.body.attribution);
     res.json(r);
   } catch (err) {
     console.error('[ProfileEnsure]', err.code || err.message);
@@ -16292,11 +16319,23 @@ app.post('/api/account/delete', async (req, res) => {
     // credit_transactions is an append-only audit ledger (financial/usage
     // history) -- deliberately left in place, matching how the cleanup
     // cron above also only removes the auth user, not historical rows.
+    // The profile goes first (rows referencing it must not block the auth
+    // deletion), but if the auth deletion then fails the account must not be
+    // left signed-in-able without its profile — plan, credits and Stripe ids
+    // would be lost. Keep the row and put it back exactly on failure.
+    const { data: profileSnapshot } = await supabaseAdmin.from('profiles').select('*').eq('id', user.id).maybeSingle();
     const { error: profileDelErr } = await supabaseAdmin.from('profiles').delete().eq('id', user.id);
     if (profileDelErr) console.warn('[Account] profiles delete warning (continuing to auth deletion):', profileDelErr.message);
 
     const { error: authDelErr } = await supabaseAdmin.auth.admin.deleteUser(user.id);
-    if (authDelErr) throw authDelErr;
+    if (authDelErr) {
+      if (profileSnapshot && !profileDelErr) {
+        const { error: restoreErr } = await supabaseAdmin.from('profiles').upsert(profileSnapshot, { onConflict: 'id', ignoreDuplicates: true });
+        if (restoreErr) console.error('[Account] PROFILE RESTORE FAILED after auth delete error — manual review needed for', user.id, ':', restoreErr.message);
+        else console.warn('[Account] auth delete failed; profile restored for', user.id);
+      }
+      throw authDelErr;
+    }
 
     console.log('[Account] Deleted account:', user.id); // id only — no email address in logs
     res.json({ ok: true });

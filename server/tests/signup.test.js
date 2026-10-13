@@ -112,7 +112,9 @@ const tokenFromMail = (m) => (String(m && m.text || '').match(/verify_token=([a-
   check('no session → 401', r.status === 401);
   const orphan = H.AUTH.users[3]; // auth user whose profile write failed in E
   r = await H.call('POST', '/api/profile/ensure', 'tok_' + orphan.id);
-  check('missing row → created as a plain Free profile', r.status === 200 && r.body.created === true && prof(orphan.id) && prof(orphan.id).subscription_status === 'free' && prof(orphan.id).onboarding_completed === false, prof(orphan.id));
+  // Since the sign-in check (getUserFromToken → accounts.ensureProfile), the row
+  // may already have been created by the orphan's first signed-in request.
+  check('missing row → created as a plain Free profile', r.status === 200 && r.body.ok === true && prof(orphan.id) && prof(orphan.id).subscription_status === 'free' && prof(orphan.id).onboarding_completed === false, prof(orphan.id));
   r = await H.call('POST', '/api/profile/ensure', 'tok_' + orphan.id);
   check('second call → nothing created or changed', r.status === 200 && r.body.created === false && H.rows('profiles').filter((p) => p.id === orphan.id).length === 1);
   const paidRow = prof(u1.id);

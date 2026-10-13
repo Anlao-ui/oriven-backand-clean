@@ -25,7 +25,7 @@ try { PGlite = require(process.env.PGLITE_PATH || '@electric-sql/pglite').PGlite
 let pass = 0, fail = 0;
 const check = (n, ok, info) => { ok ? pass++ : fail++; console.log((ok ? '  PASS — ' : '  FAIL — ') + n + (ok || info === undefined ? '' : ' :: ' + JSON.stringify(info).slice(0, 300))); };
 const A = '11111111-1111-4111-8111-111111111111', B = '22222222-2222-4222-8222-222222222222', C = '33333333-3333-4333-8333-333333333333';
-const ORDER = ['2026-10-onboarding-activation.sql', '2026-10-signup-verification.sql', '2026-10-email-lifecycle.sql', '2026-10-free-first-ad.sql', '2026-10-profiles-lockdown.sql', '2026-10-analytics.sql'];
+const ORDER = ['2026-10-onboarding-activation.sql', '2026-10-signup-verification.sql', '2026-10-email-lifecycle.sql', '2026-10-free-first-ad.sql', '2026-10-profiles-lockdown.sql', '2026-10-analytics.sql', '2026-10-creative-assets.sql'];
 
 (async () => {
   const db = new PGlite();
@@ -189,6 +189,42 @@ const ORDER = ['2026-10-onboarding-activation.sql', '2026-10-signup-verification
   check('no column-level write grants left for browser roles', colw === 0, colw);
   const rls = (await db.query(`SELECT relname FROM pg_class WHERE relname IN ('profiles','events','email_sends','email_suppressions','free_first_ad_claims','site_pageviews') AND relrowsecurity ORDER BY 1`)).rows.map((x) => x.relname);
   check('row-level security on for all six tables', rls.length === 6, rls);
+
+  console.log('\nI. creative_assets / creative_asset_comments (Asset Library, version history)');
+  r = await asRole('service_role', `INSERT INTO public.creative_assets (user_id, kind, title, content, source_route) VALUES ('${A}', 'ad', 'Spring sale', '{"headline":"Hi","generationId":"gen_1"}', '/api/ai/create-ad') RETURNING id`);
+  const a1 = r.ok && r.rows[0].id;
+  check('backend (service role) saves an asset with the defaults the code relies on', !!a1, r);
+  const def = (await db.query(`SELECT status, is_current, favorite, archived FROM public.creative_assets WHERE id = '${a1}'`)).rows[0];
+  check('defaults: status draft, is_current true, favorite/archived false', def && def.status === 'draft' && def.is_current === true && def.favorite === false && def.archived === false, def);
+  r = await asRole('service_role', `INSERT INTO public.creative_assets (user_id, kind, title, content, parent_asset_id, version_label, is_current) VALUES ('${A}', 'ad', 'Spring sale', '{"text":"v2"}', '${a1}', 'Shorter', true) RETURNING id`);
+  const a2 = r.ok && r.rows[0].id;
+  await asRole('service_role', `UPDATE public.creative_assets SET is_current = false WHERE id = '${a1}'`);
+  const fam = (await db.query(`SELECT count(*)::int AS n FROM public.creative_assets WHERE parent_asset_id = '${a1}'`)).rows[0].n;
+  check('version history: a new version links to its parent', !!a2 && fam === 1, r);
+  r = await asRole('service_role', `UPDATE public.creative_assets SET status = 'not-a-status' WHERE id = '${a1}'`);
+  check('status limited to the six values the API allows', !r.ok, r);
+  r = await asRole('service_role', `SELECT id FROM public.creative_assets WHERE user_id = '${A}' AND content->>'generationId' = 'gen_1'`);
+  check('json lookup used by video ownership works', r.ok && r.rows.length === 1, r);
+  await asRole('service_role', `INSERT INTO public.creative_assets (user_id, kind, title) VALUES ('${B}', 'image', 'B asset')`);
+  r = await asRole('service_role', `INSERT INTO public.creative_asset_comments (asset_id, user_id, content) VALUES ('${a1}', '${A}', 'Looks good') RETURNING id`);
+  check('comment saved on an asset', r.ok, r);
+  r = await asUser(A, `SELECT title, user_id FROM public.creative_assets`);
+  check('a signed-in user reads only their own assets', r.ok && r.rows.length === 2 && r.rows.every((x) => x.user_id === A), r);
+  r = await asUser(B, `SELECT id FROM public.creative_asset_comments`);
+  check('…and only their own comments', r.ok && r.rows.length === 0, r);
+  r = await asUser(A, `INSERT INTO public.creative_assets (user_id, kind) VALUES ('${A}', 'ad')`);
+  const u1 = await asUser(A, `UPDATE public.creative_assets SET status = 'approved' WHERE id = '${a1}'`);
+  const d3 = await asUser(A, `DELETE FROM public.creative_assets WHERE id = '${a1}'`);
+  check('browsers cannot insert, update or delete assets (backend only)', !r.ok && !u1.ok && !d3.ok, [r.error, u1.error, d3.error]);
+  r = await asRole('anon', `SELECT id FROM public.creative_assets`);
+  check('logged-out visitor reads nothing', !r.ok && /permission denied/.test(r.error), r);
+  r = await asRole('service_role', `DELETE FROM public.creative_assets WHERE id = '${a1}'`);
+  const orphanCheck = (await db.query(`SELECT (SELECT parent_asset_id FROM public.creative_assets WHERE id = '${a2}') AS parent, (SELECT count(*)::int FROM public.creative_asset_comments WHERE asset_id = '${a1}') AS comments`)).rows[0];
+  check('deleting an asset: its comments go with it, a later version stays (parent cleared)', r.ok && orphanCheck.parent === null && orphanCheck.comments === 0, orphanCheck);
+  const snap3 = await snapshot();
+  try { await db.exec('BEGIN;\n' + fs.readFileSync(path.join(MIG, '2026-10-creative-assets.sql'), 'utf8') + '\nCOMMIT;'); check('re-running the creative assets migration → no error, rows kept', (await db.query(`SELECT count(*)::int AS n FROM public.creative_assets`)).rows[0].n === 2); }
+  catch (e) { await db.exec('ROLLBACK;').catch(() => {}); check('re-run creative assets migration', false, e.message); }
+  check('profiles untouched by the creative assets migration', (await snapshot()) === snap3);
 
   console.log(`\n${pass + fail} checks run, ${pass} passed, ${fail} failed.`);
   process.exit(fail ? 1 : 0);
