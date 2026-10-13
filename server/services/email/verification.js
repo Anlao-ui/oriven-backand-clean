@@ -36,7 +36,7 @@ async function sendVerification({ to, firstName, verifyUrl, tokenHash, smtpSend 
       tags: [{ name: 'template', value: 'verify_email' }],
       idempotencyKey: `oriven:${sender.scope()}:verify:${String(tokenHash).slice(0, 32)}`,
     });
-    if (r.id) return { via: 'resend' };
+    if (r.id) return { via: 'resend', providerId: r.id }; // provider id: the ledger row (lifecycle.recordVerificationSend) gets delivery updates
     resendError = r.error || r.skipped || 'unknown';
   }
   if (typeof smtpSend === 'function') {

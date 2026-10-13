@@ -203,7 +203,51 @@ function setHooks(hooks) { _hooks = hooks || {}; }
 // One sender for JSON and multipart requests.
 // makeOpts() returns fresh fetch options per attempt (a FormData/JSON body
 // is rebuilt each time); `tag` only labels log lines.
+// ── Failure classification ────────────────────────────────────
+// A short, fixed category plus the provider's HTTP status for every failed
+// provider call — what ends up in logs and on the paid-action record
+// (credit_actions.error). Never the provider's message, the request, the
+// prompt or the key.
+//   account_key_rejected      401 — key invalid/revoked
+//   account_payment_required  402 — no balance / payment needed
+//   account_forbidden         403 — key not allowed (plan, model, region)
+//   account_balance_or_quota  400/422 whose message says balance/quota/billing
+//   rate_limited              429
+//   provider_server_error     5xx
+//   provider_rejected_request other 4xx (bad request, unknown model, …)
+//   timeout / network         no HTTP answer
+//   queue_full / spend_limit  refused inside OrivenAI before anything was sent
+function classifyError(err) {
+  if (!err) return { category: 'unknown', status: null };
+  const status = typeof err.status === 'number' ? err.status : null;
+  if (err.code === 'AI_SPEND_LIMIT') return { category: 'spend_limit', status: null, detail: err.reason ? String(err.reason).slice(0, 40) : null };
+  if (err.busy || err.code === 'AI_BUSY') return { category: 'queue_full', status: null };
+  if (err.timeout) return { category: 'timeout', status: null };
+  if (err.providerAccount) {
+    const category = status === 401 ? 'account_key_rejected' : status === 402 ? 'account_payment_required' : status === 403 ? 'account_forbidden' : 'account_balance_or_quota';
+    return { category, status };
+  }
+  if (status === 429) return { category: 'rate_limited', status };
+  if (status != null && status >= 500) return { category: 'provider_server_error', status };
+  if (status != null && status >= 400) return { category: 'provider_rejected_request', status };
+  if (/network error/i.test(err.message || '')) return { category: 'network', status: null };
+  return { category: 'unknown', status };
+}
+
+// Every provider call goes through here; failures are classified once and
+// reported to the error hook (server.js → aiUsage.noteProviderError).
 async function _send(method, path, makeOpts, tag) {
+  try {
+    return await _sendRaw(method, path, makeOpts, tag);
+  } catch (err) {
+    if (typeof _hooks.error === 'function') {
+      try { _hooks.error(Object.assign({ method, path }, classifyError(err))); } catch (_) {}
+    }
+    throw err;
+  }
+}
+
+async function _sendRaw(method, path, makeOpts, tag) {
   if (method !== 'GET' && typeof _hooks.before === 'function') _hooks.before({ method, path });
   const url = `${AIML_BASE}${path}`;
   const timeoutMs = _timeoutFor(method, path);
@@ -619,4 +663,5 @@ module.exports = {
   getVideoStatus,
   setHooks,
   queueState,
+  classifyError,
 };

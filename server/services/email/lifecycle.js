@@ -285,7 +285,59 @@ async function handleProviderEvent(evt) {
   return { handled: !!status || type === 'email.bounced' };
 }
 
+// ── Verification emails in the ledger ───────────────────────────────
+// One email_sends row per verification attempt (template 'verify_email',
+// or the welcome email when it carried the link), so delivery is visible
+// next to every other email: status sent / skipped / error, the provider id
+// (Resend's webhook then marks it delivered or bounced — handleProviderEvent)
+// and a short reason. Never status 'failed': that status is retried by
+// retryFailed(), which can't rebuild a verification link. Stores no address,
+// token or link.
+const _cleanReason = (r) => (r == null ? null : String(r).replace(/[^a-z0-9_:.-]/gi, '').slice(0, 60) || null);
+async function recordVerificationSend({ userId, source, result }) {
+  if (!_db || !userId) return false;
+  const r = result || {};
+  const via = _cleanReason(r.via) || 'none';
+  const status = via === 'none' ? (r.reason === 'suppressed' || r.reason === 'no_provider' ? 'skipped' : 'error') : 'sent';
+  const now = new Date().toISOString();
+  const row = {
+    user_id: userId, template: 'verify_email',
+    dedupe_key: 'verify:' + (_cleanReason(source) || 'signup') + ':' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6),
+    category: 'service', status, attempts: 1,
+    provider_id: r.providerId ? String(r.providerId).slice(0, 100) : null,
+    error: _cleanReason([via, r.reason].filter(Boolean).join(':')),
+    sent_at: status === 'sent' ? now : null,
+  };
+  try {
+    const { error } = await _db.from('email_sends').insert(row);
+    if (error) { console.warn('[Verification] ledger row not stored:', error.code || String(error.message || '').slice(0, 80)); return false; }
+    return true;
+  } catch (err) { console.warn('[Verification] ledger row not stored:', String(err.message || '').slice(0, 80)); return false; }
+}
+
+// ── Welcome email at signup, carrying the verification link ────────
+// When lifecycle email is on, /api/signup sends ONE email — the welcome,
+// with the account's own verification link (accounts token,
+// /api/verify-email) — instead of a separate verification email followed by
+// the welcome up to 15 minutes later. It is recorded under the same ledger
+// key the scheduled job uses ('welcome'), so the job never sends a second
+// welcome. Returns { sent, status, providerId, reason }; when not sent, the
+// caller sends the usual verification email instead.
+function lifecycleEnabled() { return String(process.env.EMAIL_LIFECYCLE_ENABLED || '').trim().toLowerCase() === 'true'; }
+async function sendWelcomeAtSignup({ user, verifyUrl }) {
+  if (!lifecycleEnabled()) return { sent: false, reason: 'lifecycle_off' };
+  if (!_db || !user || !user.id || !user.email || !verifyUrl) return { sent: false, reason: 'invalid' };
+  if (!sender.canDeliver(user.email)) return { sent: false, reason: 'cannot_deliver' };
+  try { if (await isSuppressed(user.email)) return { sent: false, reason: 'suppressed' }; } catch (_) {}
+  const ins = await _db.from('email_sends').insert({ user_id: user.id, template: 'welcome', dedupe_key: keyPrefix() + 'welcome', category: 'service', status: 'sending', attempts: 1 }).select('id').maybeSingle();
+  if (ins.error || !ins.data) return { sent: false, reason: 'already_recorded' };
+  const status = await _deliver(ins.data.id, user, { template: 'welcome', key: 'welcome', data: { firstName: user.first_name, verifyUrl } });
+  const { data: row } = await _db.from('email_sends').select('provider_id, error').eq('id', ins.data.id).maybeSingle();
+  return { sent: status === 'sent', status, providerId: (row && row.provider_id) || null, reason: status === 'sent' ? null : _cleanReason((row && row.error) || status) };
+}
+
 module.exports = {
   init, decide, runOnce, retryFailed, setConsent, suppress, isSuppressed, handleProviderEvent,
+  recordVerificationSend, sendWelcomeAtSignup,
   unsubscribeUrl, checkUnsubToken, emailHash, since, WELCOME_WINDOW,
 };

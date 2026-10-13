@@ -97,6 +97,9 @@ paidActions.init({ db: supabaseAdmin, creditManager, getUser: getUserFromToken }
   const router = require('./services/modelRouter');
   if (typeof aimlForHooks.setHooks === 'function') aimlForHooks.setHooks({
     before: () => { const c = aiUsage.current(); spendGuard.preflight(c && c.userId); },
+    // Every failed provider call: category + HTTP status on the request's
+    // context and paid action (logged; stored on the failed credit_actions row).
+    error: (info) => { aiUsage.noteProviderError(info); },
     after: ({ method, path, ok, providerAccount }) => {
       if (providerAccount) spendGuard.providerAccountProblem(method + ' ' + path);
       if (method !== 'POST') return;
@@ -622,7 +625,7 @@ async function requireSubIfAuthed(req, res, next) {
     console.log('[middleware] Auth header present but getUserFromToken returned null — pass-through');
     return next();
   }
-  console.log('[middleware] User resolved:', user.id, user.email || '(no email)');
+  console.log('[middleware] User resolved:', user.id); // id only — no email address in logs
   try {
     const { data, error: dbErr } = await supabaseAdmin
       .from('profiles').select('subscription_status').eq('id', user.id).maybeSingle();
@@ -2762,9 +2765,10 @@ app.post('/api/support/admin-reply', async (req, res) => {
 // Sends the verification email for a freshly stored token: Resend when it can
 // deliver to this address, the existing SMTP path otherwise (or if Resend
 // fails). Never throws.
+// The app (/app) reads verify_token on load; the landing page (/) does not.
+function _verifyUrl(token) { return `${String(FRONTEND_URL).replace(/\/+$/, '')}/app?verify_token=${token}`; }
 async function _sendVerificationEmail({ to, firstName, token, smtpReady }) {
-  // The app (/app) reads verify_token on load; the landing page (/) does not.
-  const verifyUrl = `${String(FRONTEND_URL).replace(/\/+$/, '')}/app?verify_token=${token}`;
+  const verifyUrl = _verifyUrl(token);
   const smtpSend = smtpReady ? () => _smtpTransporter().sendMail({
     from:    process.env.SMTP_FROM || `ORIVEN <${process.env.SMTP_USER}>`,
     to,
@@ -2828,10 +2832,20 @@ app.post('/api/signup', async (req, res) => {
   // Verification email: only when a token was really stored (otherwise the
   // link could never work). Resend first, SMTP fallback (verification.js).
   // Best-effort — signup succeeds either way.
+  // With lifecycle email on, ONE email: the welcome, carrying this signup's
+  // verification link (same token, same /api/verify-email). Otherwise — or if
+  // that send didn't go out — the usual verification email. Every attempt is
+  // recorded in email_sends (lifecycle.recordVerificationSend).
   if (token && profile.verification) {
-    const sent = await _sendVerificationEmail({ to: email, firstName, token, smtpReady });
-    console.log('[Signup] Verification email for user', user.id, '| via:', sent.via, sent.reason ? '(' + sent.reason + ')' : '');
+    const welcome = await emailLifecycle.sendWelcomeAtSignup({ user: { id: user.id, email, first_name: firstName }, verifyUrl: _verifyUrl(token) })
+      .catch(() => ({ sent: false, reason: 'error' }));
+    const sent = welcome.sent
+      ? { via: 'welcome', providerId: welcome.providerId }
+      : await _sendVerificationEmail({ to: email, firstName, token, smtpReady });
+    emailLifecycle.recordVerificationSend({ userId: user.id, source: 'signup', result: sent }).catch(() => {});
+    console.log('[Signup] Verification email for user', user.id, '| via:', sent.via, sent.reason ? '(' + sent.reason + ')' : '', welcome.sent ? '' : '| welcome at signup: ' + (welcome.reason || welcome.status || 'not sent'));
   } else if (!token) {
+    if (profile.ok) emailLifecycle.recordVerificationSend({ userId: user.id, source: 'signup', result: { via: 'none', reason: 'no_provider' } }).catch(() => {});
     console.warn('[Signup] No email provider available — no verification email');
   }
 
@@ -2909,6 +2923,7 @@ app.post('/api/resend-verification', async (req, res) => {
     }
     const firstName = (profile && profile.first_name) || null;
     const sent = await _sendVerificationEmail({ to: toEmail, firstName, token, smtpReady });
+    emailLifecycle.recordVerificationSend({ userId: user.id, source: 'resend', result: sent }).catch(() => {});
     console.log('[ResendVerify] user', user.id, '| via:', sent.via, sent.reason ? '(' + sent.reason + ')' : '');
     if (sent.via === 'none') return res.status(sent.reason === 'suppressed' ? 422 : 500).json({ error: sent.reason === 'suppressed' ? 'We can’t send email to this address. Please contact support.' : 'Could not send that email right now. Please try again shortly.' });
     res.json({ ok: true });
@@ -16260,7 +16275,7 @@ app.post('/api/account/delete', async (req, res) => {
     const { error: authDelErr } = await supabaseAdmin.auth.admin.deleteUser(user.id);
     if (authDelErr) throw authDelErr;
 
-    console.log('[Account] Deleted account:', user.id, user.email || '(no email)');
+    console.log('[Account] Deleted account:', user.id); // id only — no email address in logs
     res.json({ ok: true });
   } catch (err) {
     console.error('[Account] Delete error:', err.message);
@@ -16287,7 +16302,7 @@ app.post('/api/profile/sync-email', async (req, res) => {
     if (profile && profile.email === user.email) return res.json({ ok: true, synced: false });
     const { error } = await supabaseAdmin.from('profiles').update({ email: user.email }).eq('id', user.id);
     if (error) throw error;
-    console.log('[Profile] Synced email for', user.id, 'â†’', user.email);
+    console.log('[Profile] Synced email for', user.id); // id only — no email address in logs
     res.json({ ok: true, synced: true });
   } catch (err) {
     console.error('[Profile] sync-email error:', err.message);
@@ -17268,7 +17283,7 @@ if (String(process.env.UNVERIFIED_ACCOUNT_CLEANUP || '').trim().toLowerCase() ==
       try {
         const { error: delErr } = await supabaseAdmin.auth.admin.deleteUser(row.id);
         if (delErr) console.error('[Cron] Delete failed for', row.id, ':', delErr.message);
-        else        console.log('[Cron] Deleted:', row.id, row.email);
+        else        console.log('[Cron] Deleted:', row.id); // id only — no email address in logs
       } catch (e) {
         console.error('[Cron] Exception deleting', row.id, ':', e.message);
       }

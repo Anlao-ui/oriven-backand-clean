@@ -299,10 +299,17 @@ async function _dbSetStatus(p, fromStatuses, status, extra) {
   return { updated: 0 };
 }
 
+// The stored reason carries the provider failure when there was one
+// (aiUsage.noteProviderError): "http_503:account_payment_required:402".
+function _withProviderError(reason, p) {
+  const e = p && p.providerError;
+  if (!reason || !e) return reason;
+  return (reason + ':' + e.category + (e.status != null ? ':' + e.status : '') + (e.detail ? ':' + e.detail : '')).slice(0, 120);
+}
 function _isFailure(statusCode, body, p) {
-  if (p.failedReason) return p.failedReason;
-  if (statusCode >= 400) return 'http_' + statusCode;
-  if (body && typeof body === 'object' && !Array.isArray(body) && body.ok === false) return 'ok_false';
+  if (p.failedReason) return _withProviderError(p.failedReason, p);
+  if (statusCode >= 400) return _withProviderError('http_' + statusCode, p);
+  if (body && typeof body === 'object' && !Array.isArray(body) && body.ok === false) return _withProviderError('ok_false', p);
   return null;
 }
 

@@ -63,7 +63,8 @@ Extracted directly from `process.env.*` references across `server.js`, `provider
 | `EMAIL_UNSUBSCRIBE_SECRET` | Long random string; signs unsubscribe links. Without it, marketing emails are skipped. |
 | `RESEND_WEBHOOK_SECRET` | `whsec_…` signing secret of the Resend webhook (`/api/email/webhook`). Without it, every webhook call is rejected. |
 | `EMAIL_POSTAL_ADDRESS` | Company address shown in the email footer. |
-| `EMAIL_LIFECYCLE_ENABLED` | `true` registers the 15-minute lifecycle job (welcome, reminders, …). Off by default. |
+| `EMAIL_LIFECYCLE_ENABLED` | `true` registers the 15-minute lifecycle job (welcome, reminders, …). Off by default. When on, signup sends ONE email — the welcome, carrying the verification link — instead of a separate verification email (falls back to the verification email if the welcome can't be sent). |
+| `UNVERIFIED_ACCOUNT_CLEANUP` | `true` schedules the nightly job (02:00 UTC) that **deletes** accounts whose email is still unverified 14 days after signup (never accounts with a paid plan or Stripe billing; accounts from before verification existed have `email_verified = NULL` and are never matched). Destructive — leave unset unless deliberately wanted. Also needs background jobs enabled (`ENABLE_BACKGROUND_JOBS`, on by default on Render). |
 | `EMAIL_LIFECYCLE_SINCE` | Optional; only accounts created on/after this date get lifecycle email (default: onboarding rollout). |
 | `PUBLIC_API_URL` | Optional; base for unsubscribe links (default: the Render URL). |
 

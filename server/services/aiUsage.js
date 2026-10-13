@@ -160,6 +160,12 @@ function _safe(fields) {
     durationMs: num(fields.durationMs),
     success: fields.success == null ? null : !!fields.success,
     reason: str(fields.reason, 80),
+    // Failed provider calls only: fixed category + provider HTTP status
+    // (providers/aimlProvider.js classifyError) — never a message or key.
+    errorCategory: str(fields.errorCategory, 40),
+    providerStatus: num(fields.providerStatus),
+    errorDetail: str(fields.errorDetail, 40),
+    path: str(fields.path, 60),
   };
 }
 function _log(level, fields) {
@@ -221,9 +227,28 @@ function extractUsage(data) {
   return { promptTokens: p, completionTokens: c, totalTokens: t, reported: p != null || c != null || t != null };
 }
 
+// Called by the provider error hook (server.js) for every failed provider
+// call. Keeps the latest classification on the request context and on its
+// paid action, so the failed action's record says why
+// (paidActions.settle → credit_actions.error, e.g. "http_503:account_payment_required:402").
+function noteProviderError(info) {
+  if (!info) return null;
+  const e = {
+    category: String(info.category || 'unknown').replace(/[^a-z0-9_]/gi, '').slice(0, 40) || 'unknown',
+    status: Number.isFinite(info.status) ? info.status : null,
+    detail: info.detail ? String(info.detail).replace(/[^a-z0-9_]/gi, '').slice(0, 40) : null,
+  };
+  const c = current();
+  if (c) { c.lastProviderError = e; if (c.paid) c.paid.providerError = e; }
+  _log('warn', { event: 'ai_provider_error', errorCategory: e.category, providerStatus: e.status, errorDetail: e.detail, path: info.path ? String(info.path).split('?')[0] : null, success: false });
+  return e;
+}
+function lastProviderError() { const c = current(); return (c && c.lastProviderError) || null; }
+
 function record({ task, model, provider, data, promptChars: chars, success, reason, durationMs }) {
   const usage = success ? extractUsage(data) : { promptTokens: null, completionTokens: null, totalTokens: null, reported: false };
   const c = current();
+  const pe = !success && c && c.lastProviderError ? c.lastProviderError : null;
   // Feeds the daily spend guard (estimates only; see services/spendGuard.js).
   const estCostUsd = spendGuard.recordCall({ userId: c && c.userId, model, usage, success: !!success });
   if (c) {
@@ -238,6 +263,7 @@ function record({ task, model, provider, data, promptChars: chars, success, reas
     promptTokens: usage.promptTokens, completionTokens: usage.completionTokens, totalTokens: usage.totalTokens,
     tokensReported: usage.reported, reason: success ? null : (reason || 'provider_error'),
     estCostUsd: +estCostUsd.toFixed(5), durationMs,
+    errorCategory: pe ? pe.category : null, providerStatus: pe ? pe.status : null,
   });
   _persist(line);
   return line;
@@ -265,6 +291,6 @@ function _persist(line) {
 module.exports = {
   middleware, withContext, current, setUser, setJobUser, totals,
   sanitizeText, sanitizeMessages, promptChars, prepareText, extractUsage, record,
-  configureDb, PromptTooLargeError, INLINE_PLACEHOLDER,
+  configureDb, PromptTooLargeError, INLINE_PLACEHOLDER, noteProviderError, lastProviderError,
   maxPromptChars, warnPromptChars,
 };
