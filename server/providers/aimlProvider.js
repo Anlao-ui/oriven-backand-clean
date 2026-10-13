@@ -220,6 +220,7 @@ function setHooks(hooks) { _hooks = hooks || {}; }
 function classifyError(err) {
   if (!err) return { category: 'unknown', status: null };
   const status = typeof err.status === 'number' ? err.status : null;
+  if (err.code === 'AI_AUTH_REQUIRED') return { category: 'auth_required', status: null };
   if (err.code === 'AI_SPEND_LIMIT') return { category: 'spend_limit', status: null, detail: err.reason ? String(err.reason).slice(0, 40) : null };
   if (err.busy || err.code === 'AI_BUSY') return { category: 'queue_full', status: null };
   if (err.timeout) return { category: 'timeout', status: null };

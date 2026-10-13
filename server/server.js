@@ -34,6 +34,7 @@ const stripeBilling = require('./services/stripeBilling'); // Stripe → plan/cr
 const onboarding = require('./services/onboarding'); // welcome eligibility, completion, first value, activation events
 const accounts = require('./services/accounts'); // signup validation, profile creation, email verification
 const firstAd = require('./services/firstAd'); // free first-ad image for new Free accounts (off unless FREE_FIRST_AD_ENABLED)
+const videoJobs = require('./services/videoJobs'); // who started which video generation (status endpoints check ownership)
 const emailLifecycle = require('./services/email/lifecycle'); // lifecycle emails (off unless EMAIL_MODE + EMAIL_LIFECYCLE_ENABLED)
 const emailSender = require('./services/email/sender');
 const emailVerification = require('./services/email/verification'); // verification email: Resend first, SMTP fallback
@@ -96,7 +97,17 @@ paidActions.init({ db: supabaseAdmin, creditManager, getUser: getUserFromToken }
   const aimlForHooks = require('./providers/aimlProvider');
   const router = require('./services/modelRouter');
   if (typeof aimlForHooks.setHooks === 'function') aimlForHooks.setHooks({
-    before: () => { const c = aiUsage.current(); spendGuard.preflight(c && c.userId); },
+    before: ({ path }) => {
+      const c = aiUsage.current();
+      // Backstop for the route middleware: a generation started while serving
+      // a web request must belong to a signed-in user. Scheduled jobs carry an
+      // `operation` and are unaffected. Thrown before anything is sent.
+      if (c && c.route && !c.operation && !c.userId) {
+        console.error('[AIUsage] refused provider call without a signed-in user', JSON.stringify({ route: c.route, path }));
+        const e = new Error('AI request without a signed-in user'); e.code = 'AI_AUTH_REQUIRED'; throw e;
+      }
+      spendGuard.preflight(c && c.userId);
+    },
     // Every failed provider call: category + HTTP status on the request's
     // context and paid action (logged; stored on the failed credit_actions row).
     error: (info) => { aiUsage.noteProviderError(info); },
@@ -217,6 +228,7 @@ stripeBilling.init({ stripe, db: supabaseAdmin, creditManager, planByPriceId: PL
 onboarding.init({ db: supabaseAdmin });
 accounts.init({ db: supabaseAdmin });
 firstAd.init({ db: supabaseAdmin });
+videoJobs.init({ db: supabaseAdmin });
 const analytics = require('./services/analytics');
 analytics.init({ db: supabaseAdmin, stripe });
 emailLifecycle.init({ db: supabaseAdmin });
@@ -537,9 +549,9 @@ async function _getUserFromTokenUncached(req) {
 // requireSubscription     â€” strict: auth token required AND subscription required.
 //                           Use for account-management routes (plan change, invite).
 //
-// requireSubIfAuthed      â€” lenient: no-auth requests pass through (guest demo);
-//                           authenticated-but-unpaid requests are blocked with 403.
-//                           Use for all generation routes shared with the guest demo.
+// requireSubIfAuthed      â€” paid plan required: no/invalid session → 401
+//                           (there is no guest demo any more — AI generation always
+//                           needs a signed-in user), signed-in but unpaid → 403.
 
 const PAID_PLANS = ['starter', 'creator', 'professional'];
 
@@ -572,11 +584,26 @@ async function requireSubscription(req, res, next) {
 // that should remain paid-only, e.g. account/plan-management). Kept as
 // separate functions rather than editing the two above so every other
 // route's behavior is completely unaffected.
-async function requireSubOrFree(req, res, next) {
+// Signed-in user or a 401 — the AI/paid-route middlewares below never let a
+// guest through: a request without a user would skip the credit claim and
+// charge (paidActions.laneGuard, creditManager) and still reach the provider.
+async function _requireSignedIn(req, res) {
   const auth = req.headers.authorization || '';
-  if (!auth) return next(); // guest pass-through, same as requireSubIfAuthed
+  if (!auth) { res.status(401).json({ error: 'Authentication required', code: 'AUTH_REQUIRED' }); return null; }
   const user = await getUserFromToken(req);
-  if (!user) return next();
+  if (!user) { res.status(401).json({ error: 'Invalid or expired session', code: 'AUTH_INVALID' }); return null; }
+  return user;
+}
+// The subscription lookup itself failed: refuse (fail closed). Passing the
+// request on without a user would turn it into an unpaid guest request.
+function _authCheckFailed(res, where, err) {
+  console.error(`[Auth] ${where} check error:`, err && err.message);
+  return res.status(503).json({ error: 'Could not verify your plan right now. Please try again.', code: 'AUTH_CHECK_FAILED' });
+}
+
+async function requireSubOrFree(req, res, next) {
+  const user = await _requireSignedIn(req, res);
+  if (!user) return;
   try {
     const { data } = await supabaseAdmin
       .from('profiles').select('subscription_status').eq('id', user.id).maybeSingle();
@@ -587,8 +614,7 @@ async function requireSubOrFree(req, res, next) {
     req.user = user;
     next();
   } catch (err) {
-    console.warn('[Auth] requireSubOrFree check threw — fail open:', err.message);
-    next();
+    return _authCheckFailed(res, 'requireSubOrFree', err);
   }
 }
 
@@ -615,16 +641,9 @@ async function requireSubOrFreeStrict(req, res, next) {
 async function requireSubIfAuthed(req, res, next) {
   const route = req.path || req.url || '?';
   const auth = req.headers.authorization || '';
-  console.log(`[middleware] requireSubIfAuthed — ${req.method} ${route} | auth header: ${auth ? 'present (' + auth.slice(0,15) + '...)' : 'MISSING'}`);
-  if (!auth) {
-    console.log('[middleware] No auth — guest pass-through');
-    return next();
-  }
-  const user = await getUserFromToken(req);
-  if (!user) {
-    console.log('[middleware] Auth header present but getUserFromToken returned null — pass-through');
-    return next();
-  }
+  console.log(`[middleware] requireSubIfAuthed — ${req.method} ${route} | auth header: ${auth ? 'present' : 'MISSING'}`);
+  const user = await _requireSignedIn(req, res);
+  if (!user) return;
   console.log('[middleware] User resolved:', user.id); // id only — no email address in logs
   try {
     const { data, error: dbErr } = await supabaseAdmin
@@ -641,8 +660,7 @@ async function requireSubIfAuthed(req, res, next) {
     console.log('[middleware] ✓ Authorized — proceeding to route');
     next();
   } catch (err) {
-    console.warn('[middleware] Subscription check threw — fail open:', err.message);
-    next();
+    return _authCheckFailed(res, 'requireSubIfAuthed', err);
   }
 }
 
@@ -663,10 +681,8 @@ async function requireSubIfAuthed(req, res, next) {
 // successful generation (see _consumeOnboardingFreeGen) so it can't be
 // reused within the same 24h by refreshing/retrying.
 async function requireSubOrOnboardingGen(req, res, next) {
-  const auth = req.headers.authorization || '';
-  if (!auth) { console.log('[middleware] requireSubOrOnboardingGen - no auth, guest pass-through'); return next(); }
-  const user = await getUserFromToken(req);
-  if (!user) return next();
+  const user = await _requireSignedIn(req, res);
+  if (!user) return;
   try {
     const { data, error: dbErr } = await supabaseAdmin
       .from('profiles').select('subscription_status, free_campaign_used_at').eq('id', user.id).maybeSingle();
@@ -686,8 +702,7 @@ async function requireSubOrOnboardingGen(req, res, next) {
     console.log('[middleware] 403 - subscription required for', user.id, '| free_campaign_used_at:', lastUsedAt);
     return res.status(403).json({ error: 'Active subscription required', code: 'SUBSCRIPTION_REQUIRED' });
   } catch (err) {
-    console.warn('[middleware] requireSubOrOnboardingGen threw - fail open:', err.message);
-    next();
+    return _authCheckFailed(res, 'requireSubOrOnboardingGen', err);
   }
 }
 
@@ -3102,6 +3117,7 @@ app.post('/api/generate-ugc-video', requireSubOrFree, paidActions.laneGuard('vid
     });
     console.log('[UGC/video] Submitted:', generationId, '| user:', user.id);
     if (reservation) creditManager.finalizeCreditLog(reservation, 'video_generation', { provider: 'aiml', success: true, route: req.path }).catch(() => {});
+    videoJobs.record(generationId, user.id);
     paidActions.awaitAsync(generationId); // charge settles when the job completes/fails (status endpoint)
     return res.json({ ok: true, videoId: generationId, status: 'processing' });
   } catch (err) {
@@ -3112,11 +3128,16 @@ app.post('/api/generate-ugc-video', requireSubOrFree, paidActions.laneGuard('vid
 });
 
 // â”€â”€ GET /api/ugc-video-status/:videoId â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// Someone else's video job and an unknown id get the same answer, so job
+// ids can't be probed. Checked before the provider is asked anything.
+function _videoNotFound(res) { return res.status(404).json({ error: 'Video not found', code: 'NOT_FOUND' }); }
+
 app.get('/api/ugc-video-status/:videoId', async (req, res) => {
   const user = await getUserFromToken(req);
   if (!user) return res.status(401).json({ error: 'Unauthorized' });
 
   const { videoId } = req.params;
+  if (!(await videoJobs.isOwner(videoId, user.id))) return _videoNotFound(res);
   try {
     const aiml = require('./providers/aimlProvider');
     const { status, videoUrl, failureReason } = await aiml.getVideoStatus(videoId);
@@ -3178,7 +3199,7 @@ app.post('/api/video-ads/generate', requireSubIfAuthed, paidActions.laneGuard('v
       console.log('[VideoAds/image] Generation started:', result.generationId, 'â€” user:', user.id);
       _recordCreativeAsset(user.id, { kind: 'video', title: 'Image-to-video', content: { generationId: result.generationId }, source_route: '/api/video-ads/generate' });
       if (reservation) creditManager.finalizeCreditLog(reservation, 'video_generation', { provider: 'aiml', success: true, route: req.path }).catch(() => {});
-      paidActions.awaitAsync(result.generationId); return res.json({ generationId: result.generationId, status: 'queued' });
+      videoJobs.record(result.generationId, user.id); paidActions.awaitAsync(result.generationId); return res.json({ generationId: result.generationId, status: 'queued' });
     } catch (err) {
       console.error('[VideoAds/image] error:', err.message);
       if (reservation) creditManager.finalizeCreditLog(reservation, 'video_generation', { success: false, error: err.message, route: req.path }).catch(() => {});
@@ -3195,7 +3216,7 @@ app.post('/api/video-ads/generate', requireSubIfAuthed, paidActions.laneGuard('v
       console.log('[VideoAds/script] Generation started:', result.generationId, 'â€” user:', user.id);
       _recordCreativeAsset(user.id, { kind: 'video', title: script.trim().slice(0, 80), content: { generationId: result.generationId, script: script.trim() }, source_route: '/api/video-ads/generate' });
       if (reservation) creditManager.finalizeCreditLog(reservation, 'video_generation', { provider: 'aiml', success: true, route: req.path }).catch(() => {});
-      paidActions.awaitAsync(result.generationId); return res.json({ generationId: result.generationId, status: 'queued' });
+      videoJobs.record(result.generationId, user.id); paidActions.awaitAsync(result.generationId); return res.json({ generationId: result.generationId, status: 'queued' });
     } catch (err) {
       console.error('[VideoAds/script] error:', err.message);
       if (reservation) creditManager.finalizeCreditLog(reservation, 'video_generation', { success: false, error: err.message, route: req.path }).catch(() => {});
@@ -3259,7 +3280,7 @@ Rules:
     console.log('[VideoAds/ai] Generation started:', result.generationId, 'â€” user:', user.id);
     _recordCreativeAsset(user.id, { kind: 'video', title: _product.trim().slice(0, 80), content: { generationId: result.generationId, prompt: vidPrompt }, source_route: '/api/video-ads/generate' });
     if (reservation) creditManager.finalizeCreditLog(reservation, 'video_generation', { provider: 'aiml', success: true, route: req.path }).catch(() => {});
-    paidActions.awaitAsync(result.generationId); return res.json({ generationId: result.generationId, status: 'queued' });
+    videoJobs.record(result.generationId, user.id); paidActions.awaitAsync(result.generationId); return res.json({ generationId: result.generationId, status: 'queued' });
   } catch (err) {
     console.error('[VideoAds/ai] error:', err.message);
     if (reservation) creditManager.finalizeCreditLog(reservation, 'video_generation', { success: false, error: err.message, route: req.path }).catch(() => {});
@@ -3272,6 +3293,7 @@ Rules:
 app.get('/api/video-ads/status/:generationId', async (req, res) => {
   const user = await getUserFromToken(req);
   if (!user) return res.status(401).json({ error: 'Unauthorized' });
+  if (!(await videoJobs.isOwner(req.params.generationId, user.id))) return _videoNotFound(res);
 
   const aiml = require('./providers/aimlProvider');
   if (!aiml.isConfigured()) {
@@ -3393,7 +3415,7 @@ Strict rules:
     console.log('[MotionGraphics] Generation queued:', result.generationId);
     _recordCreativeAsset(user.id, { kind: 'video', title: styleInfo.label, content: { generationId: result.generationId, prompt: videoPrompt }, source_route: '/api/motion-graphics/generate' });
     if (reservation) creditManager.finalizeCreditLog(reservation, 'video_generation', { provider: 'aiml', success: true, route: req.path }).catch(() => {});
-    paidActions.awaitAsync(result.generationId); return res.json({ generationId: result.generationId, status: 'queued' });
+    videoJobs.record(result.generationId, user.id); paidActions.awaitAsync(result.generationId); return res.json({ generationId: result.generationId, status: 'queued' });
   } catch (err) {
     console.error('[MotionGraphics] Generation error:', err.message);
     if (reservation) creditManager.finalizeCreditLog(reservation, 'video_generation', { success: false, error: err.message, route: req.path }).catch(() => {});
@@ -3406,6 +3428,7 @@ Strict rules:
 app.get('/api/motion-graphics/status/:generationId', async (req, res) => {
   const user = await getUserFromToken(req);
   if (!user) return res.status(401).json({ error: 'Unauthorized' });
+  if (!(await videoJobs.isOwner(req.params.generationId, user.id))) return _videoNotFound(res);
 
   const aiml = require('./providers/aimlProvider');
   if (!aiml.isConfigured()) {
