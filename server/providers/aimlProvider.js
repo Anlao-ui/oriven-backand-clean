@@ -5,11 +5,11 @@
 // Swap or extend models by passing options.model to any function.
 //
 // Video (create): POST https://api.aimlapi.com/v2/video/generations
-//   Default model: kling-video/v1/standard/text-to-video
+//   Default model: klingai/v2.5-turbo/pro/text-to-video (services/modelRouter.js)
 //   Response:      { id, status }
 //
 // Video (poll):   GET  https://api.aimlapi.com/v2/video/generations?generation_id={id}
-//   Response:      { id, status, video: { url } }
+//   Response:      { id, status: queued|generating|completed|error, video: { url }, error: { name, message } }
 //
 // Auth:   Authorization: Bearer ${AIML_API_KEY}
 // Key:    ALWAYS from process.env.AIML_API_KEY — never hardcoded or sent to frontend.
@@ -19,7 +19,10 @@
 // mock or sandbox endpoint without touching provider logic — unset in
 // every real environment, so production always uses the real API.
 const AIML_BASE          = process.env.AIML_BASE_OVERRIDE || 'https://api.aimlapi.com';
-const DEFAULT_VID_MODEL  = 'kling-video/v1/standard/text-to-video';
+// Same ids as services/modelRouter.js MODELS.aiml (kept here so this module
+// has no dependency on the router).
+const DEFAULT_VID_MODEL  = 'klingai/v2.5-turbo/pro/text-to-video';
+const DEFAULT_I2V_MODEL  = 'klingai/v2.5-turbo/pro/image-to-video';
 const DEFAULT_TXT_MODEL  = 'gpt-4o';
 
 // ── Key helpers ───────────────────────────────────────────────
@@ -544,14 +547,14 @@ async function editImage(imageBuffer, mimeType, prompt, options = {}) {
 }
 
 // ── Kling duration validator ──────────────────────────────────
-// Kling only accepts 5 or 10 seconds. Anything else returns 400.
-// Snap: ≤7 → "5", >7 → "10" (string, matching docs example).
+// Kling 2.5 Turbo accepts exactly 5 or 10 (an integer — the schema's
+// enum is [5, 10]). Snap: ≤7 → 5, >7 → 10.
 
 function _snapKlingDuration(raw) {
   const n = Number(raw) || 5;
   const snapped = n <= 7 ? 5 : 10;
   if (snapped !== n) console.warn('[AIML] duration', n, '→ snapped to', snapped, '(Kling only accepts 5 or 10)');
-  return String(snapped);
+  return snapped;
 }
 
 // ── Video generation (text-to-video) ─────────────────────────
@@ -588,17 +591,19 @@ async function generateVideo(prompt, options = {}) {
 // options: { model, aspect_ratio, duration, image_end_url }
 // Returns: { generationId: string }
 
+// The image sets the frame (no aspect_ratio in this model's schema); an
+// optional end frame is tail_image_url.
 async function generateVideoFromImage(imageUrl, prompt, options = {}) {
-  const model    = options.model || DEFAULT_VID_MODEL;
+  const model    = options.model || DEFAULT_I2V_MODEL;
   const duration = _snapKlingDuration(options.duration || 5);
   const body     = {
     model,
     prompt:       prompt || '',
     image_url:    imageUrl,
-    aspect_ratio: options.aspect_ratio || '16:9',
     duration,
   };
-  if (options.image_end_url) body.image_end_url = options.image_end_url;
+  const tail = options.tail_image_url || options.image_end_url;
+  if (tail) body.tail_image_url = tail;
 
   const masked = _readRaw().slice(0, 5) + '[...]';
   console.log('[AIML/i2v] → POST /v2/video/generations');
@@ -625,7 +630,7 @@ async function getVideoStatus(generationId) {
                ? 'completed'
                : (raw === 'failed' || raw === 'errored' || raw === 'error')
                ? 'failed'
-               : (raw === 'processing' || raw === 'running' || raw === 'dreaming')
+               : (raw === 'processing' || raw === 'running' || raw === 'dreaming' || raw === 'generating')
                ? 'processing'
                : 'queued';
 

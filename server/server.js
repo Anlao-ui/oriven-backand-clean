@@ -430,6 +430,68 @@ async function _persistGeneratedImage(userId, src) {
   }
 }
 
+// Finished provider videos are copied once into Supabase storage so the
+// campaign keeps a stable link (provider links are temporary). The path is
+// derived from the job id, so repeated status polls and other instances
+// reuse the same file. Videos over the bucket's 15 MB limit, or any storage
+// problem, keep the provider link — the video is never lost because of this.
+const _storedVideos = new Map(); // jobId -> Promise<url>
+const VIDEO_STORE_MAX_BYTES = 15 * 1024 * 1024;
+function _storedVideoUrl(userId, jobId, providerUrl) {
+  if (!providerUrl || !userId || !jobId) return Promise.resolve(providerUrl);
+  if (!supabaseAdmin.storage || typeof supabaseAdmin.storage.from !== 'function') return Promise.resolve(providerUrl);
+  const key = String(jobId);
+  if (_storedVideos.has(key)) return _storedVideos.get(key);
+  const p = (async () => {
+    const path = 'generated/' + userId + '/video-' + key.replace(/[^A-Za-z0-9_-]/g, '').slice(0, 120) + '.mp4';
+    const bucket = supabaseAdmin.storage.from(MANUAL_CREATIVE_BUCKET);
+    const pub = bucket.getPublicUrl(path);
+    const publicUrl = pub && pub.data && pub.data.publicUrl;
+    if (!publicUrl) return providerUrl; // nowhere to serve a stored copy from
+    try {
+      // Already stored (earlier poll, another instance, before a restart)?
+      if (publicUrl) { const head = await fetch(publicUrl, { method: 'HEAD' }); if (head.ok) return publicUrl; }
+      const ctrl = new AbortController(); const t = setTimeout(() => ctrl.abort(), 60000);
+      let buf;
+      try {
+        const r = await fetch(providerUrl, { signal: ctrl.signal });
+        if (!r.ok) throw new Error('download HTTP ' + r.status);
+        const len = Number(r.headers.get('content-length') || 0);
+        if (len > VIDEO_STORE_MAX_BYTES) throw new Error('video is ' + len + ' bytes (limit ' + VIDEO_STORE_MAX_BYTES + ')');
+        buf = Buffer.from(await r.arrayBuffer());
+      } finally { clearTimeout(t); }
+      if (buf.length > VIDEO_STORE_MAX_BYTES) throw new Error('video is ' + buf.length + ' bytes (limit ' + VIDEO_STORE_MAX_BYTES + ')');
+      const { error } = await bucket.upload(path, buf, { contentType: 'video/mp4', upsert: true });
+      if (error) throw new Error(error.message);
+      return publicUrl || providerUrl;
+    } catch (err) {
+      console.warn('[Video] keeping provider link, could not store video:', err.message);
+      _storedVideos.delete(key); // allow a later poll to try again
+      return providerUrl;
+    }
+  })();
+  _storedVideos.set(key, p);
+  if (_storedVideos.size > 2000) _storedVideos.delete(_storedVideos.keys().next().value);
+  return p;
+}
+
+// Plain-language video errors. Provider details stay in the logs.
+function _videoStartError(err) {
+  const aiml = require('./providers/aimlProvider');
+  const c = aiml.classifyError(err).category;
+  if (_isProviderUnavailable(err) || /^account_|provider_server_error|rate_limited|timeout|network|queue_full|spend_limit/.test(c)) {
+    return { status: 503, code: 'PROVIDER_UNAVAILABLE', error: 'Video generation is temporarily unavailable. Please try again in a few minutes.' };
+  }
+  if (c === 'provider_rejected_request') return { status: 502, code: 'VIDEO_REJECTED', error: 'The video service couldn’t accept this request. Try shortening or rewording the ad text.' };
+  return { status: 500, code: 'VIDEO_START_FAILED', error: 'Could not start that video generation right now. Please try again.' };
+}
+function _videoFailureMessage(reason) {
+  const r = String(reason || '');
+  if (/safety|policy|moderat|nsfw|sensitive|risk/i.test(r)) return 'The video service declined this content. Try rewording the ad text.';
+  if (/timeout|timed out/i.test(r)) return 'The video took too long to render. Please try again.';
+  return 'The video couldn’t be rendered. Please try again.';
+}
+
 // â”€â”€ Web generator â€” registered immediately after json middleware â”€â”€
 app.post('/api/generate-web', requireSubIfAuthed, async (req, res) => {
   const {
@@ -3175,7 +3237,8 @@ app.post('/api/generate-ugc-video', requireSubOrFree, paidActions.laneGuard('vid
   } catch (err) {
     console.error('[UGC/video] Error:', err.message);
     if (reservation) creditManager.finalizeCreditLog(reservation, 'video_generation', { success: false, error: err.message, route: req.path }).catch(() => {});
-    return res.status(500).json({ error: 'Could not start that video generation right now. Please try again.' });
+    const e = _videoStartError(err);
+    return res.status(e.status).json({ error: e.error, code: e.code });
   }
 });
 
@@ -3193,13 +3256,17 @@ app.get('/api/ugc-video-status/:videoId', async (req, res) => {
   try {
     const aiml = require('./providers/aimlProvider');
     const { status, videoUrl, failureReason } = await aiml.getVideoStatus(videoId);
+    // "completed" without a link is not a usable result: keep it pending.
+    const done = status === 'completed' && !!videoUrl;
+    const st = status === 'completed' && !videoUrl ? 'processing' : status;
     // Final state settles the video charge: failed → refunded (once).
-    const settled = (status === 'completed' || status === 'failed') ? await paidActions.settleAsync(videoId, status === 'completed', user.id) : null;
+    const settled = (done || status === 'failed') ? await paidActions.settleAsync(videoId, done, user.id) : null;
+    if (status === 'failed') console.warn('[UGC] video failed:', String(videoId).slice(0, 24), '|', String(failureReason || '').slice(0, 200));
     return res.json({
-      status,
-      videoUrl,
+      status:       st,
+      videoUrl:     done ? await _storedVideoUrl(user.id, videoId, videoUrl) : null,
       thumbnailUrl: null,
-      error:        failureReason || null,
+      error:        status === 'failed' ? _videoFailureMessage(failureReason) : null,
       creditsRefunded: !!(settled && settled.refunded),
     });
   } catch (err) {
@@ -3244,9 +3311,8 @@ app.post('/api/video-ads/generate', requireSubIfAuthed, paidActions.laneGuard('v
     console.log('[VideoAds/image] image:', imageUrl.slice(0, 80), '| image2:', imageUrl2 ? imageUrl2.slice(0, 40) : 'none');
     try {
       const result = await aiml.generateVideoFromImage(imageUrl.trim(), vidPrompt, {
-        image_end_url: imageUrl2 ? imageUrl2.trim() : undefined,
+        tail_image_url: imageUrl2 ? imageUrl2.trim() : undefined,
         duration:      normDuration,
-        aspect_ratio:  '16:9',
       });
       console.log('[VideoAds/image] Generation started:', result.generationId, 'â€” user:', user.id);
       _recordCreativeAsset(user.id, { kind: 'video', title: 'Image-to-video', content: { generationId: result.generationId }, source_route: '/api/video-ads/generate' });
@@ -3358,7 +3424,7 @@ app.get('/api/video-ads/status/:generationId', async (req, res) => {
     const settled = (result.status === 'completed' || result.status === 'failed') ? await paidActions.settleAsync(req.params.generationId, result.status === 'completed', user.id) : null;
     return res.json({
       status:        result.status,
-      videoUrl:      result.videoUrl,
+      videoUrl:      result.status === 'completed' && result.videoUrl ? await _storedVideoUrl(user.id, req.params.generationId, result.videoUrl) : result.videoUrl,
       failureReason: result.failureReason,
       creditsRefunded: !!(settled && settled.refunded),
     });

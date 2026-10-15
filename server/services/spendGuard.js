@@ -27,9 +27,10 @@ const PRICES = {
   'Qwen3-Coder-480B-A35B-Instruct': { in: 0.5, out: 2 },     // estimate — not verified on the price page
   // Per-call estimates where tokens aren't reported: GPT-Image 2.5 is
   // $39 per 1M output (image) tokens (~1-4k tokens per image → $0.04-0.16);
-  // Kling v1.6 Pro is $0.1274 per second (5s clip).
+  // Kling 2.5 Turbo Pro is $0.091 per second (5s clip; 10s clips cost double).
   'openai/gpt-image-2.5-sunburst': { perCall: 0.08 },
-  'kling-video/v1.6/pro/text-to-video': { perCall: 0.637 },
+  'klingai/v2.5-turbo/pro/text-to-video': { perCall: 0.455 },
+  'klingai/v2.5-turbo/pro/image-to-video': { perCall: 0.455 },
 };
 // When a text call reports no usage, assume this many tokens.
 const FALLBACK_TOKENS = { in: 4000, out: 2000 };

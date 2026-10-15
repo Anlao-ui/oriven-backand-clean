@@ -30,7 +30,15 @@ const MODELS = {
     // Verified n must be 1 for generation, matching every existing caller
     // (none ever requests more than one image).
     image: 'openai/gpt-image-2.5-sunburst',       // all image generation via AIML proxy
-    video: 'kling-video/v1.6/pro/text-to-video',  // video ads, motion graphics, UGC
+    // Kling 2.5 Turbo Pro via AIML (verified against GET /models and the
+    // model's docs-json schema, 2026-10-15). The previous ids
+    // (kling-video/v1.6/pro/text-to-video, kling-video/v1/standard/…) are no
+    // longer offered, so every video submission was rejected. Request shape:
+    // prompt, aspect_ratio 16:9|9:16|1:1, duration integer 5|10.
+    video: 'klingai/v2.5-turbo/pro/text-to-video',   // video ads, motion graphics, UGC
+    // Image-to-video sibling: image_url (+ optional tail_image_url), no
+    // aspect_ratio (taken from the image), duration integer 5|10.
+    videoFromImage: 'klingai/v2.5-turbo/pro/image-to-video',
 
     // GPT-6 Astra (configuration-ready, NOT active) — confirmed identifier
     // per AIML API docs is 'openai/gpt-6-astra' via this same

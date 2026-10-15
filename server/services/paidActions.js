@@ -55,6 +55,9 @@ function laneCapacity(lane) {
   return 1;
 }
 const ASYNC_STALE_MS = 3 * 60 * 60 * 1000; // provider video jobs finish well within this
+// A job the provider still reports as queued/rendering after this long is
+// treated as failed and refunded (it would otherwise be charged forever).
+const ASYNC_GIVE_UP_MS = 6 * 60 * 60 * 1000;
 const KEY_MEMORY_MS = 24 * 60 * 60 * 1000;  // duplicate-key memory window
 const SETTLE_REFUND_TIMEOUT_MS = 8000;
 
@@ -439,7 +442,7 @@ async function sweep({ getVideoStatus } = {}) {
     let st = null;
     try { st = getVideoStatus ? (await getVideoStatus(jobId)).status : null; } catch (_) {}
     if (st === 'completed') await settleAsync(jobId, true);
-    else if (st === 'failed' || st == null) await settleAsync(jobId, false);
+    else if (st === 'failed' || st == null || now - e.at >= ASYNC_GIVE_UP_MS) await settleAsync(jobId, false);
   }
   if (!_dbUsable()) return;
   const staleCut = new Date(now - DEFAULT_STALE_MS).toISOString();
@@ -453,6 +456,7 @@ async function sweep({ getVideoStatus } = {}) {
     try { st = getVideoStatus ? (await getVideoStatus(row.async_job_id)).status : null; } catch (_) {}
     if (st === 'completed') await _settleRow(row, 'succeeded');
     else if (st === 'failed' || st == null) await _settleRow(row, 'refund', 'async_job_abandoned');
+    else if (now - new Date(row.created_at).getTime() >= ASYNC_GIVE_UP_MS) await _settleRow(row, 'refund', 'async_job_timed_out');
   }
 }
 

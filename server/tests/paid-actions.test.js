@@ -140,7 +140,8 @@ const fakeProvider = {
   editImage: (b, m, prompt) => provCall('edit', { prompt }),
   generateVideo: (prompt, opts) => provCall('video', { prompt }),
   generateVideoFromImage: (url, prompt) => provCall('video', { prompt }),
-  getVideoStatus: async (id) => ({ status: prov.videoStatus[id] || 'processing', videoUrl: null, failureReason: null }),
+  // A completed AIML job always carries its link (video.url is required in the schema).
+  getVideoStatus: async (id) => ({ status: prov.videoStatus[id] || 'processing', videoUrl: prov.videoStatus[id] === 'completed' ? 'https://img.test/' + id + '.mp4' : null, failureReason: null }),
 };
 const RESEARCH_JSON = JSON.stringify({ summary: 'A focused market.', market: { name: 'Coffee subscriptions', characteristics: ['recurring'] }, competitors: [{ id: 'c1', name: 'Brand A', positioning: 'premium' }], customerSignals: [{ id: 's1', type: 'need', text: 'convenience' }], advertisingPatterns: [], trends: [], opportunities: [{ id: 'o1', opportunity: 'Bundles', evidence: 'Common pattern.' }], confidence: 'moderate' });
 const PKG_JSON = JSON.stringify({ googleAds: { headlines: ['A', 'B', 'C'], descriptions: ['d'] }, strategy: { angle: 'x' }, visualConcepts: [] });
