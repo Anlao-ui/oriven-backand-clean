@@ -240,9 +240,9 @@ function classifyError(err) {
 
 // Every provider call goes through here; failures are classified once and
 // reported to the error hook (server.js → aiUsage.noteProviderError).
-async function _send(method, path, makeOpts, tag) {
+async function _send(method, path, makeOpts, tag, timeoutOverride) {
   try {
-    return await _sendRaw(method, path, makeOpts, tag);
+    return await _sendRaw(method, path, makeOpts, tag, timeoutOverride);
   } catch (err) {
     if (typeof _hooks.error === 'function') {
       try { _hooks.error(Object.assign({ method, path }, classifyError(err))); } catch (_) {}
@@ -251,10 +251,12 @@ async function _send(method, path, makeOpts, tag) {
   }
 }
 
-async function _sendRaw(method, path, makeOpts, tag) {
+// timeoutOverride: optional per-call limit (ms) for callers that must answer
+// within a proxy deadline (e.g. Research, ~100 s at Render's edge).
+async function _sendRaw(method, path, makeOpts, tag, timeoutOverride) {
   if (method !== 'GET' && typeof _hooks.before === 'function') _hooks.before({ method, path });
   const url = `${AIML_BASE}${path}`;
-  const timeoutMs = _timeoutFor(method, path);
+  const timeoutMs = (timeoutOverride > 0 ? timeoutOverride : 0) || _timeoutFor(method, path);
   await _acquireSlot();
   let outcome = { ok: false, providerAccount: false, attempts: 0 };
   try {
@@ -321,13 +323,13 @@ async function _sendRaw(method, path, makeOpts, tag) {
   }
 }
 
-async function _request(method, path, body) {
+async function _request(method, path, body, timeoutMs) {
   const key = _key();
   return _send(method, path, () => {
     const opts = { method, headers: { 'Authorization': `Bearer ${key}`, 'Content-Type': 'application/json' } };
     if (body !== undefined) opts.body = JSON.stringify(body);
     return opts;
-  });
+  }, undefined, timeoutMs);
 }
 
 // ── Friendly error mapping ────────────────────────────────────
@@ -409,7 +411,7 @@ async function generateText(systemOrMessages, userPrompt, options = {}) {
   const masked = _readRaw().slice(0, 5) + '[...]';
   console.log('[AIML/txt] → POST /v1/chat/completions | model:', model, '| key prefix:', masked);
 
-  const data = await _request('POST', '/v1/chat/completions', body);
+  const data = await _request('POST', '/v1/chat/completions', body, options.timeoutMs);
   // options.returnFull: the entire raw response body, needed for
   // web-search-native models — citations/search_results (real source
   // metadata: title/url/date) come back as TOP-LEVEL siblings of

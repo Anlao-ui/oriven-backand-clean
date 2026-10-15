@@ -100,16 +100,19 @@ function normalizeUrl(rawUrl) {
 // engine treats a real failure as "live web retrieval unavailable right
 // now" and falls back to the existing honest synthesis-only path,
 // never a crash, never fabricated data.
-async function search(query) {
+// opts: { system, timeoutMs } — what to look for, and a time limit so the
+// whole Research request stays inside the proxy deadline.
+async function search(query, opts) {
+  opts = opts || {};
   const q = String(query || '').trim().slice(0, MAX_QUERY_LEN);
   if (!q) return { ok: false, reason: 'empty_query' };
   try {
     const route = modelRouter.routeTask('research-web-search');
-    const sys = 'Answer using real web search grounding. Be concise and factual.';
+    const sys = opts.system || 'Answer using real web search grounding. Be concise and factual.';
     const p = aiUsage.prepareText({ task: 'research-web-search', model: route.model, system: sys, user: q });
     let data;
     try {
-      data = await aimlProvider.generateText(p.system, p.user, { model: route.model, max_tokens: 900, returnFull: true });
+      data = await aimlProvider.generateText(p.system, p.user, { model: route.model, max_tokens: 900, returnFull: true, timeoutMs: opts.timeoutMs });
     } catch (err) {
       aiUsage.record({ task: 'research-web-search', model: route.model, promptChars: p.promptChars, success: false, reason: 'provider_error' });
       throw err;
