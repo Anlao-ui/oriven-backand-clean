@@ -28,6 +28,9 @@ const realFetch = globalThis.fetch;
 const blocked = [];
 globalThis.fetch = (url, opts) => {
   const u = String(url && url.url || url);
+  // The mocked image provider's CDN (generated images are downloaded once to be
+  // stored; storage is disabled below, so the provider URL is kept).
+  if (u === 'https://img.test/x.png') return Promise.resolve(new Response(Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==', 'base64'), { status: 200, headers: { 'content-type': 'image/png' } }));
   if (!new RegExp(`^http://(127\\.0\\.0\\.1|localhost):${PORT}/`).test(u)) { blocked.push(u); return Promise.reject(new Error('network blocked in test: ' + u)); }
   return realFetch(url, opts);
 };

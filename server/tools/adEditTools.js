@@ -226,4 +226,50 @@ toolRouter.register({
   formatResult: (execResult) => `Done. Showing version ${execResult.idx + 1}.`
 });
 
+// ── edit_campaign_settings — the complete campaign, not just the copy ──
+// Countries, languages, ages, budget, objective, placements, destination,
+// tracking, conversion event, special ad categories, Google negative
+// keywords / callouts / sitelinks / headlines, extra ad sets. Each change
+// is validated by services/campaignSpec.applyChanges (unrecognised or
+// invalid values are refused with the reason, never coerced into something
+// else); dependent settings follow (a new objective brings its own
+// optimisation goal, bidding and conversion requirements). The updated
+// package goes back to the frontend, which saves it; the campaign is
+// re-validated with the user's real account facts before every publish.
+const campaignSpec = require('../services/campaignSpec');
+
+toolRouter.register({
+  name: 'edit_campaign_settings',
+  description: "Changes campaign SETTINGS (not ad copy wording) on the campaign the user ALREADY has open in the ad editing workspace: target countries, languages, age range, daily budget, objective (Sales/Leads/Traffic/Awareness), Meta placements, destination URL, tracking (UTM) parameters, conversion event, Meta special ad category declaration, Google negative keywords, callouts, sitelinks (text + URL), extra Google headlines/descriptions, and adding or removing an ad set/ad group with its own age range. Put only the fields the user asked to change in `changes`. Use ISO country codes or country names, ISO language codes or names.",
+  params: '{ changes: { countries?: string[], languages?: string[], ageMin?: number, ageMax?: number, budget?: number, goal?: "Sales"|"Leads"|"Traffic"|"Awareness", placement?: "automatic"|"instagram_only"|"facebook_only", destinationUrl?: string, utm?: { source?: string, medium?: string, campaign?: string, content?: string }, conversionEvent?: string, specialAdCategories?: string[] (use [] or ["NONE"] for none), negativeKeywords?: string[], callouts?: string[], sitelink?: { text: string, url: string }, headlines?: string[], replaceHeadlines?: boolean, descriptions?: string[], addAdGroup?: { name?: string, ageMin?: number, ageMax?: number }, removeAdGroup?: number } }',
+  requiresConfirmation: false,
+  resolve: async (params, ctx) => {
+    const pkg = _currentPkg(ctx);
+    if (!pkg) return NO_CAMPAIGN;
+    const platform = pkg.platform || (ctx.currentCampaign && ctx.currentCampaign.platform);
+    if (!campaignSpec.PLATFORMS.includes(platform)) return { unsupported: "I can't tell which ad platform this campaign is for." };
+    const changes = params && typeof params.changes === 'object' && params.changes ? params.changes : params;
+    if (!changes || !Object.keys(changes).length) return { needsClarification: 'Which setting would you like to change?' };
+    const r = campaignSpec.applyChanges(pkg, platform, changes);
+    if (!r.applied.length) return { needsClarification: r.rejected.map((x) => x.reason).join(' ') || "I couldn't apply that change." };
+    return { platform, pkg: r.pkg, applied: r.applied, rejected: r.rejected };
+  },
+  execute: async (resolved, ctx) => {
+    let issues = [], spec = null;
+    try {
+      const sctx = await campaignSpec.loadContext(ctx.user, resolved.platform);
+      spec = campaignSpec.buildSpec(resolved.pkg, resolved.platform, sctx);
+      issues = campaignSpec.validate(spec, sctx);
+    } catch (err) { console.warn('[edit_campaign_settings] validation skipped:', err.message); }
+    return { platform: resolved.platform, pkg: resolved.pkg, spec, issues, applied: resolved.applied, rejected: resolved.rejected };
+  },
+  formatSummary: (r) => 'Update campaign settings: ' + r.applied.map((a) => a.label).join('; '),
+  formatResult: (x) => {
+    const errors = (x.issues || []).filter((i) => i.level === 'error');
+    return 'Done. ' + x.applied.map((a) => a.label).join('; ') + '.'
+      + (x.rejected.length ? ' Not changed: ' + x.rejected.map((r) => r.reason).join(' ') : '')
+      + (errors.length ? ' Still needed before publishing: ' + errors.map((e) => e.message).join(' ') : ' The campaign passes all publishing checks.');
+  },
+});
+
 module.exports = {};
