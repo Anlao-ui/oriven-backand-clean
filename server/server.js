@@ -7126,6 +7126,13 @@ const _publishRoutes = require('./routes/publishRoutes')(app, {
 });
 require('./services/campaignSpec').setContextLoader(_publishRoutes.loadContext);
 
+// Deployed version, for deploy verification. Render sets RENDER_GIT_COMMIT
+// on every deploy; nothing else is exposed (the repository is public).
+const _BOOTED_AT = new Date().toISOString();
+app.get('/api/version', function(req, res) {
+  res.set('Cache-Control', 'no-store');
+  res.json({ commit: (process.env.RENDER_GIT_COMMIT || 'local').slice(0, 40), startedAt: _BOOTED_AT });
+});
 app.get('/signup',     function(req, res) { res.sendFile(path.resolve(LOCAL_FRONTEND_DIR, 'index.html')); });
 app.get('/login',      function(req, res) { res.sendFile(path.resolve(LOCAL_FRONTEND_DIR, 'index.html')); });
 app.get('/plan',       function(req, res) { res.redirect(302, '/app'); });
