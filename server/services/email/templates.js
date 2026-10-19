@@ -37,11 +37,11 @@ const fmt = (n) => Number(n).toLocaleString('en-US'); // 1000 → "1,000"
 // ── Plan facts (single source for every email) ──────────────────────
 const PLAN_INTRO = {
   starter: { name: 'Starter', price: '9.95', credits: 1000,
-    unlocks: ['Research: investigate your market, competitors and audience', 'Autopilot: rules that watch your Meta and Google campaigns'] },
+    unlocks: ['Research: investigate your market, competitors and audience', 'Automations: schedule campaigns and set rules that pause, resume or adjust them, or ask you first'] },
   creator: { name: 'Creator', price: '19.95', credits: 2500,
-    unlocks: ['Everything in Starter: Research and Autopilot', 'Oriven Chat, your advertising assistant inside the app'] },
+    unlocks: ['Everything in Starter: Research and Automations', 'Oriven Chat, your advertising assistant inside the app'] },
   professional: { name: 'Professional', price: '34.95', credits: 4000,
-    unlocks: ['Everything in Creator: Research, Autopilot and Oriven Chat', 'Notifications and Priority Support'] },
+    unlocks: ['Everything in Creator: Research, Automations and Oriven Chat', 'Notifications and Priority Support'] },
 };
 const FREE = { name: 'Free', creditsPerDay: 10 };
 const planOf = (k) => PLAN_INTRO[k] || null;
@@ -156,6 +156,27 @@ const WHY = {
 };
 
 const TEMPLATES = {
+  // Automations — one grouped account-activity email per run (service: it
+  // reports changes made to the user's own ad accounts). Sent only when the
+  // user has automation emails on (Automations → Settings); the footer links
+  // there and to a one-click "turn off automation emails".
+  automation_update(d, ctx) {
+    const items = (d.items || []).slice(0, 10);
+    const more = Math.max(0, (d.count || items.length) - items.length);
+    const list = items.map((i) => `<tr><td style="padding:10px 0;border-bottom:1px solid ${C.line};font-family:${SANS};font-size:15px;line-height:1.5;color:${C.body}"><strong style="color:${C.ink}">${esc(i.title)}</strong>${i.detail ? `<br><span style="color:${C.muted};font-size:14px">${esc(i.detail)}</span>` : ''}</td></tr>`).join('');
+    const body =
+      p(d.count === 1 ? 'An automation in your OrivenAI account needs your attention or has just acted:' : `${d.count} updates from the automations in your OrivenAI account:`) +
+      `<table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="margin:0 0 8px">${list}</table>` +
+      (more ? small(`And ${more} more in Automations → Activity.`) : '') +
+      button('Open Automations', d.appUrl || ctx.appUrl) +
+      small(`You get these emails because automation emails are on. ${d.settingsUrl ? link('Change what you receive', d.settingsUrl) : ''}${d.offUrl ? ' · ' + link('Turn off automation emails', d.offUrl) : ''}`);
+    const subject = d.subject || (d.count === 1 ? (items[0] && items[0].title) || 'Automation update' : `${d.count} automation updates`);
+    return make({ category: 'service', subject: String(subject).slice(0, 120), eyebrow: 'Automations', heading: d.count === 1 ? 'Automation update' : 'Automation updates',
+      preheader: items.map((i) => i.title).join(' · ').slice(0, 140) || 'Updates from the automations in your OrivenAI account.', body, ctx, why: 'You’re receiving this because automations in your OrivenAI account have automation emails turned on.',
+      text: (d.count === 1 ? 'An automation in your OrivenAI account:\n' : `${d.count} automation updates:\n`) + items.map((i) => `- ${i.title}${i.detail ? ': ' + i.detail : ''}`).join('\n') + (more ? `\n…and ${more} more in Automations → Activity.` : '') +
+        `\n\nOpen Automations: ${d.appUrl || ctx.appUrl}` + (d.offUrl ? `\nTurn off automation emails: ${d.offUrl}` : '') });
+  },
+
   // Email address verification (transactional — sent right after signup and
   // on "resend", regardless of marketing consent). services/email/verification.js
   verify_email(d, ctx) {
@@ -279,7 +300,7 @@ const TEMPLATES = {
       p(`You can cancel anytime in Settings → Subscription. If Free works for you, there’s nothing you need to do.`, 'font-size:15px') +
       button('Compare plans', plans);
     return make({ category: 'marketing', subject: `What ${plan.name} adds to OrivenAI`, eyebrow: 'Plans', heading: `What ${plan.name} adds`,
-      preheader: `${plan.name} is €${plan.price}/month: ${fmt(plan.credits)} credits, Research and Autopilot.`, body, ctx, why: WHY.product,
+      preheader: `${plan.name} is €${plan.price}/month: ${fmt(plan.credits)} credits, Research and Automations.`, body, ctx, why: WHY.product,
       text: `What ${plan.name} adds\n\nYou’ve tried to use ${what} a few times on the Free plan.\n\nFree (€0): ${FREE.creditsPerDay} credits a day, one campaign build every 24 hours.\n${plan.name} (€${plan.price}/month):\n- ${planList(plan).join('\n- ')}\n\nCancel anytime in Settings → Subscription. If Free works for you, there’s nothing you need to do.\n\nCompare plans: ${plans}` });
   },
 
@@ -294,14 +315,14 @@ const TEMPLATES = {
       steps([
         ['Run a Research', 'Investigate your market, competitors and audience. The results become a Market Map with sources.'],
         ['Turn it into an ad', 'Use your findings in Create as the brief, then review the draft in Launch.'],
-        ['Let Autopilot watch', 'Once a Meta or Google campaign is live, add rules that pause, resume or adjust budgets, or ask you first.'],
+        ['Let Automations help', 'Once a campaign is live, schedule when it runs, or add rules that pause, resume or adjust its budget within limits you set, or ask you first.'],
       ]) +
       (chat ? p(`Stuck at any point? Ask Oriven Chat inside the app; it knows which page you’re on.`, 'font-size:15px') : '') +
       button('Open OrivenAI', ctx.appUrl) +
       small(`Manage or cancel your subscription anytime in Settings → Subscription.`);
     return make({ category: 'service', subject: `Your ${plan.name} plan is active`, eyebrow: 'Plan active', heading: `Welcome to ${plan.name}`,
-      preheader: `${fmt(plan.credits)} credits a month, plus Research and Autopilot. Here’s a good way to start.`, body, ctx, why: `You’re receiving this because you subscribed to OrivenAI ${plan.name}.`,
-      text: `Welcome to ${plan.name}. Your plan is active.\n\nYour plan includes:\n- ${planList(plan).join('\n- ')}\n\nA good way to start:\n1. Run a Research on your market, competitors and audience.\n2. Use the findings in Create as the brief, then review the draft in Launch.\n3. Once a Meta or Google campaign is live, add Autopilot rules.\n\nOpen OrivenAI: ${ctx.appUrl}\nManage or cancel your subscription anytime in Settings → Subscription.` });
+      preheader: `${fmt(plan.credits)} credits a month, plus Research and Automations. Here’s a good way to start.`, body, ctx, why: `You’re receiving this because you subscribed to OrivenAI ${plan.name}.`,
+      text: `Welcome to ${plan.name}. Your plan is active.\n\nYour plan includes:\n- ${planList(plan).join('\n- ')}\n\nA good way to start:\n1. Run a Research on your market, competitors and audience.\n2. Use the findings in Create as the brief, then review the draft in Launch.\n3. Once a campaign is live, add an automation in Automations.\n\nOpen OrivenAI: ${ctx.appUrl}\nManage or cancel your subscription anytime in Settings → Subscription.` });
   },
 };
 

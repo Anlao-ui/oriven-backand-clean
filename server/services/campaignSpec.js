@@ -188,12 +188,19 @@ const TIKTOK_AGE_GROUPS = [['AGE_18_24', 18, 24], ['AGE_25_34', 25, 34], ['AGE_3
 // What each platform/goal combination needs and whether OrivenAI can
 // publish it today. An unsupported combination is BLOCKED with a reason —
 // never swapped for a different objective.
+// Publishable platform capabilities — read from services/createCompat.js,
+// the same schema Create (frontend) and /api/ai/create-ad (before charging)
+// use, so Create, generation and Launch can never disagree.
+const createCompat = require('./createCompat');
+const _tiktokBlocked = {};
+for (const g of GOALS) if (!createCompat.typeInfo('tiktok').goals.includes(g)) {
+  const r = createCompat.REASONS['tiktok_goal_' + g];
+  _tiktokBlocked[g] = r ? (r.message + ' ' + r.suggestion).trim() : 'This goal can’t be published to TikTok by OrivenAI yet.';
+}
 const SUPPORT = {
-  meta: { goals: GOALS, video: false },
-  google: { types: ['SEARCH', 'PERFORMANCE_MAX', 'DEMAND_GEN'], goals: GOALS },
-  tiktok: { goals: ['Traffic', 'Awareness'], videoRequired: true,
-    blockedGoals: { Sales: 'TikTok Sales campaigns need a TikTok Pixel and a website conversion event, which OrivenAI does not configure yet. Use Traffic or Awareness on TikTok, or run Sales on Meta or Google.',
-      Leads: 'TikTok Lead Generation uses TikTok instant forms, which OrivenAI does not support yet. Use Traffic or Awareness on TikTok, or run Leads on Meta or Google.' } },
+  meta: { goals: GOALS, video: createCompat.platformSupportsFormat('meta', 'video') },
+  google: { types: createCompat.typeKeys('google'), goals: GOALS },
+  tiktok: { goals: createCompat.typeInfo('tiktok').goals.slice(), videoRequired: !createCompat.platformSupportsFormat('tiktok', 'image'), blockedGoals: _tiktokBlocked },
   pinterest: { goals: GOALS },
 };
 
@@ -278,6 +285,11 @@ function videoOf(pkg, platform) {
   const o = pkg[PK[platform]] || {};
   const v = (Array.isArray(pkg.videoAssets) && pkg.videoAssets.find((x) => x && x.videoUrl)) || null;
   return o.videoUrl || (v && v.videoUrl) || null;
+}
+// A video Create submitted but that hasn't finished rendering (Create keeps
+// it in pkg.videoJobs until the file exists, then moves it to videoAssets).
+function videoPendingOf(pkg) {
+  return Array.isArray(pkg.videoJobs) && pkg.videoJobs.some((j) => j && (j.videoId || j.ref));
 }
 
 // Copy variants per ad, from pkg.concepts first (one per concept, cycled),
@@ -406,7 +418,15 @@ function buildSpec(pkg, platform, ctx) {
   if (platform === 'meta') {
     const placement = ['instagram_only', 'facebook_only'].includes(o.placement) ? o.placement : 'automatic';
     src.placement = o.placement ? 'user' : 'auto';
-    const cfg = campaignGoals.getMetaObjective(goal, o.objective);
+    // Extra Meta objectives older Create screens offered (Engagement, App
+    // Promotion) can't be published: Engagement needs an on-post
+    // destination and App Promotion an app id, neither of which OrivenAI
+    // sends. Such a package publishes with the standard objective for its
+    // goal — and the review says so (validate: objective_unsupported).
+    const metaObjKey = o.objective ? campaignGoals.META_OBJECTIVE_MAP[String(o.objective).trim().toLowerCase().replace(/\s+/g, '_')] : null;
+    const metaObjUnsupported = !!(o.objective && metaObjKey && !GOALS.includes(metaObjKey));
+    if (metaObjUnsupported) spec.unsupportedObjective = String(o.objective);
+    const cfg = campaignGoals.getMetaObjective(goal, metaObjUnsupported ? null : o.objective);
     const isDefaultAge = ageMin <= 25 && ageMax === 65;
     const cats = Array.isArray(ov.specialAdCategories) ? ov.specialAdCategories.filter((c) => META_SPECIAL_CATEGORIES.includes(c)) : null;
     src.specialAdCategories = cats ? 'user' : 'missing';
@@ -504,7 +524,14 @@ function buildSpec(pkg, platform, ctx) {
     spec.targeting.placementLabel = 'TikTok feed';
     spec.targeting.ageGroups = tiktokAgeGroups(ageMin, ageMax);
     spec.identity = { identityId: opt.identityId || null, identityType: opt.identityType || null, displayName: opt.identityName || null };
-    spec.creative = { format: video ? 'VIDEO' : 'IMAGE', videoUrl: video, coverImageUrl: images.primary };
+    // Cover image: a generated/attached campaign image when there is one;
+    // otherwise (every video made in Create — video mode never produces an
+    // image) the publish route uses the cover frame TikTok itself extracts
+    // from the uploaded video (/file/video/ad/info/ → video_cover_url).
+    spec.creative = { format: video ? 'VIDEO' : 'IMAGE', videoUrl: video, coverImageUrl: images.primary, coverFromVideo: !!(video && !images.primary), videoPending: !video && videoPendingOf(pkg) };
+    // Video Views / App Promotion were offered by older Create screens but
+    // never wired into this spec (it always used the goal's objective).
+    if (o.objective) spec.unsupportedObjective = String(o.objective);
     spec.adGroups.forEach((grp) => grp.ads.forEach((ad) => { ad.adText = (ad.primaryText || ad.headline || name).replace(/\s+/g, ' ').trim().slice(0, 100); }));
   }
 
@@ -524,8 +551,9 @@ function buildSpec(pkg, platform, ctx) {
     spec.tracking.needsConversion = needsConversion;
     spec.tracking.conversionTagId = needsConversion ? tagId : null;
     spec.tracking.conversionEvent = needsConversion ? evt : null;
+    spec.pinterestObjective = (o.objective && /video.?completion/i.test(String(o.objective))) ? 'Video Completion' : null;
     spec.pin = { title: _str(o.title || (variants[0] && variants[0].headline) || name).slice(0, 100), description: _str(o.description || '').slice(0, 800), altText: _str(o.altText || '').slice(0, 500) };
-    spec.creative = { format: (o.creativeType === 'video' && video) ? 'VIDEO' : 'IMAGE', imageUrl: images.primary, images: images.all, videoUrl: video };
+    spec.creative = { format: (o.creativeType === 'video' && video) ? 'VIDEO' : 'IMAGE', imageUrl: images.primary, images: images.all, videoUrl: video, wantsVideo: o.creativeType === 'video', videoPending: !video && videoPendingOf(pkg) };
   }
 
   return spec;
@@ -618,6 +646,7 @@ function validate(spec, ctx) {
       else if (opt.pixels && !opt.pixels.some((x) => x.id === spec.tracking.pixelId)) add('error', 'tracking.pixelId', 'pixel_unknown', 'The selected Meta Pixel isn’t on this ad account anymore. Choose another one.');
     }
     if (!spec.identity.pageId) add('error', 'identity.pageId', 'page_missing', 'Connect a Facebook Page in Connections. Meta ads run under a Page.');
+    if (spec.unsupportedObjective) add('warning', 'campaign.objective', 'objective_unsupported', 'This campaign was made with the “' + spec.unsupportedObjective + '” objective, which OrivenAI can’t publish to Meta. It will be published with the standard ' + goal + ' objective.');
     if (spec.targeting.placement === 'instagram_only' && opt.instagramChecked && !spec.identity.instagramUserId) add('error', 'identity.instagram', 'instagram_missing', 'Instagram-only ads need an Instagram account linked to your Facebook Page. Link one in Meta Business Settings, or use Facebook and Instagram placements.');
     if (!spec.creative.imageUrl) add('error', 'creative.image', 'image_missing', 'Add an image. Meta image ads need one.');
     spec.adGroups.forEach((grp, i) => grp.ads.forEach((ad, j) => {
@@ -669,8 +698,15 @@ function validate(spec, ctx) {
   if (p === 'tiktok') {
     const blocked = SUPPORT.tiktok.blockedGoals[goal];
     if (blocked) add('error', 'campaign.goal', 'tiktok_goal', blocked);
-    if (spec.creative.format !== 'VIDEO') add('error', 'creative.video', 'tiktok_video', 'TikTok feed ads are videos. Add a video to this campaign (upload one, or generate one) before publishing to TikTok. Single-image ads aren’t shown in the TikTok feed.');
-    if (spec.creative.format === 'VIDEO' && !spec.creative.coverImageUrl) add('error', 'creative.cover', 'tiktok_cover', 'TikTok video ads need a cover image. Add an image to this campaign.');
+    if (spec.creative.format !== 'VIDEO') {
+      if (spec.creative.videoPending) add('error', 'creative.video', 'video_pending', 'The video for this campaign is still being generated. It can be published once the video is ready.');
+      else add('error', 'creative.video', 'tiktok_video', 'TikTok feed ads are videos. Add a video to this campaign (upload one, or generate one) before publishing to TikTok. Single-image ads aren’t shown in the TikTok feed.');
+    } else if (!/^https?:\/\//i.test(String(spec.creative.videoUrl || ''))) add('error', 'creative.video', 'video_not_online', 'The video isn’t stored online, so TikTok can’t fetch it. Generate or upload the video again.');
+    if (spec.creative.format === 'VIDEO' && !spec.creative.coverImageUrl) {
+      if (spec.creative.coverFromVideo) add('info', 'creative.cover', 'tiktok_cover_auto', 'No cover image was added, so OrivenAI uses the cover frame TikTok takes from your video. Add an image to this campaign if you want a specific cover.');
+      else add('error', 'creative.cover', 'tiktok_cover', 'TikTok video ads need a cover image. Add an image to this campaign.');
+    }
+    if (spec.unsupportedObjective) add('warning', 'campaign.objective', 'objective_unsupported', 'This campaign was made with the “' + spec.unsupportedObjective + '” objective, which OrivenAI can’t publish to TikTok. It will be published with the standard ' + goal + ' objective.');
     if (!spec.identity.identityId) add('error', 'identity.tiktok', 'tiktok_identity', 'Choose the TikTok account your ads run under, in Connections → TikTok Ads.');
     if (spec.identity.identityType === 'BC_AUTH_TT') add('error', 'identity.tiktok', 'tiktok_identity_bc', 'This TikTok identity needs Business Center authorisation, which OrivenAI doesn’t support yet. Choose another linked TikTok account.');
     spec.adGroups.forEach((grp, i) => grp.ads.forEach((ad, j) => { if (!ad.adText) add('error', `adGroups[${i}].ads[${j}].adText`, 'copy_missing', 'Ad ' + (j + 1) + ' has no ad text.'); }));
@@ -681,16 +717,106 @@ function validate(spec, ctx) {
       if (opt.conversionTags && !opt.conversionTags.length) add('error', 'tracking.conversionTagId', 'tag_none', 'Pinterest ' + goal + ' campaigns optimise for conversions and need a Pinterest Tag. Add one in Pinterest Ads Manager, or choose Awareness or Traffic.');
       else if (!spec.tracking.conversionTagId) add('error', 'tracking.conversionTagId', 'tag_choose', opt.conversionTags ? 'Choose which Pinterest Tag measures conversions.' : 'OrivenAI couldn’t check your Pinterest Tags. Reconnect Pinterest and try again.');
     }
+    if (spec.creative.wantsVideo && spec.creative.format !== 'VIDEO') {
+      if (spec.creative.videoPending) add('error', 'creative.video', 'video_pending', 'This Pin is set to video and the video is still being generated. It can be published once the video is ready.');
+      else if (spec.creative.imageUrl) add('warning', 'creative.video', 'pin_video_missing', 'This Pin is set to video, but the campaign has no video. It will be published as an image Pin.');
+    }
+    if (spec.creative.format === 'VIDEO' && !/^https?:\/\//i.test(String(spec.creative.videoUrl || ''))) add('error', 'creative.video', 'video_not_online', 'The video isn’t stored online, so Pinterest can’t fetch it. Generate or upload the video again.');
     if (spec.creative.format === 'IMAGE' && !spec.creative.imageUrl) add('error', 'creative.image', 'image_missing', 'Add an image. Pinterest ads are Pins.');
     if (!spec.pin.title) add('error', 'pin.title', 'pin_title', 'The Pin needs a title.');
     if (!spec.targeting.languages.length) add('info', 'targeting.languages', 'pinterest_language', 'Pinterest shows the ad to everyone in the chosen countries; OrivenAI doesn’t send a language restriction to Pinterest.');
     else add('info', 'targeting.languages', 'pinterest_language', 'Pinterest language targeting isn’t sent by OrivenAI; your ad reaches everyone in the chosen countries.');
   }
 
+  // Shared Create/Launch compatibility rules (services/createCompat.js) —
+  // the same check /api/ai/create-ad runs before charging. Issues the
+  // platform blocks above already explain in more detail are not repeated.
+  {
+    const fmt = p === 'google' ? (spec.campaignType === 'SEARCH' ? 'text' : 'image') : String((spec.creative && spec.creative.format) || 'IMAGE').toLowerCase();
+    const cc = createCompat.check({ platform: p, campaignType: spec.campaignType, goal, format: fmt, objective: p === 'pinterest' ? (spec.pinterestObjective || null) : null });
+    for (const iss of cc.issues || []) {
+      if (p === 'tiktok' && (iss.field === 'goal' || iss.field === 'format')) continue;
+      if (p === 'google' && iss.field === 'campaignType') continue;
+      add('error', 'compat.' + iss.field, 'compat_' + iss.code, (iss.message + ' ' + (iss.suggestion || '')).trim());
+    }
+  }
+
   for (const note of spec.liveUnverified || []) add('info', 'platform', 'live_unverified', note);
   return issues;
 }
 const hasErrors = (issues) => issues.some((i) => i.level === 'error');
+
+// ── Launch checklist ──────────────────────────────────────────────
+// Every issue belongs to exactly one section; anything not recognised goes
+// to 'other', so Launch can never drop an error. checklist() is what
+// Launch shows: the sections that apply to this platform/type, each with
+// its status (pass / warning / blocked) and a plain summary of what will
+// be sent. The same issues block POST /api/publish/{platform}.
+const SECTIONS = {
+  campaign: 'Campaign & format', creative: 'Creative', copy: 'Ad copy', keywords: 'Keywords & extensions',
+  destination: 'Destination', budget: 'Budget', targeting: 'Targeting', tracking: 'Tracking / conversions',
+  compliance: 'Compliance', identity: 'Identity', other: 'Other settings',
+};
+function sectionOf(field) {
+  const f = String(field || '');
+  if (/^(compliance\.|campaign\.specialAdCategories)/.test(f)) return 'compliance';
+  if (/^(campaign\.|campaignType|compat\.)/.test(f)) return 'campaign';
+  if (/^(creative\.|assets\.(squareImage|landscapeImage|logo|businessName))/.test(f)) return 'creative';
+  if (/^(assets\.(headlines|descriptions|longHeadline)|pin\.|adGroups\[\d+\]\.ads)/.test(f)) return 'copy';
+  if (/^(adGroups\[\d+\]\.keywords|assets\.(sitelinks|callouts|structuredSnippet|negativeKeywords))/.test(f)) return 'keywords';
+  if (/^tracking\.destinationUrl/.test(f)) return 'destination';
+  if (/^budget\./.test(f)) return 'budget';
+  if (/^targeting\./.test(f)) return 'targeting';
+  if (/^tracking\./.test(f)) return 'tracking';
+  if (/^identity\./.test(f)) return 'identity';
+  return 'other';
+}
+const GOOGLE_TYPE_LABEL = { SEARCH: 'Search (text ads)', PERFORMANCE_MAX: 'Performance Max', DEMAND_GEN: 'Demand Gen' };
+function formatLabel(spec) {
+  if (spec.platform === 'google') return spec.campaignType === 'SEARCH' ? 'Text ads' : 'Image ads';
+  return spec.creative && spec.creative.format === 'VIDEO' ? 'Video' : 'Image';
+}
+function checklist(spec, issues) {
+  const p = spec.platform;
+  const keys = ['campaign', 'creative', 'copy'];
+  if (p === 'google' && spec.campaignType === 'SEARCH') keys.push('keywords');
+  keys.push('destination', 'budget', 'targeting', 'tracking');
+  if (p === 'meta') keys.push('compliance');
+  if (p === 'meta' || p === 'tiktok') keys.push('identity');
+  const ads = spec.adGroups.reduce((n, g) => n + (g.ads ? g.ads.length : 0), 0);
+  const groupWord = p === 'meta' ? 'ad set' : 'ad group';
+  const cur = spec.budget.currency ? ' ' + spec.budget.currency : '';
+  const summary = {
+    campaign: () => [spec.campaign.goal, p === 'google' ? GOOGLE_TYPE_LABEL[spec.campaignType] : formatLabel(spec), spec.adGroups.length + ' ' + groupWord + (spec.adGroups.length === 1 ? '' : 's') + ' · ' + ads + ' ad' + (ads === 1 ? '' : 's')].filter(Boolean).join(' · '),
+    creative: () => {
+      const c = spec.creative || {};
+      if (p === 'google') return spec.campaignType === 'SEARCH' ? 'Text ads — no image is sent to Google.' : 'Image, logo and business name from your business profile.';
+      if (c.format === 'VIDEO') return p === 'tiktok' ? ('Video' + (c.coverFromVideo ? ' — TikTok uses a frame of the video as the cover.' : ' with a cover image.')) : 'Video Pin.';
+      const n = (c.images || []).length || (c.imageUrl ? 1 : 0);
+      return (p === 'pinterest' ? 'Image Pin' : 'Image ad') + (n > 1 ? ' · ' + n + ' images' : '') + '.';
+    },
+    copy: () => p === 'google' ? (spec.assets.headlines.length + ' headlines · ' + spec.assets.descriptions.length + ' descriptions.') : p === 'pinterest' ? ('Pin title: “' + spec.pin.title + '”.') : (ads + ' ad' + (ads === 1 ? '' : 's') + ' with text.'),
+    keywords: () => { const n = spec.adGroups.reduce((s, g) => s + ((g.keywords || []).length), 0); return n + ' keyword' + (n === 1 ? '' : 's') + (spec.assets.callouts.length ? ' · ' + spec.assets.callouts.length + ' callouts' : '') + '.'; },
+    destination: () => spec.tracking.destinationUrl || '',
+    budget: () => spec.budget.amount ? spec.budget.amount + cur + ' per day.' : '',
+    targeting: () => [spec.targeting.countries.map(countryName).join(', '), 'Ages ' + spec.targeting.ageMin + '–' + spec.targeting.ageMax + (spec.targeting.ageMax >= 65 ? '+' : ''), spec.targeting.placementLabel].filter(Boolean).join(' · '),
+    tracking: () => !spec.tracking.needsConversion ? 'Not needed for this objective.' : (p === 'meta' ? 'Meta Pixel selected · ' + spec.tracking.conversionEvent : p === 'pinterest' ? 'Pinterest Tag selected · ' + spec.tracking.conversionEvent : 'Conversion tracking is set up.'),
+    compliance: () => 'Special ad categories confirmed' + (spec.compliance && spec.compliance.euTargeted ? ' · EU transparency: ' + spec.compliance.dsaBeneficiary : '') + '.',
+    identity: () => p === 'meta' ? ('Facebook Page connected' + (spec.identity.instagramUsername ? ' · Instagram @' + spec.identity.instagramUsername : '') + '.') : ('TikTok identity: ' + (spec.identity.displayName || 'selected') + '.'),
+  };
+  const by = {};
+  for (const i of issues) { const s = sectionOf(i.field); (by[s] = by[s] || []).push(i); }
+  if ((by.other || []).some((i) => i.level !== 'info')) keys.push('other');
+  return keys.map((k) => {
+    const list = (by[k] || []);
+    const errors = list.filter((i) => i.level === 'error').map((i) => ({ code: i.code, field: i.field, message: i.message }));
+    const warnings = list.filter((i) => i.level === 'warning').map((i) => ({ code: i.code, field: i.field, message: i.message }));
+    const notes = list.filter((i) => i.level === 'info' && i.code !== 'live_unverified').map((i) => i.message);
+    let text = '';
+    try { text = summary[k] ? summary[k]() : ''; } catch (_) { text = ''; }
+    return { key: k, label: SECTIONS[k], status: errors.length ? 'blocked' : warnings.length ? 'warning' : 'pass', summary: errors.length ? '' : text, errors, warnings, notes };
+  });
+}
 
 // ── applyChanges (Oriven Chat + review UI) ─────────────────────────
 // changes: { countries, languages, ageMin, ageMax, budget, placement,
@@ -1117,6 +1243,7 @@ function setContextLoader(fn) { _contextLoader = fn; }
 async function loadContext(user, platform) { return _contextLoader ? _contextLoader(user, platform, false) : {}; }
 
 module.exports = {
+  sectionOf, checklist, SECTIONS, formatLabel,
   setContextLoader, loadContext,
   SPEC_VERSION, PLATFORMS, GOALS, COUNTRIES, COUNTRY_BY_ISO, LANGUAGES, GOOGLE_LANG_CODE, META_SPECIAL_CATEGORIES, META_CONVERSION_EVENTS,
   META_PLACEMENTS, PINTEREST_CONVERSION_EVENTS, GOOGLE_SNIPPET_HEADERS, TIKTOK_MIN_ADGROUP_DAILY, SUPPORT, LIVE_UNVERIFIED, G,

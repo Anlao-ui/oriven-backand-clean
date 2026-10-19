@@ -67,6 +67,7 @@ const MESSAGES = {
   image: 'Several images are still being generated. Wait for them to finish before starting more.',
   video: 'A video is still being submitted. Wait for it to finish before starting another.',
   chat: 'OrivenAI is still answering your previous message.',
+  automation: 'Your automation is still being created. Wait a moment before creating another.',
 };
 
 let _db = null;
@@ -387,8 +388,11 @@ function responseHook(req, res, next) {
 
 // ── 4. Async (video) settlement ───────────────────────────────────
 // Called by the video status endpoints once the provider reports a final
-// state. Safe to call repeatedly (polling) — settles at most once.
-async function settleAsync(jobId, completed, userId) {
+// state (and by the Research job when it ends). Safe to call repeatedly
+// (polling) — settles at most once. reason (optional) is stored on a
+// failure, e.g. "research_provider_unavailable:account_payment_required:402".
+async function settleAsync(jobId, completed, userId, reason) {
+  const why = reason ? String(reason).slice(0, 120) : 'async_job_failed';
   if (!jobId) return { settled: false };
   const entry = mem.async.get(String(jobId));
   if (entry) {
@@ -397,9 +401,9 @@ async function settleAsync(jobId, completed, userId) {
     mem.async.delete(String(jobId));
     const p = { actionId: entry.actionId, dbRow: entry.dbRow };
     if (completed) { await _dbSetStatus(p, ['awaiting_async'], 'succeeded'); return { settled: true, refunded: false }; }
-    const claimRefund = await _dbSetStatus(p, ['awaiting_async'], 'refunding', { error: 'async_job_failed' });
+    const claimRefund = await _dbSetStatus(p, ['awaiting_async'], 'refunding', { error: why });
     if (!claimRefund.updated) return { settled: false };
-    const r = await _refundReservations(entry.reservations, entry.route, 'async_job_failed');
+    const r = await _refundReservations(entry.reservations, entry.route, why);
     await _dbSetStatus(p, ['refunding'], r.failedAny ? 'refund_failed' : 'refunded');
     return { settled: true, refunded: r.refundedAny };
   }
@@ -410,7 +414,7 @@ async function settleAsync(jobId, completed, userId) {
   const { data: row, error } = await q.maybeSingle();
   if (error) { _noteDbError(error, 'async lookup'); return { settled: false }; }
   if (!row) return { settled: false };
-  return _settleRow(row, completed ? 'succeeded' : 'refund', 'async_job_failed');
+  return _settleRow(row, completed ? 'succeeded' : 'refund', why);
 }
 
 // Settles a credit_actions row without in-memory reservation objects.

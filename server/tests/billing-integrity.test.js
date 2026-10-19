@@ -410,7 +410,7 @@ const invoice = (sub, reason, extra) => Object.assign({ id: 'in_' + Math.random(
 
   out('\nPreserved behaviour');
   const cm = require(path.join(SERVER_DIR, 'services/creditManager.js'));
-  check('credit prices unchanged', JSON.stringify(cm.FEATURE_COSTS) === JSON.stringify({ ai_chat: 5, ai_analysis: 25, campaign_improvement: 10, audience_generation: 10, product_analysis: 10, competitor_analysis: 15, brand_voice: 20, campaign_generation: 25, website_analysis: 30, image_generation: 75, video_generation: 200, autopilot: 25 }));
+  check('credit prices: unchanged except Automations = 50 credits once per new automation (was 25 per execution)', JSON.stringify(cm.FEATURE_COSTS) === JSON.stringify({ ai_chat: 5, ai_analysis: 25, campaign_improvement: 10, audience_generation: 10, product_analysis: 10, competitor_analysis: 15, brand_voice: 20, campaign_generation: 25, website_analysis: 30, image_generation: 75, video_generation: 200, automation: 50 }));
   check('plan allowances unchanged', JSON.stringify(cm.PLAN_ALLOWANCES) === JSON.stringify({ free: 10, starter: 1000, creator: 2500, professional: 4000 }));
   check('no unexpected Stripe API calls', !S.calls.some((c) => c[0] === 'UNEXPECTED'), S.calls.filter((c) => c[0] === 'UNEXPECTED'));
   check('no outbound network requests', blocked.length === 0, blocked);

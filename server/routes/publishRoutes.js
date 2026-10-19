@@ -11,7 +11,11 @@
 //   3. prepares assets (uploads images to the platform, exact crops),
 //   4. sends exactly the payloads campaignSpec.payloads builds,
 //   5. creates everything PAUSED, rolls back on failure, and keeps the
-//      per-campaign publish lock against double clicks.
+//      per-campaign publish lock against double clicks,
+//   6. records the operation durably (services/publishLedger.js) so a
+//      retry, refresh, proxy timeout or restart can never publish the same
+//      campaign twice — POST /api/publish/{platform}/status reconciles an
+//      operation whose result was never confirmed.
 //
 // Helpers that already exist in server.js (platform access/token refresh,
 // API wrappers, publish lock, event log) are passed in — nothing is
@@ -19,10 +23,13 @@
 // ════════════════════════════════════════════════════════════════
 const S = require('../services/campaignSpec');
 const img = require('../services/adImages');
+const PL = require('../services/publishLedger');
 
 module.exports = function registerPublishRoutes(app, d) {
-  const OPTIONS_TTL_MS = 5 * 60 * 1000;
+  const OPTIONS_TTL_MS = 2 * 60 * 1000;
   const _optCache = new Map(); // userId|platform -> { at, options, access }
+  const _optInflight = new Map(); // userId|platform -> Promise (concurrent refreshes share one load)
+  const ledger = d.publishLedger || PL.createLedger({ store: PL.supabaseStore(d.supabaseAdmin) });
 
   // ── Context: business profile, saved preferences, account facts ──
   async function loadContext(user, platform, live) {
@@ -34,11 +41,15 @@ module.exports = function registerPublishRoutes(app, d) {
     const key = user.id + '|' + platform;
     let cached = _optCache.get(key);
     if (live || !cached || Date.now() - cached.at > OPTIONS_TTL_MS) {
-      cached = { at: Date.now(), ...(await loadOptions(user, platform)) };
-      _optCache.set(key, cached);
+      let p = _optInflight.get(key);
+      if (!p) {
+        p = loadOptions(user, platform).then((o) => { const c = { at: Date.now(), ...o }; _optCache.set(key, c); return c; }).finally(() => _optInflight.delete(key));
+        _optInflight.set(key, p);
+      }
+      cached = await p;
     }
     const preferences = (prof && prof.preferences && typeof prof.preferences === 'object') ? prof.preferences : {};
-    return { profile: profile || {}, preferences, options: cached.options, access: cached.access };
+    return { profile: profile || {}, preferences, options: cached.options, access: cached.access, optionsAt: cached.at };
   }
 
   async function loadOptions(user, platform) {
@@ -134,8 +145,12 @@ module.exports = function registerPublishRoutes(app, d) {
       if (changes && typeof changes === 'object') ({ pkg: work, applied, rejected } = S.applyChanges(pkg, platform, changes));
       const spec = S.buildSpec(withStructure(work, req.body), platform, ctx);
       const issues = S.validate(spec, ctx);
-      const out = { ok: true, spec, issues, canPublish: !S.hasErrors(issues), summary: S.summary(spec), options: publicOptions(ctx.options) };
+      const out = { ok: true, spec, issues, canPublish: !S.hasErrors(issues), summary: S.summary(spec), options: publicOptions(ctx.options), sections: S.checklist(spec, issues), format: S.formatLabel(spec), checkedAt: new Date(ctx.optionsAt || Date.now()).toISOString() };
       if (changes) Object.assign(out, { pkg: work, applied, rejected });
+      // The recorded publish operation for this campaign, so Launch can show
+      // published / unconfirmed honestly (null when the ledger isn't set up).
+      const campId = req.body && req.body.campId;
+      if (campId && typeof campId === 'string') { try { out.publish = ledger.view(await ledger.get(user.id, platform, campId)); } catch (_) { out.publish = null; } }
       if (req.body && req.body.choices) out.choices = CHOICES;
       res.json(out);
     } catch (err) {
@@ -145,14 +160,39 @@ module.exports = function registerPublishRoutes(app, d) {
   });
 
   // Shared publish prelude: lock, live context, spec, validation.
+  // Durable-ledger answers that stop a publish before anything is sent.
+  const LEDGER_REFUSAL = {
+    ALREADY_PUBLISHED: (p) => 'This campaign was already published to ' + platformLabel(p) + '. Publishing it again would create a second campaign — duplicate it in Create if you want another.',
+    PUBLISH_IN_PROGRESS: () => 'This campaign is already being published — please wait for it to finish.',
+    RESULT_UNCONFIRMED: (p) => 'An earlier publish of this campaign was never confirmed. Check its status first — OrivenAI won’t send it to ' + platformLabel(p) + ' again until it knows the first attempt didn’t create it.',
+  };
+  function refuse(res, platform, code, op) {
+    return res.status(409).json({ ok: false, code, error: LEDGER_REFUSAL[code](platform), publish: ledger.view(op) });
+  }
+  function ledgerDown(res, err) {
+    console.error('[publish] ledger unavailable:', err && err.message);
+    return res.status(503).json({ ok: false, code: 'PUBLISH_LEDGER_UNAVAILABLE', error: 'Publishing is temporarily unavailable — OrivenAI couldn’t record this publish safely. Nothing was sent. Try again in a few minutes.' });
+  }
+
   async function prepare(req, res, platform) {
     const user = await d.getUserFromToken(req);
     if (!user) { res.status(401).json({ ok: false, error: 'Unauthorized' }); return null; }
-    const { pkg, campId } = req.body || {};
+    const { pkg, campId, opId } = req.body || {};
     if (!pkg) { res.status(400).json({ ok: false, error: 'Campaign package required' }); return null; }
+    // The campaign id is the idempotency key — without it a retry can't be recognised.
+    if (!campId || typeof campId !== 'string') { res.status(400).json({ ok: false, code: 'CAMPAIGN_ID_REQUIRED', error: 'Save the campaign before publishing it.' }); return null; }
     const lockKey = d.acquirePublishLock(user.id, platform, campId);
-    if (!lockKey) { res.status(409).json({ ok: false, error: 'This campaign is already being published — please wait for it to finish.', code: 'PUBLISH_IN_PROGRESS' }); return null; }
+    if (!lockKey) { res.status(409).json({ ok: false, error: LEDGER_REFUSAL.PUBLISH_IN_PROGRESS(platform), code: 'PUBLISH_IN_PROGRESS' }); return null; }
     try {
+      // Durable state first: an already published / unconfirmed / in-flight
+      // campaign is refused before anything else happens.
+      let prior;
+      try { prior = await ledger.get(user.id, platform, campId); } catch (e) { d.releasePublishLock(lockKey); ledgerDown(res, e); return null; }
+      if (prior && (prior.state === 'published' || prior.state === 'unconfirmed' || prior.state === 'publishing')) {
+        const code = prior.state === 'published' ? 'ALREADY_PUBLISHED' : (prior.state === 'unconfirmed' || ledger.isStale(prior)) ? 'RESULT_UNCONFIRMED' : 'PUBLISH_IN_PROGRESS';
+        if (code === 'RESULT_UNCONFIRMED') { try { prior = await ledger.settleStale(prior); } catch (_) {} }
+        d.releasePublishLock(lockKey); refuse(res, platform, code, prior); return null;
+      }
       const ctx = await loadContext(user, platform, true);
       if (!ctx.options.connected || !ctx.access) {
         d.releasePublishLock(lockKey);
@@ -167,17 +207,54 @@ module.exports = function registerPublishRoutes(app, d) {
         res.status(422).json({ ok: false, code: 'CAMPAIGN_INVALID', error: errors[0].message, issues });
         return null;
       }
-      return { user, ctx, spec, issues, lockKey, access: ctx.access };
+      const acct = accountOf(platform, ctx.access);
+      let claim;
+      try { claim = await ledger.begin({ userId: user.id, platform, campId, opId: opId ? String(opId).slice(0, 80) : null, campaignName: spec.campaign.name, accountId: acct.id }); }
+      catch (e) { d.releasePublishLock(lockKey); ledgerDown(res, e); return null; }
+      if (!claim.ok) { d.releasePublishLock(lockKey); refuse(res, platform, claim.code, claim.op); return null; }
+      return { user, ctx, spec, issues, lockKey, access: ctx.access, op: claim.op, campId, account: acct };
     } catch (err) {
       d.releasePublishLock(lockKey);
       throw err;
     }
   }
 
-  function fail(res, platform, user, err) {
+  // A publish that threw: everything it created was rolled back (or the
+  // leftovers are listed). This is a CONFIRMED failure — code PUBLISH_FAILED
+  // tells the client a retry is safe, unlike a timeout with no answer.
+  async function fail(res, platform, prep, err, rollback) {
+    const user = prep && prep.user;
     console.error('[publish/' + platform + '] failed:', err.message);
-    d.logCampaignEvent(user || null, { platform, title: platformLabel(platform) + ' publish failed', detail: err.message, severity: 'high' });
-    return res.status(err.status && err.status >= 400 && err.status < 600 ? err.status : 500).json({ ok: false, error: err.message || ('Failed to publish to ' + platformLabel(platform)) });
+    const rb = rollback || { complete: true, leftovers: [] };
+    d.logCampaignEvent(user || null, { platform, title: platformLabel(platform) + ' publish failed', detail: err.message + (rb.complete ? '' : ' — ' + rb.leftovers.length + ' paused object(s) could not be removed'), severity: 'high' });
+    if (prep && prep.op) { try { await ledger.fail(prep.op, { error: err.message, rollback: rb }); } catch (e) { console.error('[publish/' + platform + '] ledger fail write:', e.message); } }
+    return res.status(err.status && err.status >= 400 && err.status < 600 ? err.status : 500).json({ ok: false, code: 'PUBLISH_FAILED', error: err.message || ('Failed to publish to ' + platformLabel(platform)), rollback: { complete: rb.complete, leftovers: rb.leftovers.length } });
+  }
+
+  // The ad account the server used (from the user's own integration — never
+  // a client-supplied id).
+  function accountOf(platform, a) {
+    a = a || {};
+    const id = platform === 'meta' ? a.accountId : platform === 'google' ? a.customerId : platform === 'tiktok' ? a.advertiserId : a.adAccountId;
+    return { id: id ? String(id) : null, name: a.accountName ? String(a.accountName) : null };
+  }
+  // Success bookkeeping: durable ledger + OrivenAI's campaign row. Never
+  // throws — the platform already created the campaign, so a bookkeeping
+  // error must not trigger a rollback.
+  async function succeed(prep, platform, out) {
+    const ids = { accountName: prep.account.name, adSetIds: out.adSetIds || null, adIds: out.adIds || null, campaignResourceName: out.campaignResourceName || null };
+    try { await ledger.succeed(prep.op, { campaignId: out.campaignId, accountId: prep.account.id, ids }); } catch (e) { console.error('[publish/' + platform + '] ledger success write:', e.message); }
+    try {
+      await d.supabaseAdmin.from('campaigns').update({ status: 'published', external_campaign_id: out.campaignId ? String(out.campaignId) : null, external_account_id: prep.account.id, external_ad_set_ids: out.adSetIds || null, external_ad_ids: out.adIds || null, updated_at: new Date().toISOString() })
+        .eq('user_id', prep.user.id).eq('client_ref_id', prep.campId);
+    } catch (_) { /* the campaigns table is optional here; the client mirrors it too */ }
+    return { accountId: prep.account.id, accountName: prep.account.name };
+  }
+  // Runs rollback steps, collecting what could not be removed.
+  async function rollbackAll(steps) {
+    const leftovers = [];
+    for (const [what, id, fn] of steps) { try { await fn(); } catch (e) { leftovers.push({ what, id: String(id) }); } }
+    return { complete: !leftovers.length, leftovers };
   }
   const platformLabel = (p) => ({ meta: 'Meta Ads', google: 'Google Ads', tiktok: 'TikTok Ads', pinterest: 'Pinterest Ads' }[p]);
 
@@ -245,14 +322,20 @@ module.exports = function registerPublishRoutes(app, d) {
         }
       }
       d.logCampaignEvent(user, { platform: 'meta', campaignName: spec.campaign.name, title: `Published "${spec.campaign.name}" to Meta Ads`, detail: `${adSetsOut.length} ad set(s), ${adsOut.length} ad(s) created, paused, ready for review.`, severity: 'low' });
-      return res.json({ ok: true, platform: 'meta', status: 'paused', campaignId: campaign.id, adSetId: adSetsOut[0] ? adSetsOut[0].id : null, adSets: adSetsOut, creatives: creativesOut, ads: adsOut, summary: S.summary(spec) });
+      const acct = await succeed(prep, 'meta', { campaignId: campaign.id, adSetIds: created.adSetIds, adIds: created.adIds });
+      return res.json(Object.assign({ ok: true, platform: 'meta', status: 'paused', campaignId: campaign.id, adSetId: adSetsOut[0] ? adSetsOut[0].id : null, adSets: adSetsOut, creatives: creativesOut, ads: adsOut, summary: S.summary(spec) }, acct));
     } catch (err) {
+      let rb = null;
       if (prep && prep.access) {
-        const delAll = async (list) => { for (const id of list.slice().reverse()) { try { await fetch(d.META_GRAPH + '/' + id + '?access_token=' + encodeURIComponent(prep.access.accessToken), { method: 'DELETE' }); } catch (_) {} } };
-        await delAll(created.adIds); await delAll(created.creativeIds); await delAll(created.adSetIds);
-        if (created.campaignId) await delAll([created.campaignId]);
+        const del = (id) => async () => { const r = await fetch(d.META_GRAPH + '/' + id + '?access_token=' + encodeURIComponent(prep.access.accessToken), { method: 'DELETE' }); if (r && r.ok === false) throw new Error('HTTP ' + r.status); };
+        const steps = [];
+        created.adIds.slice().reverse().forEach((id) => steps.push(['ad', id, del(id)]));
+        created.creativeIds.slice().reverse().forEach((id) => steps.push(['creative', id, del(id)]));
+        created.adSetIds.slice().reverse().forEach((id) => steps.push(['ad set', id, del(id)]));
+        if (created.campaignId) steps.push(['campaign', created.campaignId, del(created.campaignId)]);
+        rb = await rollbackAll(steps);
       }
-      return fail(res, 'meta', prep && prep.user, err);
+      return fail(res, 'meta', prep, err, rb);
     } finally {
       if (prep) d.releasePublishLock(prep.lockKey);
     }
@@ -317,7 +400,9 @@ module.exports = function registerPublishRoutes(app, d) {
         const campRes = results.find((r) => r.campaignResult);
         const campaignRn = campRes ? campRes.campaignResult.resourceName : null;
         d.logCampaignEvent(user, { platform: 'google', campaignName: spec.campaign.name, title: `Published "${spec.campaign.name}" to Google Ads (Performance Max)`, detail: 'Campaign created, paused, ready for review.', severity: 'low' });
-        return res.json({ ok: true, platform: 'google', campaignType: 'PERFORMANCE_MAX', status: 'paused', campaignId: campaignRn ? campaignRn.split('/').pop() : null, campaignResourceName: campaignRn, summary: S.summary(spec) });
+        const pmaxId = campaignRn ? campaignRn.split('/').pop() : null;
+        const acctP = await succeed(prep, 'google', { campaignId: pmaxId, campaignResourceName: campaignRn });
+        return res.json(Object.assign({ ok: true, platform: 'google', campaignType: 'PERFORMANCE_MAX', status: 'paused', campaignId: pmaxId, campaignResourceName: campaignRn, summary: S.summary(spec) }, acctP));
       }
 
       // Budget (Search + Demand Gen)
@@ -342,7 +427,8 @@ module.exports = function registerPublishRoutes(app, d) {
         const aIds = { squareAsset: assets.results[0].resourceName, logoAsset: assets.results[1].resourceName, landscapeAsset: landscape ? assets.results[2].resourceName : null };
         await gads.mutate('adGroupAds', [{ create: S.payloads.google.demandGenAd(spec, aIds, agRn) }]);
         d.logCampaignEvent(user, { platform: 'google', campaignName: spec.campaign.name, title: `Published "${spec.campaign.name}" to Google Ads (Demand Gen)`, detail: 'Campaign created, paused, ready for review.', severity: 'low' });
-        return res.json({ ok: true, platform: 'google', campaignType: 'DEMAND_GEN', status: 'paused', campaignId: campaignRn.split('/').pop(), campaignResourceName: campaignRn, summary: S.summary(spec) });
+        const acctD = await succeed(prep, 'google', { campaignId: campaignRn.split('/').pop(), campaignResourceName: campaignRn });
+        return res.json(Object.assign({ ok: true, platform: 'google', campaignType: 'DEMAND_GEN', status: 'paused', campaignId: campaignRn.split('/').pop(), campaignResourceName: campaignRn, summary: S.summary(spec) }, acctD));
       }
 
       // SEARCH
@@ -363,13 +449,21 @@ module.exports = function registerPublishRoutes(app, d) {
         groupsOut.push({ resourceName: agRn, name: grp.name, keywords: grp.keywords.length, ads: grp.ads.length });
       }
       d.logCampaignEvent(user, { platform: 'google', campaignName: spec.campaign.name, title: `Published "${spec.campaign.name}" to Google Ads (Search)`, detail: `${groupsOut.length} ad group(s) created, paused, ready for review.`, severity: 'low' });
-      return res.json({ ok: true, platform: 'google', campaignType: 'SEARCH', status: 'paused', campaignId: campaignRn.split('/').pop(), campaignResourceName: campaignRn, adGroups: groupsOut, summary: S.summary(spec) });
+      const acctS = await succeed(prep, 'google', { campaignId: campaignRn.split('/').pop(), campaignResourceName: campaignRn, adSetIds: groupsOut.map((g) => g.resourceName) });
+      return res.json(Object.assign({ ok: true, platform: 'google', campaignType: 'SEARCH', status: 'paused', campaignId: campaignRn.split('/').pop(), campaignResourceName: campaignRn, adGroups: groupsOut, summary: S.summary(spec) }, acctS));
     } catch (err) {
+      // Removing the campaign removes its ad groups, ads, criteria and asset
+      // links. Sitelink/callout/snippet ASSETS themselves can't be removed
+      // through the Google Ads API; unlinked, they never serve.
+      let rb = null;
       if (gads) {
-        if (createdCampaign) { try { await gads.mutate('campaigns', [{ remove: createdCampaign }]); } catch (e) { console.error('[publish/google] rollback campaign failed:', e.message); } }
-        if (createdBudget) { try { await gads.mutate('campaignBudgets', [{ remove: createdBudget }]); } catch (e) { console.error('[publish/google] rollback budget failed:', e.message); } }
+        const steps = [];
+        if (createdCampaign) steps.push(['campaign', createdCampaign, () => gads.mutate('campaigns', [{ remove: createdCampaign }])]);
+        if (createdBudget) steps.push(['budget', createdBudget, () => gads.mutate('campaignBudgets', [{ remove: createdBudget }])]);
+        rb = await rollbackAll(steps);
+        rb.leftovers.forEach((x) => console.error('[publish/google] rollback failed:', x.what));
       }
-      return fail(res, 'google', prep && prep.user, err);
+      return fail(res, 'google', prep, err, rb);
     } finally {
       if (prep) d.releasePublishLock(prep.lockKey);
     }
@@ -417,7 +511,21 @@ module.exports = function registerPublishRoutes(app, d) {
       const vid = await tk('/file/video/ad/upload/', { advertiser_id: adv, upload_type: 'UPLOAD_BY_URL', video_url: httpUrl(spec.creative.videoUrl, 'video') });
       const videoId = (Array.isArray(vid) ? vid[0] : vid) && (Array.isArray(vid) ? vid[0] : vid).video_id;
       if (!videoId) throw new Error('TikTok did not return a video_id for the uploaded video.');
-      const cover = await tk('/file/image/ad/upload/', { advertiser_id: adv, upload_type: 'UPLOAD_BY_URL', image_url: httpUrl(spec.creative.coverImageUrl, 'cover image') });
+      // Cover image: the campaign's own image when there is one; otherwise
+      // the cover frame TikTok extracts from the uploaded video
+      // (GET /file/video/ad/info/ → video_cover_url), re-uploaded as an ad
+      // image. Create's video mode never generates an image, so without
+      // this every Create-made TikTok campaign was blocked at Launch.
+      let coverUrl = spec.creative.coverImageUrl;
+      if (!coverUrl) {
+        if (!d.tiktokGet) throw Object.assign(new Error('TikTok video ads need a cover image. Add an image to this campaign.'), { status: 422 });
+        const info = await d.tiktokGet('/file/video/ad/info/', access.accessToken, { advertiser_id: adv, video_ids: JSON.stringify([videoId]) });
+        const list = (info && (info.list || info)) || [];
+        const first = Array.isArray(list) ? list[0] : null;
+        coverUrl = first && (first.video_cover_url || first.poster_url || first.preview_url_cover);
+        if (!coverUrl) throw Object.assign(new Error('TikTok didn’t return a cover frame for this video yet. Add an image to this campaign as the cover, or try again in a minute.'), { status: 422 });
+      }
+      const cover = await tk('/file/image/ad/upload/', { advertiser_id: adv, upload_type: 'UPLOAD_BY_URL', image_url: httpUrl(coverUrl, 'cover image') });
       const coverImageId = (Array.isArray(cover) ? cover[0] : cover) && (Array.isArray(cover) ? cover[0] : cover).image_id;
       if (!coverImageId) throw new Error('TikTok did not return an image_id for the cover image.');
       const locationIds = spec.targeting.countries.map((c) => String(S.COUNTRY_BY_ISO[c].geo));
@@ -444,16 +552,21 @@ module.exports = function registerPublishRoutes(app, d) {
         }
       }
       d.logCampaignEvent(user, { platform: 'tiktok', campaignName: spec.campaign.name, title: `Published "${spec.campaign.name}" to TikTok Ads`, detail: `Campaign created, paused, ready for review (${groupsOut.length} ad group(s), ${adsOut.length} ad(s)).`, severity: 'low' });
-      return res.json({ ok: true, platform: 'tiktok', status: 'paused', campaignId: String(campaignId), adGroups: groupsOut, ads: adsOut, summary: S.summary(spec) });
+      const acctT = await succeed(prep, 'tiktok', { campaignId: String(campaignId), adSetIds: created.adGroupIds, adIds: created.adIds });
+      return res.json(Object.assign({ ok: true, platform: 'tiktok', status: 'paused', campaignId: String(campaignId), adGroups: groupsOut, ads: adsOut, summary: S.summary(spec) }, acctT));
     } catch (err) {
+      let rb = null;
       if (prep && prep.access) {
         const a = prep.access;
-        const st = (path, body) => d.tiktokPost(path, a.accessToken, body).catch((e) => console.error('[publish/tiktok] rollback failed', path, e.message));
-        if (created.adIds.length) await st('/ad/status/update/', { advertiser_id: a.advertiserId, ad_ids: created.adIds, operation_status: 'DELETE' });
-        if (created.adGroupIds.length) await st('/adgroup/status/update/', { advertiser_id: a.advertiserId, adgroup_ids: created.adGroupIds, operation_status: 'DELETE' });
-        if (created.campaignId) await st('/campaign/status/update/', { advertiser_id: a.advertiserId, campaign_ids: [created.campaignId], operation_status: 'DELETE' });
+        const st = (path, body) => () => d.tiktokPost(path, a.accessToken, body);
+        const steps = [];
+        if (created.adIds.length) steps.push(['ads', created.adIds.join(','), st('/ad/status/update/', { advertiser_id: a.advertiserId, ad_ids: created.adIds, operation_status: 'DELETE' })]);
+        if (created.adGroupIds.length) steps.push(['ad groups', created.adGroupIds.join(','), st('/adgroup/status/update/', { advertiser_id: a.advertiserId, adgroup_ids: created.adGroupIds, operation_status: 'DELETE' })]);
+        if (created.campaignId) steps.push(['campaign', created.campaignId, st('/campaign/status/update/', { advertiser_id: a.advertiserId, campaign_ids: [created.campaignId], operation_status: 'DELETE' })]);
+        rb = await rollbackAll(steps);
+        rb.leftovers.forEach((x) => console.error('[publish/tiktok] rollback failed', x.what));
       }
-      return fail(res, 'tiktok', prep && prep.user, err);
+      return fail(res, 'tiktok', prep, err, rb);
     } finally {
       if (prep) d.releasePublishLock(prep.lockKey);
     }
@@ -505,20 +618,100 @@ module.exports = function registerPublishRoutes(app, d) {
         }
       }
       d.logCampaignEvent(user, { platform: 'pinterest', campaignName: spec.campaign.name, title: `Published "${spec.campaign.name}" to Pinterest Ads`, detail: `Campaign created, paused, ready for review (${groupsOut.length} ad group(s), ${adsOut.length} ad(s)).`, severity: 'low' });
-      return res.json({ ok: true, platform: 'pinterest', status: 'paused', campaignId: String(camp.id), adGroups: groupsOut, ads: adsOut, pinIds: pinIds.map(String), summary: S.summary(spec) });
+      const acctPi = await succeed(prep, 'pinterest', { campaignId: String(camp.id), adSetIds: created.adGroupIds, adIds: created.adIds });
+      return res.json(Object.assign({ ok: true, platform: 'pinterest', status: 'paused', campaignId: String(camp.id), adGroups: groupsOut, ads: adsOut, pinIds: pinIds.map(String), summary: S.summary(spec) }, acctPi));
     } catch (err) {
+      let rb = null;
       if (prep && prep.access) {
         const a = prep.access;
-        try { await d.pinterestArchiveEntities(a.accessToken, a.adAccountId, 'ads', created.adIds); } catch (_) {}
-        try { await d.pinterestArchiveEntities(a.accessToken, a.adAccountId, 'ad_groups', created.adGroupIds); } catch (_) {}
-        if (created.campaignId) { try { await d.pinterestArchiveEntities(a.accessToken, a.adAccountId, 'campaigns', [created.campaignId]); } catch (_) {} }
-        for (const id of created.pinIds) { try { await d.pinterestApiRequest(a.accessToken, 'DELETE', '/pins/' + id); } catch (_) {} }
+        const steps = [];
+        if (created.adIds.length) steps.push(['ads', created.adIds.join(','), () => d.pinterestArchiveEntities(a.accessToken, a.adAccountId, 'ads', created.adIds)]);
+        if (created.adGroupIds.length) steps.push(['ad groups', created.adGroupIds.join(','), () => d.pinterestArchiveEntities(a.accessToken, a.adAccountId, 'ad_groups', created.adGroupIds)]);
+        if (created.campaignId) steps.push(['campaign', created.campaignId, () => d.pinterestArchiveEntities(a.accessToken, a.adAccountId, 'campaigns', [created.campaignId])]);
+        created.pinIds.forEach((id) => steps.push(['pin', id, () => d.pinterestApiRequest(a.accessToken, 'DELETE', '/pins/' + id)]));
+        rb = await rollbackAll(steps);
       }
-      return fail(res, 'pinterest', prep && prep.user, err);
+      return fail(res, 'pinterest', prep, err, rb);
     } finally {
       if (prep) d.releasePublishLock(prep.lockKey);
     }
   });
 
-  return { loadContext, loadOptions };
+  // ════════════════════════════════════════════════════════════════
+  // POST /api/publish/:platform/status — what happened to this campaign's
+  // publish. Read-only towards the platform: it never creates anything.
+  //   { campId }                       → the recorded state; for an
+  //     unconfirmed one, OrivenAI looks for the campaign on the platform by
+  //     its exact name, created after the attempt started.
+  //   { campId, confirmNotCreated:true } → the user checked the ad account
+  //     themselves; the attempt is closed so publishing is allowed again.
+  // ════════════════════════════════════════════════════════════════
+  const NAME_SLACK_MS = 2 * 60 * 1000;
+  async function findByName(platform, access, name, startedAt) {
+    const after = new Date(startedAt).getTime() - NAME_SLACK_MS;
+    const fresh = (t) => { const ms = typeof t === 'number' ? (t < 1e12 ? t * 1000 : t) : new Date(String(t).replace(' ', 'T') + (/[zZ]|[+-]\d\d:?\d\d$/.test(String(t)) ? '' : 'Z')).getTime(); return !isFinite(ms) || ms >= after; };
+    if (platform === 'meta') {
+      const r = await d.metaFetch('/' + access.accountId + '/campaigns', access.accessToken, { fields: 'id,name,created_time,effective_status', filtering: JSON.stringify([{ field: 'name', operator: 'EQUAL', value: name }]), limit: '50' });
+      return (r.data || []).filter((c) => c.name === name && fresh(c.created_time)).map((c) => ({ id: String(c.id), status: c.effective_status || null }));
+    }
+    if (platform === 'google') {
+      // Google Ads campaign names are unique among non-removed campaigns.
+      const q = "SELECT campaign.id, campaign.name, campaign.status FROM campaign WHERE campaign.name = '" + String(name).replace(/\\/g, '\\\\').replace(/'/g, "\\'") + "' AND campaign.status != 'REMOVED'";
+      const rows = await d.gadsQuery(access.accessToken, access.customerId, q, access.loginCustomerId);
+      return (rows || []).filter((x) => x.campaign && x.campaign.name === name).map((x) => ({ id: String(x.campaign.id), status: x.campaign.status || null }));
+    }
+    if (platform === 'tiktok') {
+      if (!d.tiktokGet) throw new Error('TikTok lookup unavailable');
+      const r = await d.tiktokGet('/campaign/get/', access.accessToken, { advertiser_id: access.advertiserId, filtering: JSON.stringify({ campaign_name: name }), page_size: '100' });
+      const list = (r && (r.list || r)) || [];
+      return (Array.isArray(list) ? list : []).filter((c) => c.campaign_name === name && fresh(c.create_time) && c.operation_status !== 'DELETE' && c.secondary_status !== 'CAMPAIGN_STATUS_DELETE').map((c) => ({ id: String(c.campaign_id), status: c.operation_status || null }));
+    }
+    const r = await d.pinterestApiRequest(access.accessToken, 'GET', '/ad_accounts/' + access.adAccountId + '/campaigns?page_size=250');
+    const list = Array.isArray(r) ? r : (r && r.items) || [];
+    return list.filter((c) => c.name === name && c.status !== 'ARCHIVED' && fresh(c.created_time)).map((c) => ({ id: String(c.id), status: c.status || null }));
+  }
+  const ACCESS = { meta: (u) => d.getMetaAccess(u), google: (u) => d.getGadsAccess(u), tiktok: (u) => d.getTikTokAccess(u), pinterest: (u) => d.getPinterestAccess(u) };
+
+  app.post('/api/publish/:platform/status', async (req, res) => {
+    const platform = req.params.platform;
+    if (!S.PLATFORMS.includes(platform)) return res.status(404).json({ ok: false, error: 'Unknown platform' });
+    const user = await d.getUserFromToken(req);
+    if (!user) return res.status(401).json({ ok: false, error: 'Unauthorized' });
+    const campId = req.body && req.body.campId;
+    if (!campId || typeof campId !== 'string') return res.status(400).json({ ok: false, error: 'campId is required.' });
+    let op;
+    try { op = await ledger.get(user.id, platform, campId); } catch (e) { return ledgerDown(res, e); }
+    if (op && ledger.isStale(op)) { try { op = await ledger.settleStale(op); } catch (_) {} }
+    const view = ledger.view(op);
+    if (view.state !== 'unconfirmed') return res.json({ ok: true, publish: view });
+    try {
+      if (req.body.confirmNotCreated === true) {
+        const r = await ledger.resolve(op, { state: 'failed', error: 'Closed after you checked ' + platformLabel(platform) + ': the campaign was not created.' });
+        return res.json({ ok: true, publish: ledger.view(r || op), resolvedBy: 'user' });
+      }
+      let access;
+      try { access = await ACCESS[platform](user); } catch (e) {
+        return res.json({ ok: true, publish: view, manual: true, reason: 'OrivenAI can’t reach your ' + platformLabel(platform) + ' account right now, so it can’t check whether the campaign was created.' });
+      }
+      const acct = accountOf(platform, access);
+      if (op.external_account_id && acct.id && op.external_account_id !== acct.id) {
+        return res.json({ ok: true, publish: view, manual: true, reason: 'The first attempt went to a different ' + platformLabel(platform) + ' ad account than the one now selected. Check that account for “' + op.campaign_name + '”.' });
+      }
+      let found;
+      try { found = await findByName(platform, access, op.campaign_name, op.started_at); } catch (e) {
+        return res.json({ ok: true, publish: view, manual: true, reason: platformLabel(platform) + ' didn’t answer the check. Look for “' + op.campaign_name + '” in your ad account.' });
+      }
+      if (found.length === 1) {
+        const r = await ledger.resolve(op, { state: 'published', campaignId: found[0].id, accountId: acct.id, ids: { accountName: acct.name, providerStatus: found[0].status } });
+        return res.json({ ok: true, publish: ledger.view(r || op), resolvedBy: 'platform' });
+      }
+      if (found.length === 0) {
+        const r = await ledger.resolve(op, { state: 'failed', error: 'OrivenAI checked ' + platformLabel(platform) + ': no campaign named “' + op.campaign_name + '” was created.' });
+        return res.json({ ok: true, publish: ledger.view(r || op), resolvedBy: 'platform' });
+      }
+      return res.json({ ok: true, publish: view, manual: true, reason: found.length + ' campaigns named “' + op.campaign_name + '” were created around that time. Check them in ' + platformLabel(platform) + ' and delete any duplicate.' });
+    } catch (e) { return ledgerDown(res, e); }
+  });
+
+  return { loadContext, loadOptions, ledger };
 };

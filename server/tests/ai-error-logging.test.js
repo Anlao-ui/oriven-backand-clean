@@ -62,6 +62,9 @@ function violates(t, cand, ignore) {
   }
   return false;
 }
+// Same CHECK constraint as production (migration 2026-10-creative-assets.sql).
+const CHECKS = { creative_assets: (r) => r.status == null || ['draft', 'needs_improvement', 'ready', 'approved', 'published', 'rejected'].includes(r.status) };
+const checkFails = (t, r) => !!(CHECKS[t] && !CHECKS[t](r));
 class Q {
   constructor(t) { this.t = t; this.op = 'select'; this.f = []; this.wantRows = false; this.lim = null; }
   select() { if (this.op !== 'select') this.wantRows = true; return this; }
@@ -89,12 +92,14 @@ class Q {
     const match = () => all.filter((r) => this.f.every((fn) => fn(r)));
     if (this.op === 'insert' || this.op === 'upsert') {
       const items = (Array.isArray(this.p) ? this.p : [this.p]).map((x) => Object.assign({ created_at: new Date().toISOString() }, x));
+      for (const it of items) if (checkFails(this.t, it)) return { data: null, error: { code: '23514', message: 'new row for relation "' + this.t + '" violates check constraint "' + this.t + '_status_check"' } };
       for (const it of items) if (this.op === 'insert' && violates(this.t, it)) return { data: null, error: { code: '23505', message: 'duplicate key value violates unique constraint' } };
       items.forEach((it) => all.push(it));
       return { data: this.wantRows ? items.map((x) => ({ ...x })) : null, error: null };
     }
     if (this.op === 'update') {
       const m = match();
+      for (const r of m) { if (checkFails(this.t, Object.assign({}, r, this.p))) return { data: null, error: { code: '23514', message: 'violates check constraint "' + this.t + '_status_check"' } }; }
       for (const r of m) { const next = Object.assign({}, r, this.p); if (violates(this.t, next, r)) return { data: null, error: { code: '23505', message: 'duplicate key' } }; }
       m.forEach((r) => Object.assign(r, this.p));
       return { data: this.wantRows ? m.map((x) => ({ ...x })) : null, error: null };
@@ -227,8 +232,10 @@ const failedCallLogs = () => logs.filter((l) => l.includes('"ai_call"') && l.inc
   say('\nB. Other AI features use the same path');
   reset(); prov.handler = () => json(402, { error: { message: 'Insufficient balance' } });
   r = await call('POST', '/api/research/query', 'tok1', RS, { 'X-Idempotency-Key': key() });
+  // Research 2.0 runs as a job (202); wait for it to end before checking.
+  for (let i = 0; i < 100 && r.status === 202; i++) { const g = await call('GET', '/api/research/reports/' + r.body.reportId, 'tok1'); if (g.body && g.body.summary && g.body.summary.status !== 'running') break; await sleep(30); }
   await sleep(50);
-  check('Research: failure stored with "account_payment_required:402", credits refunded', r.status >= 500 && /:account_payment_required:402$/.test(lastAction().error || '') && bal() === 1000, { status: r.status, error: lastAction().error, bal: bal() });
+  check('Research: failure stored with "account_payment_required:402", credits refunded', (r.status === 202 || r.status >= 500) && /:account_payment_required:402$/.test(lastAction().error || '') && bal() === 1000, { status: r.status, error: lastAction().error, bal: bal() });
   reset(); prov.handler = () => json(401, { error: { message: 'Invalid API key' } });
   r = await call('POST', '/api/ai/create-ad', 'tok1', Object.assign({}, AD, { mode: 'concepts' }), { 'X-Idempotency-Key': key() });
   await sleep(50);

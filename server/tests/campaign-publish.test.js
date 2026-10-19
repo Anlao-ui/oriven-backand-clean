@@ -16,6 +16,8 @@ process.env.SUPABASE_SERVICE_ROLE_KEY = 'test-key';
 const express = require('express');
 const sharp = require('sharp');
 const S = require('../services/campaignSpec');
+const PL = require('../services/publishLedger');
+const ledgerStore = PL.memoryStore();
 
 let pass = 0, fail = 0;
 const check = (name, ok, info) => { ok ? pass++ : fail++; console.log((ok ? '  PASS — ' : '  FAIL — ') + name + (ok || info === undefined ? '' : ' :: ' + JSON.stringify(info).slice(0, 600))); };
@@ -71,6 +73,7 @@ const access = {
 };
 const facts = { pixels: [{ id: 'px1', name: 'Shop' }], ig: true, conversionActions: 2, tags: [{ id: 'tag1', name: 'Tag' }] };
 const tiktokCalls = [], pinCalls = [], events = [];
+const tiktokCoverMock = { list: [{ video_id: 'vid1', video_cover_url: 'https://cdn.example.invalid/tiktok-cover.jpg' }] };
 const locks = new Map();
 const deps = {
   requireSubOrFreeStrict: (req, res, next) => next(),
@@ -109,6 +112,11 @@ const deps = {
     if (path === '/ad/create/') return { ad_ids: ['tad' + (++seq)] };
     return {};
   },
+  tiktokGet: async (path, token, q) => {
+    tiktokCalls.push({ path, method: 'GET', body: q });
+    if (path === '/file/video/ad/info/') return { list: tiktokCoverMock.list };
+    return {};
+  },
   TIKTOK_API: 'https://business-api.mock/open_api/v1.3',
   getPinterestAccess: async () => access.pinterest,
   pinterestApiRequest: async (token, method, path, body) => {
@@ -126,6 +134,7 @@ const deps = {
   acquirePublishLock: (u, p, c) => { const k = u + '|' + p + '|' + (c || ''); if (locks.has(k)) return null; locks.set(k, 1); return k; },
   releasePublishLock: (k) => locks.delete(k),
   logCampaignEvent: (u, o) => events.push(o),
+  publishLedger: PL.createLedger({ store: ledgerStore }),
 };
 
 const app = express();
@@ -262,6 +271,26 @@ const server = app.listen(PORT, async () => {
     r = await call('/api/publish/tiktok', { pkg: tkVideo, campId: 't4' });
     check('TikTok error → ad group and campaign deleted (rollback)', r.status >= 400 && tiktokCalls.some((c) => c.path === '/adgroup/status/update/' && c.body.operation_status === 'DELETE') && tiktokCalls.some((c) => c.path === '/campaign/status/update/'));
 
+    // Create 2.0 — a Create-made TikTok video campaign has no image at all.
+    reset();
+    const tkVideoOnly = Object.assign({}, tkVideo, { visualConcepts: [], tiktokAds: Object.assign({}, tkVideo.tiktokAds, { imageUrl: null }) });
+    let vs = await call('/api/campaigns/spec', { pkg: tkVideoOnly, platform: 'tiktok' });
+    check('video-only TikTok (no image): Launch is NOT blocked; it says the video frame becomes the cover',
+      vs.status === 200 && vs.body.canPublish === true && vs.body.issues.some((i) => i.code === 'tiktok_cover_auto' && i.level === 'info') && !vs.body.issues.some((i) => i.code === 'tiktok_cover'), vs.body && vs.body.issues);
+    r = await call('/api/publish/tiktok', { pkg: tkVideoOnly, campId: 't5' });
+    const coverUp = tiktokCalls.find((c) => c.path === '/file/image/ad/upload/');
+    check('video-only TikTok publishes: video info read, TikTok cover frame uploaded as the cover image',
+      r.status === 200 && tiktokCalls.some((c) => c.path === '/file/video/ad/info/' && /vid1/.test(c.body.video_ids)) && coverUp && coverUp.body.image_url === 'https://cdn.example.invalid/tiktok-cover.jpg', { status: r.status, body: r.body, calls: tiktokCalls.map((c) => c.path) });
+    reset();
+    tiktokCoverMock.list = [];
+    r = await call('/api/publish/tiktok', { pkg: tkVideoOnly, campId: 't6' });
+    check('no cover frame from TikTok yet → clear 422, no campaign created', r.status === 422 && /cover/.test(r.body.error) && !tiktokCalls.some((c) => c.path === '/campaign/create/'), { status: r.status, body: r.body });
+    tiktokCoverMock.list = [{ video_id: 'vid1', video_cover_url: 'https://cdn.example.invalid/tiktok-cover.jpg' }];
+    reset();
+    vs = await call('/api/campaigns/spec', { pkg: Object.assign({}, tkVideo, { tiktokAds: Object.assign({}, tkVideo.tiktokAds, { objective: 'Video Views' }) }), platform: 'tiktok' });
+    check('old TikTok package with the unpublishable "Video Views" objective → visible warning, publishes with the goal objective',
+      vs.status === 200 && vs.body.issues.some((i) => i.code === 'objective_unsupported' && i.level === 'warning') && vs.body.spec.campaign.objective === 'TRAFFIC', vs.body && vs.body.issues);
+
     console.log('\nE. Pinterest');
     const pinPkg = basePkg('pinterest', { pinterestAds: { title: 'Linen for summer', description: 'Breathable linen shirts', altText: 'A linen shirt', cta: 'Shop now', budget: 15 } });
     reset();
@@ -287,6 +316,93 @@ const server = app.listen(PORT, async () => {
     check('Chat result names what is still needed before publishing', /Still needed before publishing/.test(t.message) && t.execResult.issues.some((i) => i.code === 'special_categories_unconfirmed'));
     t = await toolRouter.resolveTool('edit_campaign_settings', { changes: { countries: ['Atlantis'] } }, { user: { id: 'u1' }, currentCampaign: { pkg: Object.assign(basePkg('meta'), { platform: 'meta' }) } });
     check('Chat: unknown country → asks instead of guessing', t.ok && !!t.clarification && /couldn’t recognise/.test(t.clarification));
+    console.log('\nG. Durable publish ledger (idempotency, recovery, status check)');
+    const ledgerRow = (u, p, c) => ledgerStore.rows.find((x) => x.user_id === u && x.platform === p && x.client_ref_id === c);
+    const status = (platform, body, tok) => realFetch(BASE + '/api/publish/' + platform + '/status', { method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + (tok || 'tok') }, body: JSON.stringify(body) }).then(async (x) => ({ status: x.status, body: await x.json().catch(() => null) }));
+    reset();
+    r = await call('/api/publish/meta', { pkg: metaPkg, campId: 'L1', opId: 'op-L1-a' });
+    let row = ledgerRow('u1', 'meta', 'L1');
+    check('success: ledger row published with the platform campaign id, op id and the SERVER-side ad account', r.status === 200 && row && row.state === 'published' && row.external_campaign_id === String(r.body.campaignId) && row.op_id === 'op-L1-a' && row.external_account_id === 'act_1' && r.body.accountId === 'act_1', { body: r.body && { accountId: r.body.accountId }, row });
+    reset();
+    r = await call('/api/publish/meta', { pkg: metaPkg, campId: 'L1', opId: 'op-L1-b' });
+    check('duplicate request after success (e.g. retry after a 504) → 409 ALREADY_PUBLISHED with the existing ids, nothing sent', r.status === 409 && r.body.code === 'ALREADY_PUBLISHED' && r.body.publish.campaignId === row.external_campaign_id && posts(/./).length === 0, r.body);
+    let st = await status('meta', { campId: 'L1' });
+    check('status check after an unconfirmed response → published, with campaign + account id', st.status === 200 && st.body.publish.state === 'published' && st.body.publish.campaignId === row.external_campaign_id && st.body.publish.accountId === 'act_1', st.body);
+    // Two server processes (separate in-memory locks), same ledger, same campaign, at once.
+    const app2 = express(); app2.use(express.json({ limit: '10mb' }));
+    const locks2 = new Map();
+    require('../routes/publishRoutes')(app2, Object.assign({}, deps, { acquirePublishLock: (u, p, c) => { const k = u + '|' + p + '|' + c; if (locks2.has(k)) return null; locks2.set(k, 1); return k; }, releasePublishLock: (k) => locks2.delete(k) }));
+    const server2 = app2.listen(PORT + 1);
+    reset();
+    const both = await Promise.all([call('/api/publish/meta', { pkg: metaPkg, campId: 'L2' }), realFetch('http://127.0.0.1:' + (PORT + 1) + '/api/publish/meta', { method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: 'Bearer tok' }, body: JSON.stringify({ pkg: metaPkg, campId: 'L2' }) }).then(async (x) => ({ status: x.status, body: await x.json() }))]);
+    check('concurrent publish on two server processes → exactly one campaign created, the other refused', both.filter((x) => x.status === 200).length === 1 && both.filter((x) => x.status === 409).length === 1 && posts(/\/campaigns$/).length === 1, both.map((x) => [x.status, x.body && x.body.code]));
+    // A request that started but never finished (server restart mid-publish).
+    const stale = (c, extra) => { ledgerStore.rows.push(Object.assign({ id: 'stale-' + c, user_id: 'u1', platform: 'meta', client_ref_id: c, op_id: 'op-' + c, state: 'publishing', campaign_name: 'Summer Linen Drop', external_account_id: 'act_1', started_at: new Date(Date.now() - 11 * 60000).toISOString(), finished_at: null, updated_at: new Date().toISOString() }, extra || {})); };
+    stale('L3');
+    reset();
+    r = await call('/api/publish/meta', { pkg: metaPkg, campId: 'L3' });
+    check('restart mid-publish (stale "publishing") → 409 RESULT_UNCONFIRMED, nothing sent again', r.status === 409 && r.body.code === 'RESULT_UNCONFIRMED' && posts(/./).length === 0 && ledgerRow('u1', 'meta', 'L3').state === 'unconfirmed', r.body);
+    const metaFound = { list: [] };
+    const origMF = deps.metaFetch;
+    deps.metaFetch = async (path, token, q) => (path === '/act_1/campaigns' ? { data: metaFound.list } : origMF(path, token, q));
+    st = await status('meta', { campId: 'L3' });
+    check('status check: platform has no campaign with that name since the attempt → failed (safe to publish again)', st.body.publish.state === 'failed' && st.body.resolvedBy === 'platform', st.body);
+    reset();
+    r = await call('/api/publish/meta', { pkg: metaPkg, campId: 'L3' });
+    check('after it is confirmed not created, publishing works again', r.status === 200 && ledgerRow('u1', 'meta', 'L3').state === 'published', r.body);
+    stale('L4');
+    metaFound.list = [{ id: '777', name: 'Summer Linen Drop', created_time: new Date(Date.now() - 10 * 60000).toISOString(), effective_status: 'PAUSED' }, { id: '600', name: 'Summer Linen Drop', created_time: new Date(Date.now() - 40 * 24 * 3600e3).toISOString() }];
+    st = await status('meta', { campId: 'L4' });
+    check('status check: exactly one same-named campaign created after the attempt → published with that id (older namesake ignored)', st.body.publish.state === 'published' && st.body.publish.campaignId === '777', st.body);
+    stale('L5');
+    metaFound.list = [{ id: '801', name: 'Summer Linen Drop', created_time: new Date().toISOString() }, { id: '802', name: 'Summer Linen Drop', created_time: new Date().toISOString() }];
+    st = await status('meta', { campId: 'L5' });
+    check('status check: ambiguous (two matches) → stays unconfirmed, manual check explained', st.body.publish.state === 'unconfirmed' && st.body.manual === true && /2 campaigns/.test(st.body.reason), st.body);
+    st = await status('meta', { campId: 'L5', confirmNotCreated: true });
+    check('user confirms it was not created → closed as failed (explicit, never automatic)', st.body.publish.state === 'failed' && st.body.resolvedBy === 'user', st.body);
+    stale('L6', { external_account_id: 'act_old' });
+    st = await status('meta', { campId: 'L6' });
+    check('status check when a different ad account is now selected → manual, names the campaign', st.body.manual === true && /different/.test(st.body.reason), st.body);
+    deps.metaFetch = origMF;
+    // Other platforms' lookups (mocked lists are empty → not created).
+    for (const p of ['google', 'tiktok', 'pinterest']) ledgerStore.rows.push({ id: 'stale-' + p, user_id: 'u1', platform: p, client_ref_id: 'L7', op_id: 'x', state: 'unconfirmed', campaign_name: 'Summer Linen Drop', external_account_id: null, started_at: new Date(Date.now() - 20 * 60000).toISOString(), updated_at: new Date().toISOString() });
+    reset();
+    const others = await Promise.all(['google', 'tiktok', 'pinterest'].map((p) => status(p, { campId: 'L7' })));
+    check('status check works for Google, TikTok and Pinterest too (read-only lookups)', others.every((x) => x.body.publish.state === 'failed'), others.map((x) => x.body));
+    check('status lookups never create anything (no POST/mutate to any platform)', posts(/./).length === 0 && !calls.some((c) => /:mutate$/.test(c.path)) && !tiktokCalls.some((c) => /create/.test(c.path)) && !pinCalls.some((c) => c.method === 'POST' || c.method === 'PIN'), { calls: calls.length, tiktok: tiktokCalls.map((c) => c.path), pin: pinCalls.map((c) => c.method + ' ' + c.path) });
+    // Confirmed failure, rollback reporting, and retry.
+    reset();
+    failOn.match = (c) => c.host === 'graph.mock' && /\/ads$/.test(c.path); failOn.times = 1;
+    r = await call('/api/publish/meta', { pkg: metaPkg, campId: 'L8' });
+    check('platform error → PUBLISH_FAILED (confirmed), rollback complete, ledger failed', r.status === 400 && r.body.code === 'PUBLISH_FAILED' && r.body.rollback.complete === true && ledgerRow('u1', 'meta', 'L8').state === 'failed', r.body);
+    reset();
+    r = await call('/api/publish/meta', { pkg: metaPkg, campId: 'L8' });
+    check('after a confirmed failure, publishing again is allowed', r.status === 200, r.body);
+    reset();
+    failOn.match = (c) => c.host === 'graph.mock' && (/\/ads$/.test(c.path) || c.method === 'DELETE'); failOn.times = 50;
+    r = await call('/api/publish/meta', { pkg: metaPkg, campId: 'L9' });
+    failOn.match = null;
+    check('rollback failure is reported (leftover paused objects counted), never hidden', r.body.code === 'PUBLISH_FAILED' && r.body.rollback.complete === false && r.body.rollback.leftovers > 0 && (ledgerRow('u1', 'meta', 'L9').rollback.leftovers || []).length > 0, r.body);
+    // Ownership / isolation.
+    const origUser = deps.getUserFromToken;
+    deps.getUserFromToken = async (req) => ((req.headers.authorization || '') === 'Bearer tok2' ? { id: 'u2' } : origUser(req));
+    st = await status('meta', { campId: 'L1' }, 'tok2');
+    check('another user cannot see (or settle) this user\'s publish operation', st.status === 200 && st.body.publish.state === 'none', st.body);
+    deps.getUserFromToken = origUser;
+    r = await call('/api/publish/meta', { pkg: metaPkg });
+    check('publish without a campaign id → 400 CAMPAIGN_ID_REQUIRED (no unkeyed publish)', r.status === 400 && r.body.code === 'CAMPAIGN_ID_REQUIRED', r.body);
+    // Ledger down → fail closed.
+    const app3 = express(); app3.use(express.json({ limit: '10mb' }));
+    const brokenStore = { get: async () => { throw new PL.LedgerUnavailable('missing'); }, insert: async () => { throw new PL.LedgerUnavailable('missing'); }, updateIf: async () => { throw new PL.LedgerUnavailable('missing'); } };
+    require('../routes/publishRoutes')(app3, Object.assign({}, deps, { publishLedger: PL.createLedger({ store: brokenStore }) }));
+    const server3 = app3.listen(PORT + 2);
+    reset();
+    const down = await realFetch('http://127.0.0.1:' + (PORT + 2) + '/api/publish/meta', { method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: 'Bearer tok' }, body: JSON.stringify({ pkg: metaPkg, campId: 'L10' }) }).then(async (x) => ({ status: x.status, body: await x.json() }));
+    check('ledger unavailable (migration not applied) → 503 PUBLISH_LEDGER_UNAVAILABLE, nothing sent', down.status === 503 && down.body.code === 'PUBLISH_LEDGER_UNAVAILABLE' && posts(/./).length === 0, down);
+    server2.close(); server3.close();
+    // Spec endpoint: checklist sections + recorded publish state.
+    r = await call('/api/campaigns/spec', { pkg: metaPkg, platform: 'meta', campId: 'L1' });
+    check('spec endpoint returns the Launch checklist (every section) and the recorded publish state', r.status === 200 && Array.isArray(r.body.sections) && r.body.sections.some((s) => s.key === 'compliance') && r.body.publish && r.body.publish.state === 'published', r.body && { sections: r.body.sections && r.body.sections.map((s) => s.key), publish: r.body.publish });
   } catch (e) {
     console.log('CRASH', e && e.stack || e); fail++;
   }

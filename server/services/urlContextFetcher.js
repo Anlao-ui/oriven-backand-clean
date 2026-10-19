@@ -52,6 +52,7 @@ const FETCH_TIMEOUT_MS = 8000;
 const MAX_REDIRECTS = 3;
 const MAX_BYTES = 1.5 * 1024 * 1024; // 1.5MB cap on the raw response body
 const MAX_EXTRACTED_TEXT = 6000; // matches _fetchWebsiteText's existing cap
+const MAX_RESEARCH_TEXT = 40000; // upper bound when a caller asks for more (Research source pages)
 const ALLOWED_CONTENT_TYPE_RE = /^(text\/html|text\/plain|application\/xhtml\+xml)\b/i;
 const ALLOWED_PROTOCOLS = new Set(['http:', 'https:']);
 
@@ -197,7 +198,7 @@ function fetchPinned(targetUrl, pinnedAddress, pinnedFamily) {
 // with script/style/nav noise stripped. Deliberately not a full DOM
 // parser; this project has none as a dependency and this is a "good
 // enough for LLM context" extraction, not a rendering engine.
-function extractContent(html) {
+function extractContent(html, maxText) {
   const titleMatch = html.match(/<title[^>]*>([^<]*)<\/title>/i);
   const descMatch = html.match(/<meta[^>]+name=["']description["'][^>]+content=["']([^"']*)["']/i);
   let text = html
@@ -210,7 +211,7 @@ function extractContent(html) {
     .replace(/&nbsp;/g, ' ').replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"').replace(/&#39;/g, "'")
     .replace(/\s+/g, ' ')
     .trim();
-  text = text.slice(0, MAX_EXTRACTED_TEXT);
+  text = text.slice(0, maxText || MAX_EXTRACTED_TEXT);
   return {
     title: titleMatch ? titleMatch[1].trim().slice(0, 200) : null,
     description: descMatch ? descMatch[1].trim().slice(0, 400) : null,
@@ -224,7 +225,10 @@ function extractContent(html) {
 // { ok:false, url, reason, code } instead, so a single bad URL can never
 // take down a whole research request. A genuinely unexpected error still
 // resolves the same honest shape rather than propagating.
-async function fetchUrlContext(rawUrl) {
+// opts.maxText: keep more extracted text (Research reads source pages for
+// supporting passages; capped at MAX_RESEARCH_TEXT). Default unchanged.
+async function fetchUrlContext(rawUrl, opts) {
+  const maxText = opts && opts.maxText ? Math.min(MAX_RESEARCH_TEXT, Math.max(1000, opts.maxText | 0)) : MAX_EXTRACTED_TEXT;
   let current;
   try {
     current = validateUrlSyntax(rawUrl);
@@ -245,7 +249,7 @@ async function fetchUrlContext(rawUrl) {
         current = next; // re-validated from scratch at the top of the next loop iteration
         continue;
       }
-      const extracted = extractContent(result.body);
+      const extracted = extractContent(result.body, maxText);
       return {
         ok: true,
         url: current.href,

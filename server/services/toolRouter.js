@@ -150,6 +150,15 @@ async function executeDirect(toolName, resolved, ctx) {
   const tool = TOOLS.get(toolName);
   if (!tool) return { ok: false, status: 404, error: `Unknown tool: ${toolName}` };
   try {
+    // Stored params from an older recommendation may name a campaign but
+    // carry no id (they used to execute against ".../campaign/undefined").
+    // Run the tool's own resolve step first so the action targets a real,
+    // uniquely matched campaign — or stops with a clear question.
+    if (tool.resolve && resolved && !resolved.campaignId && (resolved.campaignName || resolved.campaignQuery)) {
+      const r = await tool.resolve(Object.assign({ campaignQuery: resolved.campaignQuery || resolved.campaignName }, resolved), ctx);
+      if (!r || r.needsClarification || r.unsupported) return { ok: false, status: 409, error: (r && (r.needsClarification || r.unsupported)) || 'That campaign could not be identified.' };
+      resolved = Object.assign({}, resolved, r);
+    }
     const execResult = await tool.execute(resolved, ctx);
     const message = tool.formatResult ? tool.formatResult(execResult, resolved) : 'Done.';
     if (ctx && ctx.user && ctx.user.id) {

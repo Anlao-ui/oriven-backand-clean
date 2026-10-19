@@ -53,6 +53,9 @@ function violates(t, cand, ignore) {
   }
   return false;
 }
+// Same CHECK constraint as production (migration 2026-10-creative-assets.sql).
+const CHECKS = { creative_assets: (r) => r.status == null || ['draft', 'needs_improvement', 'ready', 'approved', 'published', 'rejected'].includes(r.status) };
+const checkFails = (t, r) => !!(CHECKS[t] && !CHECKS[t](r));
 class Q {
   constructor(t) { this.t = t; this.op = 'select'; this.f = []; this.wantRows = false; this.lim = null; }
   select() { if (this.op !== 'select') this.wantRows = true; return this; }
@@ -80,12 +83,14 @@ class Q {
     const match = () => all.filter((r) => this.f.every((fn) => fn(r)));
     if (this.op === 'insert' || this.op === 'upsert') {
       const items = (Array.isArray(this.p) ? this.p : [this.p]).map((x) => Object.assign({ created_at: new Date().toISOString() }, x));
+      for (const it of items) if (checkFails(this.t, it)) return { data: null, error: { code: '23514', message: 'new row for relation "' + this.t + '" violates check constraint "' + this.t + '_status_check"' } };
       for (const it of items) if (this.op === 'insert' && violates(this.t, it)) return { data: null, error: { code: '23505', message: 'duplicate key value violates unique constraint' } };
       items.forEach((it) => all.push(it));
       return { data: this.wantRows ? items.map((x) => ({ ...x })) : null, error: null };
     }
     if (this.op === 'update') {
       const m = match();
+      for (const r of m) { if (checkFails(this.t, Object.assign({}, r, this.p))) return { data: null, error: { code: '23514', message: 'violates check constraint "' + this.t + '_status_check"' } }; }
       for (const r of m) { const next = Object.assign({}, r, this.p); if (violates(this.t, next, r)) return { data: null, error: { code: '23505', message: 'duplicate key' } }; }
       m.forEach((r) => Object.assign(r, this.p));
       return { data: this.wantRows ? m.map((x) => ({ ...x })) : null, error: null };
@@ -213,10 +218,20 @@ const AD = { product: 'Organic coffee subscription', goal: 'Sales', platform: 'g
 
   // ── Research ─────────────────────────────────────────────────
   say('\nResearch');
+  // Research 2.0 is an asynchronous job: 202, then the charge settles when it ends.
+  const researchDone = async (resp) => {
+    if (!resp || resp.status !== 202) return resp;
+    for (let i = 0; i < 150; i++) {
+      const g = await call('GET', '/api/research/reports/' + resp.body.reportId, 'tok1');
+      if (g.status !== 200 || (g.body.summary && g.body.summary.status !== 'running')) { await sleep(30); return Object.assign({}, resp, { final: g.body && g.body.summary }); }
+      await sleep(30);
+    }
+    return resp;
+  };
   reset();
-  let r = await call('POST', '/api/research/query', 'tok1', RS, { 'X-Idempotency-Key': key() });
-  check('success: exactly one charge of 25', r.status === 200 && bal('u1') === 975 && spendRpcs() === 1 && refundRpcs() === 0, { status: r.status, bal: bal('u1') });
-  check('success: 1 Opus synthesis + 1 web search, nothing else', textCalls(OPUS) === 1 && textCalls('perplexity/sonar') === 1 && prov.calls.length === 2, prov.calls.map((c) => c.model));
+  let r = await researchDone(await call('POST', '/api/research/query', 'tok1', RS, { 'X-Idempotency-Key': key() }));
+  check('success: exactly one charge of 25', r.status === 202 && r.final && r.final.status === 'ready' && bal('u1') === 975 && spendRpcs() === 1 && refundRpcs() === 0, { status: r.status, bal: bal('u1') });
+  check('success: 1 Opus synthesis + 2–3 web searches, nothing else', textCalls(OPUS) === 1 && textCalls('perplexity/sonar') >= 2 && textCalls('perplexity/sonar') <= 3 && prov.calls.length === 1 + textCalls('perplexity/sonar'), prov.calls.map((c) => c.model));
   check('success: ledger row carries the action id', rows('credit_transactions').some((t) => t.feature_key === 'ai_analysis' && t.request_id && t.charged), rows('credit_transactions'));
 
   const failureCases = [
@@ -229,9 +244,9 @@ const AD = { product: 'Organic coffee subscription', goal: 'Sales', platform: 'g
   for (const [label, synth] of failureCases) {
     reset();
     prov.handler = (c) => (c.model === OPUS ? synth(c) : defaultHandler(c));
-    r = await call('POST', '/api/research/query', 'tok1', RS, { 'X-Idempotency-Key': key() });
-    check(`failure (${label}): net 0 credits, refunded exactly once, response says so`,
-      (label.startsWith('empty') ? r.status === 200 : r.status >= 400) && bal('u1') === 1000 && spendRpcs() === 1 && refundRpcs() === 1 && r.body.creditsRefunded === true &&
+    r = await researchDone(await call('POST', '/api/research/query', 'tok1', RS, { 'X-Idempotency-Key': key() }));
+    check(`failure (${label}): net 0 credits, refunded exactly once, report marked failed`,
+      r.status === 202 && r.final && r.final.status === 'failed' && !!r.final.error && bal('u1') === 1000 && spendRpcs() === 1 && refundRpcs() === 1 &&
       rows('credit_transactions').filter((t) => t.feature_key === 'ai_analysis_refund').length === 1, { status: r.status, bal: bal('u1'), refunds: refundRpcs(), body: r.body });
   }
 
@@ -241,12 +256,12 @@ const AD = { product: 'Organic coffee subscription', goal: 'Sales', platform: 'g
 
   reset();
   const k1 = key();
-  const r1 = await call('POST', '/api/research/query', 'tok1', RS, { 'X-Idempotency-Key': k1 });
+  const r1 = await researchDone(await call('POST', '/api/research/query', 'tok1', RS, { 'X-Idempotency-Key': k1 }));
   const r2 = await call('POST', '/api/research/query', 'tok1', RS, { 'X-Idempotency-Key': k1 });
   check('same action key sent twice: second refused (409 DUPLICATE_ACTION), one charge, one provider workflow',
-    r1.status === 200 && r2.status === 409 && r2.body.code === 'DUPLICATE_ACTION' && bal('u1') === 975 && textCalls(OPUS) === 1, { r2: r2.body, bal: bal('u1'), opus: textCalls(OPUS) });
-  const r3 = await call('POST', '/api/research/query', 'tok1', RS, { 'X-Idempotency-Key': key() });
-  check('Retry with a NEW key is a new intentional action (charged once more)', r3.status === 200 && bal('u1') === 950 && textCalls(OPUS) === 2);
+    r1.status === 202 && r2.status === 409 && r2.body.code === 'DUPLICATE_ACTION' && bal('u1') === 975 && textCalls(OPUS) === 1, { r2: r2.body, bal: bal('u1'), opus: textCalls(OPUS) });
+  const r3 = await researchDone(await call('POST', '/api/research/query', 'tok1', RS, { 'X-Idempotency-Key': key() }));
+  check('Retry with a NEW key is a new intentional action (charged once more)', r3.status === 202 && bal('u1') === 950 && textCalls(OPUS) === 2);
 
   // ── Create Ad: the 31-request burst ─────────────────────────
   say('\nCreate Ad');
@@ -339,7 +354,8 @@ const AD = { product: 'Organic coffee subscription', goal: 'Sales', platform: 'g
   rows('credit_actions').push({ id: 'stale-1', user_id: 'u1', lane: 'research', idempotency_key: 'old', status: 'in_progress', charged: true, credits_cost: 25, feature_key: 'ai_analysis', created_at: new Date(Date.now() - 11 * 60 * 1000).toISOString() });
   rows('profiles')[0].credits_balance = 975; // the crashed request had charged 25
   r = await call('POST', '/api/research/query', 'tok1', RS, { 'X-Idempotency-Key': key() });
-  check('lane held by a crashed request (11 min old): expired + its 25 credits refunded once, new research runs', r.status === 200 && bal('u1') === 975 && refundRpcs() === 1 && rows('credit_actions').find((x) => x.id === 'stale-1').status === 'refunded', { bal: bal('u1'), status: r.status });
+  r = await researchDone(r);
+  check('lane held by a crashed request (11 min old): expired + its 25 credits refunded once, new research runs', r.status === 202 && bal('u1') === 975 && refundRpcs() === 1 && rows('credit_actions').find((x) => x.id === 'stale-1').status === 'refunded', { bal: bal('u1'), status: r.status });
 
   reset();
   const resv = await creditManager.reserveCredits({ id: 'u1' }, 'ai_analysis');
@@ -351,11 +367,12 @@ const AD = { product: 'Organic coffee subscription', goal: 'Sales', platform: 'g
   spendGuard.recordCall({ userId: 'u1', model: OPUS, usage: { promptTokens: 1000, completionTokens: 1000 }, success: true });
   prov.calls.length = 0;
   r = await call('POST', '/api/research/query', 'tok1', RS, { 'X-Idempotency-Key': key() });
-  check('daily spend cap reached: no provider call is made and the charge is refunded', prov.calls.length === 0 && bal('u1') === 1000 && r.status >= 500, { calls: prov.calls.length, bal: bal('u1'), status: r.status });
+  r = await researchDone(r);
+  check('daily spend cap reached: no provider call is made and the charge is refunded', prov.calls.length === 0 && bal('u1') === 1000 && r.final && r.final.status === 'failed', { calls: prov.calls.length, bal: bal('u1'), status: r.status });
   delete process.env.AI_DAILY_COST_CAP_USD;
 
-  const COSTS = { ai_chat: 5, ai_analysis: 25, campaign_improvement: 10, audience_generation: 10, product_analysis: 10, competitor_analysis: 15, brand_voice: 20, campaign_generation: 25, website_analysis: 30, image_generation: 75, video_generation: 200, autopilot: 25 };
-  check('credit prices unchanged', JSON.stringify(creditManager.FEATURE_COSTS) === JSON.stringify(COSTS), creditManager.FEATURE_COSTS);
+  const COSTS = { ai_chat: 5, ai_analysis: 25, campaign_improvement: 10, audience_generation: 10, product_analysis: 10, competitor_analysis: 15, brand_voice: 20, campaign_generation: 25, website_analysis: 30, image_generation: 75, video_generation: 200, automation: 50 };
+  check('credit prices: unchanged except Automations = 50 credits once per new automation (was 25 per execution)', JSON.stringify(creditManager.FEATURE_COSTS) === JSON.stringify(COSTS), creditManager.FEATURE_COSTS);
   check('plan allowances unchanged (Free 10/day, 1,000 / 2,500 / 4,000)', JSON.stringify(creditManager.PLAN_ALLOWANCES) === JSON.stringify({ free: 10, starter: 1000, creator: 2500, professional: 4000 }));
   check('no outbound network requests were attempted', blocked.length === 0, blocked);
 

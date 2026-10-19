@@ -67,7 +67,7 @@ const P = (id, created, extra) => Object.assign({ id, email: id + '@example.inva
   const po = (k) => T.render('paid_onboarding', { plan: k }, CTX).html;
   check('Oriven Chat only promised where the plan has it', ['starter', 'creator', 'professional'].every((k) => /Oriven Chat/.test(po(k)) === ENT[k].orivenChat));
   check('Priority Support only promised on Professional', ['starter', 'creator', 'professional'].every((k) => /Priority Support/.test(po(k)) === ENT[k].prioritySupport));
-  check('Autopilot described as Meta and Google only', ['starter', 'creator'].every((k) => /Meta (and|or) Google/.test(po(k))) && !/TikTok[^<]*Autopilot|Autopilot[^<]*TikTok/.test(po('starter')));
+  check('Automations (formerly Autopilot) named, no leftover Autopilot copy, no AI or platform promises', ['starter', 'creator', 'professional'].every((k) => /Automations/.test(po(k)) && !/Autopilot/.test(po(k)) && !/AI[^<]*Automations|Automations[^<]*AI/.test(po(k))));
   const ue = T.render('upgrade_education', { action: 'research', plan: 'starter' }, CTX);
   check('upgrade email: €9.95/month and 1,000 credits, English number format', /€9\.95/.test(ue.html) && /1,000 credits/.test(ue.html) && !/1\.000/.test(ue.html + ue.text));
   const all = Object.keys(T.TEMPLATES).map((k) => T.render(k, { firstName: 'Sam', plan: 'starter', kind: 'create', action: 'research', verifyUrl: 'https://orivenai.com/app?verify_token=abc' }, Object.assign({ postalAddress: 'OrivenAI B.V. · Street 1, Town' }, CTX)));

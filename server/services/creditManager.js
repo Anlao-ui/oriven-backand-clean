@@ -84,7 +84,11 @@ const FEATURE_COSTS = {
   website_analysis:     30,
   image_generation:     75,   // "Image Ad" — 75 credits
   video_generation:    200,   // "Video Ad" — 200 credits
-  autopilot:            25,   // "Autopilot" — 25 credits / execution (see _evaluateAutomationRules)
+  // "Automations" — 50 credits ONCE, when a new automation (rule or
+  // schedule) is created (routes/automationRoutes.js). Checks, notifications,
+  // pauses, resumes, budget changes, edits and re-enabling are free.
+  // (Replaces the old per-execution "autopilot" charge of 25.)
+  automation:           50,
 };
 
 // ── Plan allowances / seats — the other half of the pricing brief's config.
@@ -509,6 +513,7 @@ async function getCreditStatus(userId) {
       .from('creative_assets')
       .select('id', { count: 'exact', head: true })
       .eq('user_id', userId)
+      .neq('kind', 'research') // research reports are not saved assets
       .eq('archived', false);
     if (assetErr) throw assetErr;
     savedAssets = assetCount || 0;
