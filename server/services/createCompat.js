@@ -237,7 +237,7 @@
   function check(input, opts) {
     input = input || {}; opts = opts || {};
     var issues = [];
-    var add = function (code, field, key) { var r = REASONS[key] || REASONS[code] || { message: code, suggestion: '' }; issues.push({ code: code, field: field, message: r.message, suggestion: r.suggestion }); };
+    var add = function (code, field, key) { var r = REASONS[key] || REASONS[code] || { message: code, suggestion: '' }; issues.push({ code: code, field: field, reason: REASONS[key] ? key : code, message: r.message, suggestion: r.suggestion }); };
     var p = _lower(input.platform);
     var pi = PLATFORMS[p];
     if (!pi) { add('platform_unknown', 'platform', 'platform_unknown'); return { ok: false, issues: issues, version: VERSION }; }

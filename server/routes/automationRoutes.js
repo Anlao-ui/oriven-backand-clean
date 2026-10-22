@@ -43,7 +43,7 @@ module.exports = function registerAutomationRoutes(app, d) {
   const adapters = P.create(d.platformHelpers);
   const getSettingsRef = { fn: null };
   const notifier = createNotifier({ db, sender: d.sender, templates: d.templates, lifecycle: d.lifecycle, getSettings: (u) => getSettingsRef.fn(u), appUrl: d.appUrl, apiUrl: d.apiUrl, log: d.log });
-  const engine = createEngine({ db, adapters, notifier, killSwitch: d.killSwitch, planOf: d.planOf, log: d.log });
+  const engine = createEngine({ db, adapters, notifier, killSwitch: d.killSwitch, planOf: d.planOf, log: d.log, activateCampaign: d.activateCampaign });
   getSettingsRef.fn = engine.getSettings;
   const guard = d.requireAutopilotAccess;
   const COST = () => d.creditManager.FEATURE_COSTS.automation;
@@ -147,7 +147,7 @@ module.exports = function registerAutomationRoutes(app, d) {
           completed: live.filter((r) => r.status === 'completed').length,
           rules: live.filter((r) => r.kind === 'rule').length, schedules: live.filter((r) => r.kind === 'schedule').length,
           scheduled: (jobs.data || []).length, pendingApprovals: (approvals.data || []).length,
-          completed7d: ex.filter((e) => e.status === 'completed').length, failed7d: ex.filter((e) => e.status === 'failed').length, skipped7d: ex.filter((e) => e.status === 'skipped').length,
+          completed7d: ex.filter((e) => e.status === 'completed').length, failed7d: ex.filter((e) => e.status === 'failed').length, partial7d: ex.filter((e) => e.status === 'partial').length, skipped7d: ex.filter((e) => e.status === 'skipped').length,
           managedCampaigns: Array.from(managed).filter((k) => !k.endsWith(':*')).length, accountWide: Array.from(managed).filter((k) => k.endsWith(':*')).map((k) => k.split(':')[0]),
         },
         nextRun: (jobs.data || [])[0] || null,
@@ -163,7 +163,7 @@ module.exports = function registerAutomationRoutes(app, d) {
     try {
       let q = db.from('automation_executions').select('*').eq('user_id', req.user.id);
       const st = String(req.query.status || '');
-      if (['completed', 'failed', 'skipped', 'pending_approval', 'cancelled', 'running', 'scheduled'].includes(st)) q = q.eq('status', st);
+      if (['completed', 'partial', 'failed', 'skipped', 'pending_approval', 'cancelled', 'running', 'scheduled'].includes(st)) q = q.eq('status', st);
       if (req.query.automation_id) q = q.eq('automation_id', String(req.query.automation_id));
       if (req.query.before) q = q.lt('created_at', String(req.query.before));
       const { data, error } = await q.order('created_at', { ascending: false }).limit(Math.min(100, Number(req.query.limit) || 50));

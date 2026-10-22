@@ -90,6 +90,7 @@ function unverifiedSteps(platform) {
   const toStep = (c) => step(STEP_STATUS.NOT_VERIFIED_BY_ORIVEN, {
     key: c.key,
     label: c.label,
+    reasonCode: 'not_checked',
     reason: 'ORIVEN does not yet check this — the platform enforces it at publish time today.',
     officialFlow: c.officialFlow,
   });
@@ -131,7 +132,7 @@ function checkMetaSetup(row) {
   if (!isTokenValid(row)) {
     result.state = STATE.AUTHENTICATION_REQUIRED;
     result.actionRequired = 'authentication';
-    result.steps.authentication = step(STEP_STATUS.ACTION_REQUIRED, { reason: 'Token missing or expired — Meta does not support silent refresh; full reconnect required.' });
+    result.steps.authentication = step(STEP_STATUS.ACTION_REQUIRED, { reasonCode: 'meta_reconnect', reason: 'Token missing or expired — Meta does not support silent refresh; full reconnect required.' });
     return result;
   }
   result.steps.authentication = step(STEP_STATUS.COMPLETE);
@@ -143,11 +144,11 @@ function checkMetaSetup(row) {
       result.state = STATE.ACCOUNT_CREATION_REQUIRED;
       result.actionRequired = 'account';
       result.officialFlow = { label: 'Continue to Meta', urlTemplate: 'https://business.facebook.com/settings/ad-accounts' };
-      result.steps.account = step(STEP_STATUS.ACTION_REQUIRED, { reason: 'No ad account found. Meta ad account creation requires Business Verification and is not something ORIVEN performs today.' });
+      result.steps.account = step(STEP_STATUS.ACTION_REQUIRED, { reasonCode: 'meta_no_account', reason: 'No ad account found. Meta ad account creation requires Business Verification and is not something ORIVEN performs today.' });
     } else {
       result.state = STATE.ACCOUNT_SELECTION_REQUIRED;
       result.actionRequired = 'account';
-      result.steps.account = step(STEP_STATUS.ACTION_REQUIRED, { reason: 'One or more ad accounts found — select one to continue.', count: accounts.length });
+      result.steps.account = step(STEP_STATUS.ACTION_REQUIRED, { reasonCode: 'select_ad_account', reason: 'One or more ad accounts found — select one to continue.', count: accounts.length });
     }
     return result;
   }
@@ -161,7 +162,7 @@ function checkMetaSetup(row) {
   if (!activePage) {
     result.state = STATE.ASSETS_REQUIRED;
     result.actionRequired = 'assets';
-    result.steps.assets = step(STEP_STATUS.ACTION_REQUIRED, { reason: pages.length ? 'Select a Facebook Page to advertise from.' : 'No Facebook Page found — connect one in Meta.', count: pages.length });
+    result.steps.assets = step(STEP_STATUS.ACTION_REQUIRED, { reasonCode: pages.length ? 'meta_select_page' : 'meta_no_page', reason: pages.length ? 'Select a Facebook Page to advertise from.' : 'No Facebook Page found — connect one in Meta.', count: pages.length });
     return result;
   }
   result.steps.assets = step(STEP_STATUS.COMPLETE, { pageId: activePage.page_id, pageName: activePage.page_name });
@@ -182,7 +183,7 @@ function checkGoogleSetup(row) {
   if (!isTokenValid(row) && !row.refresh_token) {
     result.state = STATE.AUTHENTICATION_REQUIRED;
     result.actionRequired = 'authentication';
-    result.steps.authentication = step(STEP_STATUS.ACTION_REQUIRED, { reason: 'Token expired and no refresh token stored — reconnect required.' });
+    result.steps.authentication = step(STEP_STATUS.ACTION_REQUIRED, { reasonCode: 'google_reconnect', reason: 'Token expired and no refresh token stored — reconnect required.' });
     return result;
   }
   // A stored refresh_token means the existing _getGadsAccess() will
@@ -200,6 +201,7 @@ function checkGoogleSetup(row) {
       result.actionRequired = 'account';
       result.officialFlow = { label: 'Continue to Google Ads', urlTemplate: 'https://ads.google.com/aw/overview' };
       result.steps.account = step(STEP_STATUS.ACTION_REQUIRED, {
+        reasonCode: accounts.length ? 'google_manager_only' : 'google_no_account',
         reason: accounts.length
           ? 'Only manager (MCC) accounts found — an actual advertiser account is required. Creating one via API depends on manager-account spend/policy eligibility ORIVEN has not checked; use Google Ads to create or link one.'
           : 'No Google Ads account found.',
@@ -207,7 +209,7 @@ function checkGoogleSetup(row) {
     } else {
       result.state = STATE.ACCOUNT_SELECTION_REQUIRED;
       result.actionRequired = 'account';
-      result.steps.account = step(STEP_STATUS.ACTION_REQUIRED, { reason: 'One or more advertiser accounts found — select one to continue.', count: nonManagerAccounts.length });
+      result.steps.account = step(STEP_STATUS.ACTION_REQUIRED, { reasonCode: 'select_advertiser', reason: 'One or more advertiser accounts found — select one to continue.', count: nonManagerAccounts.length });
     }
     return result;
   }
@@ -216,13 +218,13 @@ function checkGoogleSetup(row) {
     // a manager account can never itself be the publish target.
     result.state = STATE.ACCOUNT_SELECTION_REQUIRED;
     result.actionRequired = 'account';
-    result.steps.account = step(STEP_STATUS.ACTION_REQUIRED, { reason: 'The selected account is a Manager (MCC) account and has no campaigns of its own — select a real advertiser account.' });
+    result.steps.account = step(STEP_STATUS.ACTION_REQUIRED, { reasonCode: 'google_manager_selected', reason: 'The selected account is a Manager (MCC) account and has no campaigns of its own — select a real advertiser account.' });
     return result;
   }
   result.steps.account = step(STEP_STATUS.COMPLETE, { accountId: activeAccount.account_id, accountName: activeAccount.account_name });
   // Google's publish route needs no further platform-specific asset
   // selection beyond the customer account itself.
-  result.steps.assets = step(STEP_STATUS.COMPLETE, { reason: 'No additional asset selection required by the current publish pipeline.' });
+  result.steps.assets = step(STEP_STATUS.COMPLETE, { reasonCode: 'assets_not_needed', reason: 'No additional asset selection required by the current publish pipeline.' });
 
   result.state = STATE.READY_LIMITED_VERIFICATION;
   result.ready = true;
@@ -244,7 +246,7 @@ function checkTikTokSetup(row) {
     // actually used by _getTikTokAccess today (server.js:8039-8065) —
     // reported honestly as a full reconnect requirement, not silently
     // assumed to auto-refresh like Google/Pinterest.
-    result.steps.authentication = step(STEP_STATUS.ACTION_REQUIRED, { reason: 'Token expired. A refresh_token is stored but ORIVEN does not yet use it automatically — reconnect required.' });
+    result.steps.authentication = step(STEP_STATUS.ACTION_REQUIRED, { reasonCode: 'tiktok_reconnect', reason: 'Token expired. A refresh_token is stored but ORIVEN does not yet use it automatically — reconnect required.' });
     return result;
   }
   result.steps.authentication = step(STEP_STATUS.COMPLETE);
@@ -256,11 +258,11 @@ function checkTikTokSetup(row) {
       result.state = STATE.ACCOUNT_CREATION_REQUIRED;
       result.actionRequired = 'account';
       result.officialFlow = { label: 'Continue to TikTok', urlTemplate: 'https://business.tiktok.com/' };
-      result.steps.account = step(STEP_STATUS.ACTION_REQUIRED, { reason: 'No advertiser account found. Creation requires a TikTok Business Center ORIVEN cannot create on your behalf today.' });
+      result.steps.account = step(STEP_STATUS.ACTION_REQUIRED, { reasonCode: 'tiktok_no_account', reason: 'No advertiser account found. Creation requires a TikTok Business Center ORIVEN cannot create on your behalf today.' });
     } else {
       result.state = STATE.ACCOUNT_SELECTION_REQUIRED;
       result.actionRequired = 'account';
-      result.steps.account = step(STEP_STATUS.ACTION_REQUIRED, { reason: 'One or more advertiser accounts found — select one to continue.', count: accounts.length });
+      result.steps.account = step(STEP_STATUS.ACTION_REQUIRED, { reasonCode: 'select_advertiser', reason: 'One or more advertiser accounts found — select one to continue.', count: accounts.length });
     }
     return result;
   }
@@ -273,7 +275,7 @@ function checkTikTokSetup(row) {
   if (!activeIdentity) {
     result.state = STATE.ASSETS_REQUIRED;
     result.actionRequired = 'assets';
-    result.steps.assets = step(STEP_STATUS.ACTION_REQUIRED, { reason: 'Select a TikTok Identity to publish ads as.' });
+    result.steps.assets = step(STEP_STATUS.ACTION_REQUIRED, { reasonCode: 'tiktok_select_identity', reason: 'Select a TikTok Identity to publish ads as.' });
     return result;
   }
   result.steps.assets = step(STEP_STATUS.COMPLETE, { identityId: activeIdentity.identity_id, displayName: activeIdentity.display_name });
@@ -297,7 +299,7 @@ function checkPinterestSetup(row) {
   if (!isTokenValid(row) && !row.refresh_token) {
     result.state = STATE.AUTHENTICATION_REQUIRED;
     result.actionRequired = 'authentication';
-    result.steps.authentication = step(STEP_STATUS.ACTION_REQUIRED, { reason: 'Token expired and no refresh token available — reconnect required.' });
+    result.steps.authentication = step(STEP_STATUS.ACTION_REQUIRED, { reasonCode: 'pinterest_reconnect', reason: 'Token expired and no refresh token available — reconnect required.' });
     return result;
   }
   result.steps.authentication = step(STEP_STATUS.COMPLETE);
@@ -313,16 +315,16 @@ function checkPinterestSetup(row) {
       result.state = STATE.MANUAL_ACTION_REQUIRED;
       result.actionRequired = 'account';
       result.officialFlow = { label: 'Continue to Pinterest', urlTemplate: 'https://www.pinterest.com/business/create/' };
-      result.steps.account = step(STEP_STATUS.ACTION_REQUIRED, { reason: 'No ad account found. Pinterest requires first-time advertisers to create their first ad account on Pinterest directly — this is not an API operation.' });
+      result.steps.account = step(STEP_STATUS.ACTION_REQUIRED, { reasonCode: 'pinterest_no_account', reason: 'No ad account found. Pinterest requires first-time advertisers to create their first ad account on Pinterest directly — this is not an API operation.' });
     } else {
       result.state = STATE.ACCOUNT_SELECTION_REQUIRED;
       result.actionRequired = 'account';
-      result.steps.account = step(STEP_STATUS.ACTION_REQUIRED, { reason: 'One or more ad accounts found — select one to continue.', count: accounts.length });
+      result.steps.account = step(STEP_STATUS.ACTION_REQUIRED, { reasonCode: 'select_ad_account', reason: 'One or more ad accounts found — select one to continue.', count: accounts.length });
     }
     return result;
   }
   result.steps.account = step(STEP_STATUS.COMPLETE, { accountId: activeAccount.account_id, accountName: activeAccount.account_name });
-  result.steps.assets = step(STEP_STATUS.COMPLETE, { reason: 'No additional asset selection required by the current publish pipeline (boards are created automatically as needed).' });
+  result.steps.assets = step(STEP_STATUS.COMPLETE, { reasonCode: 'pinterest_boards_auto', reason: 'No additional asset selection required by the current publish pipeline (boards are created automatically as needed).' });
 
   result.state = STATE.READY_LIMITED_VERIFICATION;
   result.ready = true;

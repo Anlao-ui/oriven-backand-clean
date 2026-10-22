@@ -16,7 +16,7 @@
 const crypto = require('crypto');
 const { SHARED } = require('./limits');
 
-const EMAIL_EVENTS = ['executed', 'failed', 'approval', 'paused', 'resumed', 'budget_changed', 'scheduled_completed', 'disconnected', 'credentials_expired'];
+const EMAIL_EVENTS = ['executed', 'failed', 'partial', 'approval', 'paused', 'resumed', 'budget_changed', 'scheduled_completed', 'disconnected', 'credentials_expired'];
 const KINDS = EMAIL_EVENTS.concat(['skipped', 'missed', 'conflict']);
 
 function createNotifier({ db, sender, templates, lifecycle, getSettings, appUrl, apiUrl, log }) {
@@ -39,7 +39,7 @@ function createNotifier({ db, sender, templates, lifecycle, getSettings, appUrl,
       await db.from('intelligence_events').insert({
         user_id: userId, platform: n.platform || null, campaign_name: n.campaignName || null, type: 'campaign_action',
         title: (n.automationName ? `Automation "${n.automationName}": ` : 'Automation: ') + row.title,
-        detail: row.body, severity: n.kind === 'failed' || n.kind === 'credentials_expired' || n.kind === 'disconnected' ? 'high' : (n.kind === 'approval' ? 'medium' : 'low'),
+        detail: row.body, severity: n.kind === 'failed' || n.kind === 'credentials_expired' || n.kind === 'disconnected' ? 'high' : (n.kind === 'approval' || n.kind === 'partial' ? 'medium' : 'low'),
         message: row.body || row.title,
       }).then(() => {}, () => {});
     }

@@ -96,6 +96,9 @@ function createEngine(deps) {
   const clock = deps.now || (() => Date.now());
   const worker = deps.workerId || ('w-' + crypto.randomBytes(4).toString('hex'));
   const killed = () => (deps.killSwitch ? !!deps.killSwitch() : false);
+  // Launch's activation (services/campaignActivation.js), injected by server.js.
+  const activateCampaign = deps.activateCampaign || null;
+  const ACTIVATED_PLATFORMS = ['meta', 'tiktok', 'pinterest'];
 
   // ── Settings ─────────────────────────────────────────────────────
   async function getSettings(userId) {
@@ -130,6 +133,44 @@ function createEngine(deps) {
       .map((e) => ({ at: e.finished_at, previous: Number(e.previous_value.amount), next: Number(e.new_value.amount) }));
   }
 
+  // ── Activation (shared with Launch) ──────────────────────────────
+  // Maps services/campaignActivation.js run() to an execution result:
+  //   completed — everything OrivenAI created is on, read back from the platform
+  //   partial   — the campaign is on, but ads / ad sets are still paused, or
+  //               the platform couldn't be read back, or there is no record of
+  //               what OrivenAI created (nothing was guessed)
+  //   failed    — the campaign was NOT switched on (it stays paused)
+  //   skipped   — Launch (or another run) is activating it right now
+  // A timed-out step is "unconfirmed" and never retried automatically.
+  async function activationResult(a, c) {
+    const prev = { status: c.status };
+    let rep;
+    try { rep = await activateCampaign(a.userId, a.platform, c.id); }
+    catch (err) {
+      const code = err && err.code;
+      const r = (err && err.report) || null;
+      const cnt = (o) => (o ? (o.adSets || []).length + (o.ads || []).length : 0);
+      if (code === 'ACTIVATION_IN_PROGRESS') return { status: 'skipped', reason: 'activation_in_progress', previous: prev };
+      if (code === 'WRONG_ACCOUNT') return { status: 'failed', reason: 'wrong_account', errorKind: 'platform', previous: prev, error: 'This campaign was published to another ad account than the one connected now. Nothing was changed.' };
+      if (code === 'NOT_FOUND' || (err && /OBJECT_NOT_/.test(err.metaCategory || ''))) return { status: 'failed', reason: 'campaign_not_found', errorKind: 'platform', previous: prev, error: 'The campaign isn’t in the connected ad account. Nothing was changed.' };
+      if (code === 'ACTIVATION_INCOMPLETE') {
+        const cause = err.cause ? P.classifyError(err.cause) : { kind: 'platform', message: '' };
+        const detail = (r && (cnt(r.enabled) || cnt(r.failed))) ? ` ${cnt(r.enabled)} of its ads and ad sets were switched on, ${cnt(r.failed)} couldn’t be.` : '';
+        if (err.timeout) return { status: 'failed', reason: 'activation_unconfirmed', errorKind: 'unconfirmed', previous: prev, error: trunc(`The platform didn’t answer in time, so OrivenAI can’t confirm what changed. The campaign stays paused — nothing spends.${detail} Check it before running this again.`, 300) };
+        return { status: 'failed', reason: 'activation_incomplete', errorKind: cause.kind, previous: prev, next: r ? { status: 'paused', activation: { enabled: cnt(r.enabled), failed: cnt(r.failed) } } : null,
+          error: trunc(`The campaign wasn’t switched on, so nothing spends.${detail}${cause.message ? ' ' + cause.message : ''}`, 300) };
+      }
+      const k = P.classifyError(err);
+      return { status: 'failed', reason: k.kind, error: trunc(k.message, 300), errorKind: k.kind, previous: prev };
+    }
+    const left = rep.remainingPaused.adSets.length + rep.remainingPaused.ads.length;
+    const next = { status: 'active', activation: { state: rep.state, first: rep.firstActivation, scope: rep.scope, enabled: rep.enabled.adSets.length + rep.enabled.ads.length, stillPaused: left, missing: rep.missing.adSets.length + rep.missing.ads.length } };
+    if (rep.state === 'active') return { status: 'completed', previous: prev, next };
+    if (rep.state === 'unverified') return { status: 'partial', reason: 'activation_unverified', previous: prev, next, error: 'The campaign is on, but OrivenAI couldn’t read back its ad sets and ads, so it can’t confirm ads are delivering.' };
+    if (rep.scope === 'none') return { status: 'partial', reason: 'no_publish_record', previous: prev, next, error: `The campaign is on, but OrivenAI has no record of the ad sets and ads it created, so it didn’t switch any on. ${left} are paused — switch them on in the platform.` };
+    return { status: 'partial', reason: 'activation_partial', previous: prev, next, error: `The campaign is on, but ${left} of its ad sets and ads are still paused, so they don’t deliver.` };
+  }
+
   // ── The one place a campaign is changed ─────────────────────────
   // args: { userId, platform, campaignId, action, percent, limits,
   //         automationId, requireEnabled, allowWhenPausedAll }
@@ -157,6 +198,10 @@ function createEngine(deps) {
         const want = ACTION_TO_STATUS[a.action];
         if (c.status === want) return Object.assign(out, { status: 'skipped', reason: want === 'paused' ? 'already_paused' : 'already_active', previous: { status: c.status }, next: { status: c.status } });
         if (c.status !== 'active' && c.status !== 'paused') return Object.assign(out, { status: 'skipped', reason: 'status_unknown', previous: { status: c.rawStatus } });
+        // Meta / TikTok / Pinterest: switching on is Launch's activation (the
+        // ad sets and ads OrivenAI created, ads first, campaign last, read
+        // back) — never the campaign status alone, which can leave ads paused.
+        if (want === 'active' && activateCampaign && ACTIVATED_PLATFORMS.indexOf(a.platform) !== -1) return Object.assign(out, await activationResult(a, c));
         await adapter.setStatus(user, c.id, want);
         return Object.assign(out, { status: 'completed', previous: { status: c.status }, next: { status: want } });
       }
@@ -187,6 +232,7 @@ function createEngine(deps) {
       if (ACTION_TO_STATUS[action] === 'paused') return { kind: 'paused', title: `${name} paused`, body: 'The campaign was paused.' };
       return { kind: 'resumed', title: `${name} is running`, body: 'The campaign was switched on.' };
     }
+    if (res.status === 'partial') return { kind: 'partial', title: `${name} is on, but not fully delivering`, body: res.error || res.reason };
     if (res.status === 'failed') return { kind: 'failed', title: `Couldn’t change ${name}`, body: res.error || res.reason || 'The platform refused the change.' };
     return { kind: 'skipped', title: `Skipped for ${name}`, body: res.reason };
   }
@@ -508,7 +554,7 @@ function createEngine(deps) {
     const rule = normalizeRule(ruleRow);
     // Fresh state, fresh budget, current limits — the stored proposal is never trusted.
     const res = await executeAction({ userId, platform: a.platform, campaignId: a.campaign_id, action: a.action, percent: (a.params && a.params.percent) || rule.percent, limits: rule.limits, automationId: rule.id, requireEnabled: false, allowWhenPausedAll: true });
-    await db.from('automation_approvals').update({ status: res.status === 'completed' ? 'completed' : (res.status === 'skipped' ? 'completed' : 'failed'), error: res.status === 'completed' ? null : (res.error || res.reason) }).eq('id', a.id);
+    await db.from('automation_approvals').update({ status: res.status === 'completed' || res.status === 'skipped' || res.status === 'partial' ? 'completed' : 'failed', error: res.status === 'completed' ? null : (res.error || res.reason) }).eq('id', a.id);
     if (a.execution_id) await finishExecution(a.execution_id, { status: res.status, reason: res.reason, error: res.error, previous_value: res.previous, new_value: res.next, mode: 'approval' });
     const d = describe(a.action, res, a.campaign_name);
     await notifier.add(userId, Object.assign({ automationId: rule.id, automationName: rule.name, executionId: a.execution_id, platform: a.platform, campaignName: a.campaign_name, dedupeKey: 'approved:' + a.id }, d));
@@ -586,7 +632,7 @@ function createEngine(deps) {
       return 'retry';
     }
     const exId = await finalize(res.status, { result: { previous: res.previous, next: res.next }, error: res.error || res.reason }, res);
-    if (res.status === 'completed' || res.status === 'failed') {
+    if (res.status === 'completed' || res.status === 'failed' || res.status === 'partial') {
       const d = res.status === 'completed' ? { kind: 'scheduled_completed', title: `Scheduled: "${res.campaignName || job.campaign_name}" ${ACTION_TO_STATUS[job.action] === 'paused' ? 'paused' : 'switched on'}`, body: `As scheduled for ${job.local_time} (${job.timezone}).` } : describe(job.action, res, job.campaign_name);
       await notifier.add(job.user_id, Object.assign({ automationId: r.id, automationName: r.name, executionId: exId, platform: job.platform, campaignName: job.campaign_name, dedupeKey: 'job:' + job.id }, d));
     }

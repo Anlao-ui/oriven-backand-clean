@@ -281,7 +281,8 @@ function fakeApi(u, opts) {
       return J({ success: true });
     }
     const camp = (c) => ({ id: c.id, name: c.name, status: c.status, daily_budget: c.daily_budget, lifetime_budget: c.lifetime_budget, account_id: '123' });
-    if (p === '/act_123') return J({ currency: mt.currency, timezone_name: 'Europe/Amsterdam' });
+    // account_status: Meta returns it when asked (activation checks the account can be written to).
+    if (p === '/act_123') return J({ currency: mt.currency, timezone_name: 'Europe/Amsterdam', account_status: 1 });
     if (p === '/act_123/campaigns') return J({ data: Object.values(mt.campaigns).filter((c) => c.status !== 'DELETED').map(camp) });
     if (p === '/act_123/adsets') return J({ data: Object.values(mt.adsets) });
     if (p === '/act_123/insights') return J({ data: Object.values(mt.campaigns).filter((c) => c.ins).map((c) => Object.assign({ campaign_id: c.id }, c.ins)) });
@@ -541,6 +542,13 @@ const DAY = 86400e3;
   const gm = W('google').filter((w) => w.resource === 'campaignBudgets');
   check('Google dedicated budget changed (20 → 18 → amountMicros 18000000); SHARED budget left alone', gm.length === 1 && gm[0].ops[0].update.amountMicros === '18000000' && gm[0].ops[0].update.resourceName.endsWith('/1'), gm);
   check('…the shared-budget campaign is reported as skipped with the reason', rows('automation_rules')[0].last_result.skipped.shared_budget === 1, rows('automation_rules')[0].last_result);
+  // Google keeps its own switch: ad groups and ads are created enabled under
+  // a paused campaign, so only the campaign status is written (no child activation).
+  world();
+  FAKE.google.campaigns['9001'].status = 'PAUSED';
+  const gAct = await E().executeAction({ userId: 'u1', platform: 'google', campaignId: '9001', action: 'activate' });
+  const gW = W('google').filter((w) => w.resource === 'campaigns');
+  check('Google scheduled activate → one campaign status write (ENABLED), completed — unchanged by the shared activation', gAct.status === 'completed' && gW.length === 1 && gW[0].ops[0].update.status === 'ENABLED' && W('google').length === 1, { gAct, writes: W('google') });
   world();
   await create(R({ name: 'A up', condition: { metric: 'spend', operator: '>', value: 100 }, action: 'increase_budget', percent: 10, scope: { type: 'campaigns', campaign_ids: ['222'] }, limits: { max_budget: 100 } }));
   await create(R({ name: 'B down', condition: { metric: 'spend', operator: '>', value: 100 }, action: 'decrease_budget', percent: 10, scope: { type: 'campaigns', campaign_ids: ['222'] } }));

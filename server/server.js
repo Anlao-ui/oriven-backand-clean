@@ -1812,6 +1812,7 @@ app.post('/api/generate-campaign', requireSubIfAuthed, paidActions.laneGuard('cr
     } catch (err) {
       if (err instanceof creditManager.InsufficientCreditsError) return res.status(402).json({ error: 'Out of credits', code: 'CREDITS_EXHAUSTED', balance: err.balance });
       console.warn('[Campaign] Credit reservation error:', err.message);
+      return res.status(503).json({ error: 'Could not verify credits right now. Nothing was charged — please try again.', code: 'CREDIT_CHECK_FAILED' });
     }
   }
 
@@ -1910,6 +1911,7 @@ app.post('/api/generate-brandcore', requireSubIfAuthed, async (req, res) => {
     } catch (err) {
       if (err instanceof creditManager.InsufficientCreditsError) return res.status(402).json({ error: 'Out of credits', code: 'CREDITS_EXHAUSTED', balance: err.balance });
       console.warn('[BrandCore] Credit reservation error:', err.message);
+      return res.status(503).json({ error: 'Could not verify credits right now. Nothing was charged — please try again.', code: 'CREDIT_CHECK_FAILED' });
     }
   }
 
@@ -2044,6 +2046,7 @@ app.post('/api/brand-check', requireSubIfAuthed, async (req, res) => {
     } catch (err) {
       if (err instanceof creditManager.InsufficientCreditsError) return res.status(402).json({ error: 'Out of credits', code: 'CREDITS_EXHAUSTED', balance: err.balance });
       console.warn('[BrandCheck] Credit reservation error:', err.message);
+      return res.status(503).json({ error: 'Could not verify credits right now. Nothing was charged — please try again.', code: 'CREDIT_CHECK_FAILED' });
     }
   }
 
@@ -2225,6 +2228,7 @@ Rules:
     } catch (err) {
       if (err instanceof creditManager.InsufficientCreditsError) return res.status(402).json({ error: 'Out of credits', code: 'CREDITS_EXHAUSTED', balance: err.balance });
       console.warn('[CompetitorIntel] Credit reservation error:', err.message);
+      return res.status(503).json({ error: 'Could not verify credits right now. Nothing was charged — please try again.', code: 'CREDIT_CHECK_FAILED' });
     }
   }
 
@@ -3131,6 +3135,7 @@ app.post('/api/generate-logo', requireSubIfAuthed, paidActions.laneGuard('image'
       } catch (err) {
         if (err instanceof creditManager.InsufficientCreditsError) return res.status(402).json({ error: 'Out of credits', code: 'CREDITS_EXHAUSTED', balance: err.balance });
         console.warn('[LogoGen/3D] Credit reservation error:', err.message);
+        return res.status(503).json({ error: 'Could not verify credits right now. Nothing was charged — please try again.', code: 'CREDIT_CHECK_FAILED' });
       }
     }
     try {
@@ -3176,6 +3181,7 @@ app.post('/api/generate-logo', requireSubIfAuthed, paidActions.laneGuard('image'
     } catch (err) {
       if (err instanceof creditManager.InsufficientCreditsError) return res.status(402).json({ error: 'Out of credits', code: 'CREDITS_EXHAUSTED', balance: err.balance });
       console.warn('[LogoGen] Credit reservation error:', err.message);
+      return res.status(503).json({ error: 'Could not verify credits right now. Nothing was charged — please try again.', code: 'CREDIT_CHECK_FAILED' });
     }
   }
 
@@ -3269,6 +3275,7 @@ app.post('/api/generate-ugc-video', requireSubOrFree, paidActions.laneGuard('vid
   } catch (err) {
     if (err instanceof creditManager.InsufficientCreditsError) return res.status(402).json({ error: 'Out of credits', code: 'CREDITS_EXHAUSTED', balance: err.balance });
     console.warn('[UGC/video] Credit reservation error:', err.message);
+    return res.status(503).json({ error: 'Could not verify credits right now. Nothing was charged — please try again.', code: 'CREDIT_CHECK_FAILED' });
   }
 
   try {
@@ -3350,6 +3357,7 @@ app.post('/api/video-ads/generate', requireSubIfAuthed, paidActions.laneGuard('v
   } catch (err) {
     if (err instanceof creditManager.InsufficientCreditsError) return res.status(402).json({ error: 'Out of credits', code: 'CREDITS_EXHAUSTED', balance: err.balance });
     console.warn('[VideoAds] Credit reservation error:', err.message);
+    return res.status(503).json({ error: 'Could not verify credits right now. Nothing was charged — please try again.', code: 'CREDIT_CHECK_FAILED' });
   }
 
   const _rawDuration = Number(String(length || '5').replace(/[^0-9]/g, '')) || 5;
@@ -3503,6 +3511,7 @@ app.post('/api/motion-graphics/generate', requireSubIfAuthed, paidActions.laneGu
   } catch (err) {
     if (err instanceof creditManager.InsufficientCreditsError) return res.status(402).json({ error: 'Out of credits', code: 'CREDITS_EXHAUSTED', balance: err.balance });
     console.warn('[MotionGraphics] Credit reservation error:', err.message);
+    return res.status(503).json({ error: 'Could not verify credits right now. Nothing was charged — please try again.', code: 'CREDIT_CHECK_FAILED' });
   }
 
   const aiml = require('./providers/aimlProvider');
@@ -3642,6 +3651,7 @@ app.post('/api/product-shoots/generate', requireSubIfAuthed, paidActions.laneGua
   } catch (err) {
     if (err instanceof creditManager.InsufficientCreditsError) return res.status(402).json({ error: 'Out of credits', code: 'CREDITS_EXHAUSTED', balance: err.balance });
     console.warn('[ProductShoots] Credit reservation error:', err.message);
+    return res.status(503).json({ error: 'Could not verify credits right now. Nothing was charged — please try again.', code: 'CREDIT_CHECK_FAILED' });
   }
 
   const _bizCtx = await _creativeContext(user.id);
@@ -3733,6 +3743,7 @@ app.post('/api/creative/variations', requireSubIfAuthed, async (req, res) => {
       } catch (err) {
         if (err instanceof creditManager.InsufficientCreditsError) return res.status(402).json({ error: 'Out of credits', code: 'CREDITS_EXHAUSTED', balance: err.balance });
         console.warn('[creative/variations] Credit reservation error:', err.message);
+        return res.status(503).json({ error: 'Could not verify credits right now. Nothing was charged — please try again.', code: 'CREDIT_CHECK_FAILED' });
       }
     }
 
@@ -3798,6 +3809,7 @@ app.post('/api/creative/improve', requireSubIfAuthed, async (req, res) => {
       } catch (err) {
         if (err instanceof creditManager.InsufficientCreditsError) return res.status(402).json({ error: 'Out of credits', code: 'CREDITS_EXHAUSTED', balance: err.balance });
         console.warn('[creative/improve] Credit reservation error:', err.message);
+        return res.status(503).json({ error: 'Could not verify credits right now. Nothing was charged — please try again.', code: 'CREDIT_CHECK_FAILED' });
       }
     }
 
@@ -4638,6 +4650,7 @@ app.post('/api/creative/score', requireSubIfAuthed, async (req, res) => {
         } catch (err) {
           if (err instanceof creditManager.InsufficientCreditsError) return res.status(402).json({ error: 'Out of credits', code: 'CREDITS_EXHAUSTED', balance: err.balance });
           console.warn('[creative/score] Credit reservation error:', err.message);
+          return res.status(503).json({ error: 'Could not verify credits right now. Nothing was charged — please try again.', code: 'CREDIT_CHECK_FAILED' });
         }
       }
       const system = `You are a senior creative director scoring an ad/creative for QUALITY POTENTIAL â€” these are predictions, not measurements, since no campaign has run yet. Score 0-100 for each: ctrPrediction (likely click-through appeal), attention (scroll-stopping power), brandFit (how well it matches the described brand), emotion (emotional resonance), conversionPotential (likelihood to drive action). Reply ONLY with valid JSON: {"ctrPrediction":N,"ctrWhy":"...","attention":N,"attentionWhy":"...","brandFit":N,"brandFitWhy":"...","emotion":N,"emotionWhy":"...","conversionPotential":N,"conversionWhy":"..."}. Be honest and varied â€” do not default every score to 70-80.${_bizCtx ? `\n\nBUSINESS KNOWLEDGE:\n${_bizCtx.text}` : ''}`;
@@ -5441,6 +5454,35 @@ const RESEARCH_SOURCE_LINKS = Object.freeze([
 const _researchToolProvider = require('./services/researchToolProvider');
 const _urlContextFetcher = require('./services/urlContextFetcher');
 const _researchReport = require('./services/researchReport');
+const _campaignActivation = require('./services/campaignActivation');
+// The API helpers activation needs — one set for Launch and Automations.
+const _activationDeps = {
+  getMetaAccess: (u) => _getMetaAccess(u), verifyMetaObjectOwnership: (t, id, a) => _verifyMetaObjectOwnership(t, id, a), verifyMetaAdAccountWritable: (t, a) => _verifyMetaAdAccountWritable(t, a),
+  metaFetch: (p, t, q) => _metaFetch(p, t, q), metaApiPost: (p, t, b) => _metaApiPost(p, t, b),
+  getTikTokAccess: (u) => _getTikTokAccess(u), tiktokFetch: (p, t, q) => _tiktokFetch(p, t, q), tiktokPost: (p, t, b) => _tiktokPost(p, t, b),
+  getPinterestAccess: (u, o) => _getPinterestAccess(u, o), pinterestApiRequest: (...a) => _pinterestApiRequest(...a),
+};
+function _activateCampaign(user, platform, campaignId, firstActivationHint) {
+  return _campaignActivation.run({ platform, user, campaignId, firstActivationHint, db: supabaseAdmin, deps: _activationDeps });
+}
+const _ACT_LABEL = { meta: 'Meta Ads', tiktok: 'TikTok Ads', pinterest: 'Pinterest Ads' };
+async function _activationRoute(req, res, platform) {
+  try {
+    const user = await getUserFromToken(req);
+    if (!user) return res.status(401).json({ error: 'Authentication required', code: 'AUTH_REQUIRED' });
+    const report = await _activateCampaign(user, platform, req.params.id, req.body && typeof req.body.firstActivation === 'boolean' ? req.body.firstActivation : undefined);
+    console.log('[' + _ACT_LABEL[platform] + ' Resume] campaign:', report.campaignId, '| state:', report.state, '| first:', report.firstActivation, '| children on:', report.enabled.adSets.length + report.enabled.ads.length);
+    _logCampaignEvent(user, { platform, campaignName: (req.body && req.body.campaignName) || null, title: 'Campaign resumed', detail: 'Campaign ' + report.campaignId + ' was resumed on ' + _ACT_LABEL[platform] + '.', severity: 'low' });
+    // "delivering" is never claimed: the campaign is on; whether ads are live
+    // is what the read-back says (platforms may still review new ads).
+    return res.json({ ok: true, status: 'ACTIVE', activation: report });
+  } catch (err) {
+    console.error('[' + _ACT_LABEL[platform] + ' Resume] FAILED', req.params.id, '|', err.code || '-', err.step || '-', '|', err.message);
+    const out = _campaignActivation.actionError(err, _ACT_LABEL[platform], platform === 'meta' && !err.code ? _metaBuildUserError(err) : undefined);
+    return res.status(out.status).json(out.body);
+  }
+}
+
 const RESEARCH_SEARCH_TIMEOUT_MS = parseInt(process.env.RESEARCH_SEARCH_TIMEOUT_MS, 10) || 20000;
 const RESEARCH_SYNTH_TIMEOUT_MS = parseInt(process.env.RESEARCH_SYNTH_TIMEOUT_MS, 10) || 90000;
 const RESEARCH_PAGE_TIMEOUT_MS = parseInt(process.env.RESEARCH_PAGE_TIMEOUT_MS, 10) || 7000;
@@ -5816,6 +5858,7 @@ Rules:
     } catch (err) {
       if (err instanceof creditManager.InsufficientCreditsError) return res.status(402).json({ error: 'Out of credits', code: 'CREDITS_EXHAUSTED', balance: err.balance });
       console.warn('[WebsiteMonitor] Credit reservation error:', err.message);
+      return res.status(503).json({ error: 'Could not verify credits right now. Nothing was charged — please try again.', code: 'CREDIT_CHECK_FAILED' });
     }
   }
 
@@ -6832,6 +6875,7 @@ app.post('/api/ai/create-ad', requireSubOrOnboardingGen, paidActions.laneGuard('
     } catch (err) {
       if (err instanceof creditManager.InsufficientCreditsError) return res.status(402).json({ error: 'Out of credits', code: 'CREDITS_EXHAUSTED', balance: err.balance });
       console.warn('[create-ad] Credit reservation error:', err.message);
+      return res.status(503).json({ error: 'Could not verify credits right now. Nothing was charged — please try again.', code: 'CREDIT_CHECK_FAILED' });
     }
   }
 
@@ -7127,7 +7171,7 @@ app.post('/api/ai/chat', requireSubIfAuthed, paidActions.laneGuard('chat'), asyn
   const researchFollowup = !!(research && req.body && req.body.mode === 'research-followup');
   const toolsSection = `\n\nTOOLS AVAILABLE — call one when the user is clearly asking for an action to be taken (not when they're just asking a question or making conversation):\n${toolRouter.getCatalogPrompt()}\n\nTo use a tool, reply with ONLY a JSON object on its own, nothing else: {"tool": "<tool_name>", "params": {...}}. No markdown fences, no extra text before or after. If a required param is missing or ambiguous, don't guess — ask the user a short clarifying question in plain text instead of calling the tool. For anything that isn't an action request, just reply normally in plain conversational text. Tool names like "create_campaign_package" are internal — never write them out in a conversational reply; describe the action in plain English instead (e.g. "generate a campaign package", not "use create_campaign_package").`;
 
-  const systemPrompt = `You are Oriven, ORIVEN's AI marketing co-pilot. ORIVEN is organized as six steps — 01 Control Center (the start page: the user's business context — business, brand, audiences, competitors, connected accounts and knowledge — plus an overview of their advertising, what needs attention, and Planning: dated advertising plans, a monthly budget plan, briefs and naming/UTM templates), 02 Research (investigate a market, competitors, audiences and opportunities; results become a Market Map with sources, and chosen findings can go into Create), 03 Create (turn a brief into platform-ready ad creative and campaign structure; drafts go to Launch), 04 Launch (review drafts by platform with their readiness — ready, ready with warnings or blocked — and publish when the user chooses), 05 Campaigns (follow live campaign performance by platform, campaign and date range: spend, delivery, traffic and conversion metrics, with spend over time where the platform provides it), and 06 Autopilot (rules on Meta and Google campaigns that pause, resume, adjust budgets, notify or ask for approval first, plus recent activity). There is no separate Home or Business page; both live in Control Center. You help the user across all of them with their Google, Meta, TikTok and Pinterest ad campaigns. ORIVEN does not publish campaigns on a schedule: a planned start date is the user's plan, and launching is a manual step in Launch.${supportSection}${hasBrand ? `\n\nBRAND CONTEXT (draw on this when relevant):\n${brandSection}` : ''}${businessSection}${accountsSection}${pageSection}${campaignSection}${researchSection}${reviewSection}${launchSection}${autopilotSection}${businessSignalsSection}${workspaceSection}${opsSection}${researchFollowup ? '' : toolsSection}
+  const systemPrompt = `You are Oriven, ORIVEN's AI marketing co-pilot. ORIVEN is organized as six steps — 01 Control Center (the start page: the user's business context — business, brand, audiences, competitors, connected accounts and knowledge — plus an overview of their advertising, what needs attention, and Planning: dated advertising plans, a monthly budget plan, briefs and naming/UTM templates), 02 Research (investigate a market, competitors, audiences and opportunities; results become a Market Map with sources, and chosen findings can go into Create), 03 Create (turn a brief into platform-ready ad creative and campaign structure; drafts go to Launch), 04 Launch (review drafts by platform with their readiness — ready, ready with warnings or blocked — and publish when the user chooses), 05 Campaigns (follow live campaign performance by platform, campaign and date range: spend, delivery, traffic and conversion metrics, with spend over time where the platform provides it), and 06 Automations (rules and schedules on Google, Meta, TikTok and Pinterest campaigns that pause, resume, adjust budgets, notify or ask for approval first — never acting on missing data — plus their activity; creating an automation costs 50 credits once, checks and actions are free). There is no separate Home or Business page; both live in Control Center. You help the user across all of them with their Google, Meta, TikTok and Pinterest ad campaigns. ORIVEN does not publish campaigns on a schedule: a planned start date is the user's plan, and launching is a manual step in Launch.${supportSection}${hasBrand ? `\n\nBRAND CONTEXT (draw on this when relevant):\n${brandSection}` : ''}${businessSection}${accountsSection}${pageSection}${campaignSection}${researchSection}${reviewSection}${launchSection}${autopilotSection}${businessSignalsSection}${workspaceSection}${opsSection}${researchFollowup ? '' : toolsSection}
 
 Be conversational and natural. Match the energy of the message — brief for casual small talk, thorough for strategic or campaign questions. Think like a knowledgeable colleague, not a branded bot. Never start with hollow affirmations like "Great!" or "Absolutely!". Be direct. Never mention that you are powered by any specific AI provider or model — you are simply Oriven.${businessContext ? ' When it is relevant, reference specific business knowledge by name (a real product, audience, or competitor) instead of speaking in generalities — it shows the user Oriven actually remembers their business. If competitor information is present, use it only for strategic positioning advice, never to copy or replicate a competitor\'s messaging or content.' : ''}
 
@@ -7155,6 +7199,7 @@ You are a senior marketing strategist, not a generic chatbot — assume responsi
     } catch (err) {
       if (err instanceof creditManager.InsufficientCreditsError) return res.status(402).json({ error: 'Out of credits', code: 'CREDITS_EXHAUSTED', balance: err.balance });
       console.warn('[ai/chat] Credit reservation error:', err.message);
+      return res.status(503).json({ error: 'Could not verify credits right now. Nothing was charged — please try again.', code: 'CREDIT_CHECK_FAILED' });
     }
   }
 
@@ -7342,6 +7387,9 @@ const _automations = require('./routes/automationRoutes')(app, {
   backgroundJobs: () => BACKGROUND_JOBS_ENABLED,
   planOf: async (userId) => { const { data } = await supabaseAdmin.from('profiles').select('subscription_status').eq('id', userId).maybeSingle(); return (data && data.subscription_status) || 'free'; },
   log: (m) => console.warn(m),
+  // Switching a Meta / TikTok / Pinterest campaign on goes through the same
+  // activation as Launch (services/campaignActivation.js).
+  activateCampaign: (userId, platform, campaignId) => _activateCampaign({ id: userId }, platform, campaignId),
   platformHelpers: {
     _getGadsAccess: (u) => _getGadsAccess(u), _gadsQuery: (t, c, q, l) => _gadsQuery(t, c, q, l), _gadsMutate: (t, c, r, o, l) => _gadsMutate(t, c, r, o, l),
     _getMetaAccess: (u) => _getMetaAccess(u), _metaFetch: (p, t, q) => _metaFetch(p, t, q), _metaApiPost: (p, t, b) => _metaApiPost(p, t, b), _metaConversions: (a) => _metaConversions(a),
@@ -9250,7 +9298,7 @@ app.get('/api/tiktok/overview', async (req, res) => {
 app.post('/api/tiktok/campaign/:id/pause', async (req, res) => {
   try {
     const user = await getUserFromToken(req);
-    if (!user) return res.status(401).json({ error: 'Authentication required' });
+    if (!user) return res.status(401).json({ error: 'Authentication required', code: 'AUTH_REQUIRED' });
     const { accessToken, advertiserId } = await _getTikTokAccess(user);
     const campaignId = req.params.id;
     console.log('[TikTok Campaign Pause] campaign:', campaignId, '| advertiser:', advertiserId);
@@ -9264,31 +9312,14 @@ app.post('/api/tiktok/campaign/:id/pause', async (req, res) => {
     res.json({ ok: true, status: 'DISABLE' });
   } catch (err) {
     console.error('[TikTok Campaign Pause] FAILED', req.params.id, '|', err.message);
-    res.status(err.status || 500).json({ error: err.message });
+    const out = _campaignActivation.actionError(err, 'TikTok Ads');
+    res.status(out.status).json(out.body);
   }
 });
 
-// POST /api/tiktok/campaign/:id/resume
-app.post('/api/tiktok/campaign/:id/resume', async (req, res) => {
-  try {
-    const user = await getUserFromToken(req);
-    if (!user) return res.status(401).json({ error: 'Authentication required' });
-    const { accessToken, advertiserId } = await _getTikTokAccess(user);
-    const campaignId = req.params.id;
-    console.log('[TikTok Campaign Resume] campaign:', campaignId, '| advertiser:', advertiserId);
-    await _tiktokPost('/campaign/status/update/', accessToken, {
-      advertiser_id:    advertiserId,
-      campaign_ids:     [campaignId],
-      operation_status: 'ENABLE'
-    });
-    console.log('[TikTok Campaign Resume] OK');
-    _logCampaignEvent(user, { platform: 'tiktok', campaignName: (req.body && req.body.campaignName) || null, title: 'Campaign resumed', detail: 'Campaign ' + campaignId + ' was resumed on TikTok Ads.', severity: 'low' });
-    res.json({ ok: true, status: 'ENABLE' });
-  } catch (err) {
-    console.error('[TikTok Campaign Resume] FAILED', req.params.id, '|', err.message);
-    res.status(err.status || 500).json({ error: err.message });
-  }
-});
+// POST /api/tiktok/campaign/:id/resume — Launch's Activate / Resume.
+// services/campaignActivation.js run(): the same activation Automations uses.
+app.post('/api/tiktok/campaign/:id/resume', (req, res) => _activationRoute(req, res, 'tiktok'));
 
 // DELETE /api/tiktok/campaign/:id
 app.delete('/api/tiktok/campaign/:id', async (req, res) => {
@@ -10542,7 +10573,7 @@ app.patch('/api/meta/campaign/:id', async (req, res) => {
 app.post('/api/meta/campaign/:id/pause', async (req, res) => {
   try {
     const user = await getUserFromToken(req);
-    if (!user) return res.status(401).json({ error: 'Authentication required' });
+    if (!user) return res.status(401).json({ error: 'Authentication required', code: 'AUTH_REQUIRED' });
     const { accessToken, accountId } = await _getMetaAccess(user);
     await _verifyMetaObjectOwnership(accessToken, req.params.id, accountId);
     await _verifyMetaAdAccountWritable(accessToken, accountId);
@@ -10561,31 +10592,14 @@ app.post('/api/meta/campaign/:id/pause', async (req, res) => {
     res.json({ ok: true, status: 'PAUSED' });
   } catch (err) {
     console.error('[Meta Campaign Pause] FAILED campaign:', req.params.id, '| category:', _metaClassifyError(err), '| code:', err.metaCode || '—', '| subcode:', err.metaSubcode || '—', '|', err.message);
-    res.status(err.status || 500).json({ error: _metaBuildUserError(err) });
+    const out = _campaignActivation.actionError(err, 'Meta Ads', _metaBuildUserError(err));
+    res.status(out.status).json(out.body);
   }
 });
 
-// POST /api/meta/campaign/:id/resume
-app.post('/api/meta/campaign/:id/resume', async (req, res) => {
-  try {
-    const user = await getUserFromToken(req);
-    if (!user) return res.status(401).json({ error: 'Authentication required' });
-    const { accessToken, accountId } = await _getMetaAccess(user);
-    await _verifyMetaObjectOwnership(accessToken, req.params.id, accountId);
-    await _verifyMetaAdAccountWritable(accessToken, accountId);
-    console.log('[Meta Campaign Resume]');
-    console.log('  campaign :', req.params.id);
-    console.log('  user     :', user.id);
-    console.log('  account  :', accountId);
-    await _metaApiPost('/' + req.params.id, accessToken, { status: 'ACTIVE' });
-    console.log('[Meta Campaign Resume] OK');
-    _logCampaignEvent(user, { platform: 'meta', campaignName: (req.body && req.body.campaignName) || null, title: 'Campaign resumed', detail: 'Campaign ' + req.params.id + ' was resumed on Meta Ads.', severity: 'low' });
-    res.json({ ok: true, status: 'ACTIVE' });
-  } catch (err) {
-    console.error('[Meta Campaign Resume] FAILED campaign:', req.params.id, '| category:', _metaClassifyError(err), '| code:', err.metaCode || '—', '| subcode:', err.metaSubcode || '—', '|', err.message);
-    res.status(err.status || 500).json({ error: _metaBuildUserError(err) });
-  }
-});
+// POST /api/meta/campaign/:id/resume — Launch's Activate / Resume.
+// services/campaignActivation.js run(): the same activation Automations uses.
+app.post('/api/meta/campaign/:id/resume', (req, res) => _activationRoute(req, res, 'meta'));
 
 // DELETE /api/meta/campaign/:id – archive (or true-delete) a campaign
 app.delete('/api/meta/campaign/:id', async (req, res) => {
@@ -11615,7 +11629,7 @@ async function _pinterestSetCampaignStatus(user, campaignId, status) {
 app.post('/api/pinterest/campaign/:id/pause', async (req, res) => {
   try {
     const user = await getUserFromToken(req);
-    if (!user) return res.status(401).json({ error: 'Authentication required' });
+    if (!user) return res.status(401).json({ error: 'Authentication required', code: 'AUTH_REQUIRED' });
     await _pinterestSetCampaignStatus(user, req.params.id, 'PAUSED');
     // campaignName is optional and supplied by the caller (the row already
     // knows it) -- Campaign Replay correlates events to a local campaign by
@@ -11624,27 +11638,17 @@ app.post('/api/pinterest/campaign/:id/pause', async (req, res) => {
     // before this change.
     const _pinCampName = (req.body && req.body.campaignName) || null;
     _logCampaignEvent(user, { platform: 'pinterest', campaignName: _pinCampName, title: 'Campaign paused', detail: 'Campaign ' + req.params.id + ' was paused on Pinterest Ads.', severity: 'low' });
-    res.json({ success: true });
+    res.json({ ok: true, success: true, status: 'PAUSED' });
   } catch (err) {
     console.error('[Pinterest Pause] error:', err.message);
-    res.status(err.status || 500).json({ error: err.message });
+    const out = _campaignActivation.actionError(err, 'Pinterest Ads');
+    res.status(out.status).json(out.body);
   }
 });
 
-// POST /api/pinterest/campaign/:id/resume
-app.post('/api/pinterest/campaign/:id/resume', async (req, res) => {
-  try {
-    const user = await getUserFromToken(req);
-    if (!user) return res.status(401).json({ error: 'Authentication required' });
-    await _pinterestSetCampaignStatus(user, req.params.id, 'ACTIVE');
-    const _pinCampName = (req.body && req.body.campaignName) || null;
-    _logCampaignEvent(user, { platform: 'pinterest', campaignName: _pinCampName, title: 'Campaign resumed', detail: 'Campaign ' + req.params.id + ' was resumed on Pinterest Ads.', severity: 'low' });
-    res.json({ success: true });
-  } catch (err) {
-    console.error('[Pinterest Resume] error:', err.message);
-    res.status(err.status || 500).json({ error: err.message });
-  }
-});
+// POST /api/pinterest/campaign/:id/resume — Launch's Activate / Resume.
+// services/campaignActivation.js run(): the same activation Automations uses.
+app.post('/api/pinterest/campaign/:id/resume', (req, res) => _activationRoute(req, res, 'pinterest'));
 
 // Real totals for a date range â€” same output field shape as
 // _gadsFetchTotals/_metaFetchTotals ({spend, impressions, clicks, ctr,
@@ -15351,6 +15355,7 @@ app.post('/api/business/website/refresh', async (req, res) => {
     } catch (err) {
       if (err instanceof creditManager.InsufficientCreditsError) return res.status(402).json({ error: 'Out of credits', code: 'CREDITS_EXHAUSTED', balance: err.balance });
       console.warn('[business/website/refresh] Credit reservation error:', err.message);
+      return res.status(503).json({ error: 'Could not verify credits right now. Nothing was charged — please try again.', code: 'CREDIT_CHECK_FAILED' });
     }
 
     const page = await _fetchWebsiteText(url);
@@ -16734,7 +16739,11 @@ async function _evaluateAutomationRules(user, platform, campaigns) {
           autopilotBlocked = true;
           break;
         }
-        console.warn(`[Autopilot] credit reservation failed for user ${user.id}, allowing this execution:`, err.message);
+        // Fail closed: an action on a live campaign never runs uncharged
+        // because the credit check couldn't complete — skip this rule this
+        // tick (it is evaluated again on the next one).
+        console.warn(`[Autopilot] credit reservation failed for user ${user.id}, skipping this rule this tick:`, err.message);
+        continue;
       }
 
       // At most once/day/rule, so only the first qualifying campaign is
@@ -16991,7 +17000,14 @@ async function _monitorPlatform(user, platform, opts) {
           riskLevel: 'low', toolName: 'generate_headlines', toolParams: { seed: saturatedCampaign.name, count: 5 }
         });
       }
-      await _evaluateAutomationRules(user, platform, analysis.campaigns);
+      // automation_rules are evaluated ONLY by the Automations engine
+      // (services/automations — cron "automations-rules", every 15 min),
+      // which also runs legacy rules and honours pause-all, the kill switch,
+      // missing-data guards, approvals and durable idempotency. The old
+      // _evaluateAutomationRules ran the same enabled rules again here every
+      // 4 h without any of those safeguards (duplicate notifications and
+      // recommendations, and unattended pauses for old "fully automatic"
+      // rules), so it is no longer called.
     }
     await _runLearningEngine(user, platform, analysis);
     return analysis;

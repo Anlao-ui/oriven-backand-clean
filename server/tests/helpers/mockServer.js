@@ -89,10 +89,12 @@ function boot({ port, env }) {
   const TOKENS = {};
   const AUTH = { users: [], createFail: null, deleted: [] };
   const rpcCalls = [];
+  const RPC = { fail: null }; // tests set RPC.fail = (name) => bool to simulate an RPC / database outage
   const supabaseMock = {
     from: (t) => new Q(t),
     rpc: async (name, args) => {
       rpcCalls.push(name);
+      if (RPC.fail && RPC.fail(name, args)) return { data: null, error: { message: 'rpc unavailable (test)' } };
       const p = rows('profiles').find((r) => r.id === (args && args.p_user_id));
       if (name === 'spend_credits' && p) { if ((p.credits_balance || 0) >= args.p_amount) { p.credits_balance -= args.p_amount; return { data: [{ ok: true, balance: p.credits_balance }], error: null }; } return { data: [{ ok: false, balance: p.credits_balance || 0 }], error: null }; }
       if (name === 'refund_credits' && p) { p.credits_balance += args.p_amount; return { data: [{ ok: true, balance: p.credits_balance }], error: null }; }
@@ -138,7 +140,7 @@ function boot({ port, env }) {
     for (let i = 0; i < 50; i++) { try { await realFetch(BASE + '/api/onboarding/state'); break; } catch (_) { await new Promise((r) => setTimeout(r, 100)); } }
     return quiet;
   }
-  return { SERVER_DIR, TABLES, MISSING, rows, writes, TOKENS, AUTH, rpcCalls, mail, cronJobs, net, call, start, realFetch, BASE };
+  return { SERVER_DIR, TABLES, MISSING, rows, writes, TOKENS, AUTH, rpcCalls, RPC, mail, cronJobs, net, call, start, realFetch, BASE };
 }
 
 function reporter() {

@@ -98,13 +98,15 @@ module.exports = function registerPublishRoutes(app, d) {
     } catch (err) {
       options.connected = false;
       options.connectionError = err && err.message ? String(err.message).slice(0, 200) : 'Not connected';
+      // A stable code next to the text, so the app can say it in the user's language.
+      options.connectionCode = err && (err.status === 401 || /expired|reconnect|invalid.*token/i.test(String(err.message || ''))) ? 'RECONNECT_REQUIRED' : 'NOT_CONNECTED';
     }
     return { options, access };
   }
 
   function publicOptions(o) {
     const out = {};
-    for (const k of ['connected', 'currency', 'pixels', 'conversionTags', 'instagramUsername', 'pageId', 'identityName', 'conversionActions', 'connectionError']) if (o[k] != null) out[k] = o[k];
+    for (const k of ['connected', 'currency', 'pixels', 'conversionTags', 'instagramUsername', 'pageId', 'identityName', 'conversionActions', 'connectionError', 'connectionCode']) if (o[k] != null) out[k] = o[k];
     return out;
   }
 
@@ -167,7 +169,7 @@ module.exports = function registerPublishRoutes(app, d) {
     RESULT_UNCONFIRMED: (p) => 'An earlier publish of this campaign was never confirmed. Check its status first — OrivenAI won’t send it to ' + platformLabel(p) + ' again until it knows the first attempt didn’t create it.',
   };
   function refuse(res, platform, code, op) {
-    return res.status(409).json({ ok: false, code, error: LEDGER_REFUSAL[code](platform), publish: ledger.view(op) });
+    return res.status(409).json({ ok: false, code, error: LEDGER_REFUSAL[code](platform), params: { platform: platformLabel(platform) }, publish: ledger.view(op) });
   }
   function ledgerDown(res, err) {
     console.error('[publish] ledger unavailable:', err && err.message);
@@ -196,7 +198,7 @@ module.exports = function registerPublishRoutes(app, d) {
       const ctx = await loadContext(user, platform, true);
       if (!ctx.options.connected || !ctx.access) {
         d.releasePublishLock(lockKey);
-        res.status(400).json({ ok: false, error: ctx.options.connectionError || ('Connect your ' + platform + ' ad account first.'), code: 'NOT_CONNECTED' });
+        res.status(400).json({ ok: false, error: ctx.options.connectionError || ('Connect your ' + platform + ' ad account first.'), code: 'NOT_CONNECTED', params: { platform: platformLabel(platform), reason: ctx.options.connectionCode || 'NOT_CONNECTED' } });
         return null;
       }
       const spec = S.buildSpec(withStructure(pkg, req.body), platform, ctx);
