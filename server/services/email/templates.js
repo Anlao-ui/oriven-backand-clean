@@ -39,9 +39,9 @@ const PLAN_INTRO = {
   starter: { name: 'Starter', price: '9.95', credits: 1000,
     unlocks: ['Research: investigate your market, competitors and audience', 'Automations: schedule campaigns and set rules that pause, resume or adjust them, or ask you first'] },
   creator: { name: 'Creator', price: '19.95', credits: 2500,
-    unlocks: ['Everything in Starter: Research and Automations', 'Oriven Chat, your advertising assistant inside the app'] },
+    unlocks: ['Everything in Starter: Research and Automations', 'Oriven Chat, your advertising assistant inside the app', 'In-app notifications'] },
   professional: { name: 'Professional', price: '34.95', credits: 4000,
-    unlocks: ['Everything in Creator: Research, Automations and Oriven Chat', 'Notifications and Priority Support'] },
+    unlocks: ['Everything in Creator: Research, Automations, Oriven Chat and in-app notifications', 'Priority Support', 'Weekly AI Performance Report by email'] },
 };
 const FREE = { name: 'Free', creditsPerDay: 10 };
 const planOf = (k) => PLAN_INTRO[k] || null;
@@ -102,14 +102,14 @@ function compare(left, right) {
 // ctx: { appUrl, unsubscribeUrl?, postalAddress? } — postalAddress is the full
 // sender line (EMAIL_POSTAL_ADDRESS, e.g. "OrivenAI B.V. · Street 1, 1234 AB City · KvK …"). — postalAddress is the full sender line
 // (EMAIL_POSTAL_ADDRESS, e.g. "OrivenAI B.V. · Street 1, 1234 AB City · KvK …").
-function layout({ eyebrow, heading, preheader, body, ctx, category, why }) {
+function layout({ eyebrow, heading, preheader, body, ctx, category, why, lang }) {
   const footer =
     small(esc(why)) +
     (category === 'marketing' && ctx.unsubscribeUrl
       ? small(`Don’t want these emails? <a href="${esc(ctx.unsubscribeUrl)}" style="color:${C.muted};text-decoration:underline">Unsubscribe</a>. Account and billing emails will still reach you.`)
       : '') +
     small(`${ctx.postalAddress ? esc(ctx.postalAddress) : 'OrivenAI'} · <a href="mailto:contact@orivenai.com" style="color:${C.muted};text-decoration:underline">contact@orivenai.com</a>`);
-  return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">` +
+  return `<!doctype html><html lang="${esc(lang || 'en')}"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">` +
     `<meta name="color-scheme" content="light"><meta name="supported-color-schemes" content="light"><title>${esc(heading)}</title>` +
     `<link href="https://fonts.googleapis.com/css2?family=Instrument+Serif&family=Geist:wght@400;600;700&display=swap" rel="stylesheet">` +
     `<style>` +
@@ -145,8 +145,8 @@ function textFooter(ctx, category, why) {
     `\n${ctx.postalAddress || 'OrivenAI'} · contact@orivenai.com`;
 }
 
-function make({ category, subject, eyebrow, heading, preheader, body, text, ctx, why }) {
-  return { category, subject, html: layout({ eyebrow, heading, preheader, body, ctx, category, why }), text: text + textFooter(ctx, category, why) };
+function make({ category, subject, eyebrow, heading, preheader, body, text, ctx, why, lang }) {
+  return { category, subject, html: layout({ eyebrow, heading, preheader, body, ctx, category, why, lang }), text: text + textFooter(ctx, category, why) };
 }
 
 const WHY = {
@@ -324,7 +324,128 @@ const TEMPLATES = {
       preheader: `${fmt(plan.credits)} credits a month, plus Research and Automations. Here’s a good way to start.`, body, ctx, why: `You’re receiving this because you subscribed to OrivenAI ${plan.name}.`,
       text: `Welcome to ${plan.name}. Your plan is active.\n\nYour plan includes:\n- ${planList(plan).join('\n- ')}\n\nA good way to start:\n1. Run a Research on your market, competitors and audience.\n2. Use the findings in Create as the brief, then review the draft in Launch.\n3. Once a campaign is live, add an automation in Automations.\n\nOpen OrivenAI: ${ctx.appUrl}\nManage or cancel your subscription anytime in Settings → Subscription.` });
   },
+
+  // Weekly AI Performance Report (service, Professional). Rendered ONLY from
+  // the validated report (services/weeklyReport/metrics.js) and validated
+  // insights; a metric that isn't reported reads "Not reported", never 0.
+  weekly_report(d, ctx) { return weeklyReport(d, ctx); },
+
+  // Priority Support: the team replied (service). The reply itself stays in
+  // the app — the email only says there is one.
+  support_reply(d, ctx) {
+    const L = wrCopy.copyFor(d.lang);
+    const body = p(esc(L.supportBody)) + button(L.supportCta, d.url || ctx.appUrl);
+    return make({ category: 'service', subject: L.supportSubject, eyebrow: 'Priority Support', heading: L.supportHeading, preheader: L.supportBody.slice(0, 140),
+      body, ctx, why: L.supportWhy, lang: wrCopy.lang(d.lang), text: `${L.supportHeading}\n\n${L.supportBody}\n\n${L.supportCta}: ${d.url || ctx.appUrl}` });
+  },
 };
+
+// ── Weekly report rendering ──────────────────────────────────────────
+const wrCopy = require('../weeklyReport/copy');
+
+function weeklyReport(d, ctx) {
+  const code = wrCopy.lang(d.lang), L = wrCopy.copyFor(code), locale = wrCopy.LOCALES[code];
+  // Without a report (template previews) it renders the honest no-data email.
+  const r = d.report || { period: { start: '1970-01-05', end: '1970-01-11', timeZone: 'Europe/Amsterdam' }, platforms: [], connected: 0, failed: [], needsReconnect: [], hasData: false, businessName: null };
+  const dateFmt = (iso, year) => new Date(iso + 'T12:00:00Z').toLocaleDateString(locale, { day: 'numeric', month: 'long', year: year ? 'numeric' : undefined, timeZone: 'UTC' });
+  const vars = { start: dateFmt(r.period.start, false), end: dateFmt(r.period.end, true), biz: r.businessName ? esc(r.businessName) : '' };
+  const intFmt = (v) => Number(v).toLocaleString(locale, { maximumFractionDigits: 0 });
+  const decFmt = (v) => Number(v).toLocaleString(locale, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  const money = (v, cur) => Number(v).toLocaleString(locale, { style: 'currency', currency: cur });
+  const fmtVal = (k, v, cur) => {
+    if (v == null) return null;
+    if (k === 'spend' || k === 'cpc') return cur ? money(v, cur) : null;
+    if (k === 'ctr') return decFmt(v) + '%';
+    if (k === 'roas') return decFmt(v) + '×';
+    if (k === 'conversions') return Number.isInteger(v) ? intFmt(v) : decFmt(v);
+    return intFmt(v);
+  };
+  const fmtChange = (v) => (v == null ? '' : (v > 0 ? '+' : v < 0 ? '−' : '') + Math.abs(v).toLocaleString(locale, { maximumFractionDigits: 1 }) + '%');
+  const statusLabel = { not_connected: L.notConnected, reconnect: L.reconnect, failed: L.failed };
+  const KEYS = ['spend', 'impressions', 'clicks', 'ctr', 'cpc', 'conversions', 'roas', 'reach'];
+  const ok = r.platforms.filter((pl) => pl.status === 'ok');
+  const withData = ok.filter((pl) => pl.hasData);
+  const cell = (t, extra) => `<td style="padding:8px 0;border-bottom:1px solid ${C.line};font-family:${SANS};font-size:14px;line-height:1.4;color:${C.body}${extra || ''}">${t}</td>`;
+  const txt = [];
+
+  let body = '';
+  const heading = r.hasData ? L.heading : L.noDataHeading;
+  if (r.hasData) {
+    body += p(wrCopy.fill(r.businessName ? L.introBiz : L.intro, vars));
+    txt.push(wrCopy.fill(r.businessName ? L.introBiz : L.intro, Object.assign({}, vars, { biz: r.businessName || '' })), '');
+  } else {
+    const msg = wrCopy.fill(r.connected ? L.noDataQuiet : L.noDataNone, vars);
+    body += p(esc(msg)); txt.push(msg, '');
+  }
+
+  // Per-platform metric tables (connected platforms with data or no delivery).
+  for (const pl of ok) {
+    const name = wrCopy.PLATFORM_NAMES[pl.platform];
+    const cur = pl.account.currency;
+    const title = `${name}${pl.account.name ? ' · ' + esc(pl.account.name) : ''}${cur ? ' · ' + cur : ''}`;
+    if (!pl.hasData) { body += panel(title, p(esc(L.noActivity), 'margin-bottom:8px;font-size:15px')); txt.push(`${name}: ${L.noActivity}`); continue; }
+    let rows = '';
+    txt.push(`${name}${pl.account.name ? ' · ' + pl.account.name : ''}${cur ? ' · ' + cur : ''}`);
+    for (const k of KEYS) {
+      if (k === 'reach' && !pl.reported.includes('reach')) continue;
+      if (k === 'roas' && pl.totals.roas == null) continue;
+      const v = fmtVal(k, pl.totals[k], cur);
+      const ch = pl.comparison === 'available' ? fmtChange(pl.changes[k]) : '';
+      rows += `<tr>${cell(esc(L[k]))}${cell(v == null ? `<span style="color:${C.muted}">${esc(L.notReported)}</span>` : `<strong style="color:${C.ink}">${esc(v)}</strong>`, ';text-align:right')}${cell(ch ? esc(ch) : '', `;text-align:right;color:${C.muted};width:90px`)}</tr>`;
+      txt.push(`- ${L[k]}: ${v == null ? L.notReported : v}${ch ? ' (' + ch + ' ' + L.vsPrev + ')' : ''}`);
+    }
+    rows += `<tr>${cell(esc(L.delivery))}${cell(`<strong style="color:${C.ink}">${intFmt(pl.totals.campaignsWithDelivery)}</strong>`, ';text-align:right')}${cell('')}</tr>`;
+    txt.push(`- ${L.delivery}: ${pl.totals.campaignsWithDelivery}`);
+    let inner = `<table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0">${pl.comparison === 'available' ? `<tr>${cell('', ';border-bottom:0')}${cell('', ';border-bottom:0')}${cell(`<span style="font-size:12px">${esc(L.vsPrev)}</span>`, `;border-bottom:0;text-align:right;color:${C.muted}`)}</tr>` : ''}${rows}</table>`;
+    if (pl.comparison !== 'available') { inner += small(esc(L.noComparison)); txt.push(L.noComparison); }
+    if (pl.currencyMissing) { inner += small(esc(L.currencyMissing)); txt.push(L.currencyMissing); }
+    const list = (label, items, why) => items.length
+      ? `<p style="margin:16px 0 6px;font-family:${SANS};font-size:13px;font-weight:600;color:${C.ink}">${esc(label)}</p>` +
+        items.map((c) => `<p style="margin:0 0 6px;font-family:${SANS};font-size:14px;line-height:1.45;color:${C.body}">${esc(c.name)}<span style="color:${C.muted}"> · ${[why ? why(c) : null, c.spend != null && cur ? money(c.spend, cur) : null, c.clicks != null ? intFmt(c.clicks) + ' ' + L.clicks.toLowerCase() : null, c.conversions ? fmtVal('conversions', c.conversions) + ' ' + L.conversions.toLowerCase() : null].filter(Boolean).map(esc).join(' · ')}</span></p>`).join('')
+      : '';
+    inner += list(L.performingWell, pl.top);
+    inner += list(L.needsAttention, pl.attention, (c) => (c.reason === 'spend_no_clicks' ? L.spendNoClicks : L.lowCtr));
+    pl.top.forEach((c) => txt.push(`  ${L.performingWell}: ${c.name}`));
+    pl.attention.forEach((c) => txt.push(`  ${L.needsAttention}: ${c.name} (${c.reason === 'spend_no_clicks' ? L.spendNoClicks : L.lowCtr})`));
+    body += panel(title, inner);
+    txt.push('');
+  }
+
+  // Platforms without data this week (not connected / reconnect / failed).
+  const others = r.platforms.filter((pl) => pl.status !== 'ok');
+  if (others.length && (r.connected || r.hasData || r.failed.length || r.needsReconnect.length)) {
+    body += others.map((pl) => small(`${esc(wrCopy.PLATFORM_NAMES[pl.platform])}: ${esc(statusLabel[pl.status] || L.notConnected)}`)).join('');
+    others.forEach((pl) => txt.push(`${wrCopy.PLATFORM_NAMES[pl.platform]}: ${statusLabel[pl.status] || L.notConnected}`));
+  }
+
+  // AI insights (validated) — or an honest note that there are none.
+  if (r.hasData) {
+    const ins = d.insights;
+    if (ins) {
+      const sec = (label, items) => items && items.length ? `<p style="margin:14px 0 6px;font-family:${SANS};font-size:13px;font-weight:600;color:${C.ink}">${esc(label)}</p>` + items.map((t) => `<p style="margin:0 0 6px;font-family:${SANS};font-size:14px;line-height:1.5;color:${C.body}">• ${esc(t)}</p>`).join('') : '';
+      const inner = (ins.summary ? p(esc(ins.summary), 'font-size:15px') : '') + sec(L.performingWell, ins.wentWell) + sec(L.needsAttention, ins.needsAttention) + sec(L.opportunities, ins.opportunities) + sec(L.nextSteps, ins.actions) + small(esc(L.aiNote));
+      body += panel(L.insights, inner);
+      txt.push(L.insights.toUpperCase());
+      if (ins.summary) txt.push(ins.summary);
+      [[L.performingWell, ins.wentWell], [L.needsAttention, ins.needsAttention], [L.opportunities, ins.opportunities], [L.nextSteps, ins.actions]].forEach(([lbl, items]) => { if (items && items.length) { txt.push(lbl + ':'); items.forEach((t) => txt.push('- ' + t)); } });
+      txt.push(L.aiNote, '');
+    } else { body += small(esc(L.aiUnavailable)); txt.push(L.aiUnavailable, ''); }
+    if (withData.filter((pl) => pl.totals.conversions != null).length > 1) { body += small(esc(L.convNote)); txt.push(L.convNote); }
+    if (withData.some((pl) => pl.totals.spend != null)) { body += small(esc(L.currencyNote)); txt.push(L.currencyNote); }
+  }
+
+  const ctaLabel = r.connected ? L.cta : L.connectCta;
+  const ctaUrl = r.connected ? d.campaignsUrl : d.connectUrl;
+  body += button(ctaLabel, ctaUrl || ctx.appUrl);
+  const tzLine = wrCopy.fill(L.tz, { tz: r.period.timeZone });
+  body += small(esc(tzLine) + (d.offUrl ? ' · ' + link(esc(L.off), d.offUrl) : ''));
+  txt.push(`${ctaLabel}: ${ctaUrl || ctx.appUrl}`, tzLine);
+  if (d.offUrl) txt.push(`${L.off}: ${d.offUrl}`);
+
+  return make({ category: 'service', subject: r.hasData ? L.subject : L.noDataSubject, eyebrow: L.eyebrow, heading,
+    preheader: wrCopy.fill(r.hasData ? L.intro : (r.connected ? L.noDataQuiet : L.noDataNone), Object.assign({}, vars, { biz: r.businessName || '' })).slice(0, 140),
+    body, ctx, why: L.why, lang: code, text: `${heading}\n\n` + txt.join('\n') });
+}
 
 function render(key, data, ctx) {
   const t = TEMPLATES[key];

@@ -24,7 +24,7 @@ function boot({ port, env }) {
   };
 
   // ── stateful Supabase ──
-  const TABLES = {}, MISSING = {}, UNIQUE = { email_sends: [['user_id', 'dedupe_key']], email_suppressions: [['email_hash']], free_first_ad_claims: [['user_id']] };
+  const TABLES = {}, MISSING = {}, UNIQUE = { email_sends: [['user_id', 'dedupe_key']], email_suppressions: [['email_hash']], free_first_ad_claims: [['user_id']], weekly_reports: [['user_id', 'week_start', 'scope']] };
   const rows = (t) => (TABLES[t] = TABLES[t] || []);
   const writes = [];
   const parseOr = (expr) => {

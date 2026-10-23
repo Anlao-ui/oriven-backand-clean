@@ -332,6 +332,7 @@ const AD = { product: 'Organic coffee subscription', goal: 'Sales', platform: 'g
   // ── Chat / research follow-up ────────────────────────────────
   say('\nChat');
   reset();
+  rows('profiles')[0].subscription_status = 'creator'; // the full assistant is Oriven Chat (Creator, Professional)
   prov.handler = () => { throw err('AIML API is temporarily unavailable.', { status: 502 }); };
   r = await call('POST', '/api/ai/chat', 'tok1', { message: 'hi' }, { 'X-Idempotency-Key': key() });
   check('chat provider failure: net 0 credits', r.status >= 400 && bal('u1') === 1000 && refundRpcs() === 1, { status: r.status, bal: bal('u1') });
@@ -344,6 +345,7 @@ const AD = { product: 'Organic coffee subscription', goal: 'Sales', platform: 'g
   reset();
   toolRouter.register({ name: 'test_noop', description: 'test only', params: '{}', requiresConfirmation: false, resolve: () => ({}), execute: async () => ({ ok: true }), formatSummary: () => 'noop', formatResult: () => 'done' });
   prov.handler = () => full('{"tool": "test_noop", "params": {}}');
+  rows('profiles')[0].subscription_status = 'creator';
   r = await call('POST', '/api/ai/chat', 'tok1', { message: 'do the thing' }, { 'X-Idempotency-Key': key() });
   check('assistant tool loop is capped: at most 5 model calls for one message', textCalls(OPUS) === 5, { calls: textCalls(OPUS) });
   check('…and a loop that never produced an answer is refunded', bal('u1') === 1000 && refundRpcs() === 1, { bal: bal('u1') });

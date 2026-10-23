@@ -170,6 +170,14 @@ const TASKS = {
     model:    MODELS.aiml.text,
     label:    'Daily Brief',
   },
+  // Weekly AI Performance Report (Professional) — one short narrative per
+  // user per week, written only from validated metrics (services/weeklyReport).
+  'weekly-report': {
+    provider: 'aiml',
+    type:     'text',
+    model:    MODELS.aiml.text,
+    label:    'Weekly Performance Report',
+  },
   'research-query': {
     provider: 'aiml',
     type:     'text',

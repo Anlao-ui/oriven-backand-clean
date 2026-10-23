@@ -37,6 +37,13 @@ Supabase Postgres, accessed exclusively via the service-role client (`supabaseAd
 - **`autopilot_tasks`** — generated from three existing sources (stale Business Brain knowledge, Business Health recommendations, open high-confidence recommendations), not a separate detection engine.
 - **`autopilot_workflows`** — a generic step-sequence engine over existing generators/tools; `steps jsonb` is an ordered array of `{step, label, status, result}`; pauses at a `request_approval` step and resumes once the linked recommendation is approved.
 
+## 2026-10 — Weekly AI Performance Report + Priority Support
+
+`docs/migrations/2026-10-weekly-reports.sql` (apply before deploying the backend that uses it; additive, re-runnable, rollback in the file header).
+- **`weekly_reports`** — one row per (user, reporting week, scope `live`/`test`); the UNIQUE key makes every week single across runs, retries and instances. Stores the validated metrics (`report`) and validated AI insights (`insights`) so a retried send never calls the AI again. Service role only (RLS on, browser roles revoked); cascades with the profile.
+- **`support_messages`** — RLS turned on and browser roles revoked (the 2026-08 migration never enabled it); the app only uses it through the backend.
+- **`profiles.preferences`** — ensured; holds `language` and `weeklyReportEmail` (false = no weekly report).
+
 ## Redundancy review (V10, Epic 8)
 
 No redundant columns or duplicate data found across the tables above — each `jsonb` column (`evidence`, `action_params`, `scores`, `steps`) serves a distinct query/rendering pattern already exercised by real code, not speculative future use. The one deliberate non-normalization: campaign/product/audience "links" (e.g. a recommendation's `campaign_name`, a learning's `entity_name`) are soft name-matches, not foreign keys — marketing data lives on the ad platforms, not in this database, so a real foreign key isn't expressible. This has been a consistent, explicit design decision since V7 Phase 1.

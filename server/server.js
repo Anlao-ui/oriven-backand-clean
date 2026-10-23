@@ -37,6 +37,7 @@ const firstAd = require('./services/firstAd'); // free first-ad image for new Fr
 const videoJobs = require('./services/videoJobs'); // who started which video generation (status endpoints check ownership)
 const emailLifecycle = require('./services/email/lifecycle'); // lifecycle emails (off unless EMAIL_MODE + EMAIL_LIFECYCLE_ENABLED)
 const emailSender = require('./services/email/sender');
+const emailTemplates = require('./services/email/templates');
 const emailVerification = require('./services/email/verification'); // verification email: Resend first, SMTP fallback
 const campaignGoals = require('./services/campaignGoals'); // single source of truth for the 4 campaign goals across every platform
 const createCompat = require('./services/createCompat'); // shared (frontend + backend + Launch) platform × type × goal × format rules
@@ -1261,6 +1262,12 @@ async function _briefToImagePrompt(brief, contextHint, taskType) {
 app.post('/api/generate-text', requireSubIfAuthed, async (req, res) => {
   const { prompt, type, brandContext } = req.body;
   if (!prompt) return res.status(400).json({ error: 'prompt is required' });
+  // The conversational 'assistant' mode is Oriven Chat by another route, so
+  // it needs the same entitlement (Creator, Professional). Copy generation
+  // (every other type) stays on every paid plan.
+  if (type === 'assistant' && !(req.user && planEntitlements.hasEntitlement(req.subscriptionStatus, 'orivenChat'))) {
+    return res.status(403).json({ error: 'Oriven Chat is available from the Creator plan.', code: 'PLAN_REQUIRED', feature: 'orivenChat', plan: 'creator' });
+  }
 
   const brandSection = _buildBrandSection(brandContext);
   const hasBrand     = brandSection.length > 0;
@@ -2868,44 +2875,56 @@ app.patch('/api/profile/timezone', async (req, res) => {
   }
 });
 
-// -- Priority Support chat (Professional plan only) --------------
-// GET returns the caller's own flat message thread; POST appends a user
-// message and emails a notification (email is notification-only, not the
-// reply transport -- replies land back in-app via /api/support/admin-reply).
+// -- Priority Support (Professional) ------------------------------
+// A flat per-user message thread (support_messages, service role only).
+//   GET  /api/support/messages             the caller's own thread; marks the
+//                                          team's replies read
+//   POST /api/support/messages             append a message; notifies the team
+//                                          (contact@orivenai.com) by email
+//   GET  /api/support/admin/threads        admins: every thread, newest first
+//   GET  /api/support/admin/threads/:uid   admins: one thread
+//   POST /api/support/admin-reply          admins: reply; the customer gets an
+//                                          email that a reply is waiting
+// Identity always comes from the verified session token: users only ever see
+// their own thread (no user id is read from the request), and admin access is
+// the server-side ADMIN_USER_IDS allowlist (_requireAdmin) — never a client
+// flag. Customer reply emails go through the same Resend sender and
+// email_sends ledger as every other email (EMAIL_MODE applies). No response
+// time is promised anywhere.
 app.get('/api/support/messages', requireEntitlement('prioritySupport'), async (req, res) => {
   try {
     const { data, error } = await supabaseAdmin
-      .from('support_messages').select('id, sender, body, created_at')
-      .eq('user_id', req.user.id).order('created_at', { ascending: true });
+      .from('support_messages').select('id, sender, body, created_at, read_by_user')
+      .eq('user_id', req.user.id).order('created_at', { ascending: true }).limit(500);
     if (error) throw error;
-    res.json({ messages: data || [] });
+    const unread = (data || []).filter((m) => m.sender === 'admin' && !m.read_by_user).map((m) => m.id);
+    if (unread.length) await supabaseAdmin.from('support_messages').update({ read_by_user: true }).eq('user_id', req.user.id).in('id', unread);
+    res.set('Cache-Control', 'no-store');
+    res.json({ messages: (data || []).map((m) => ({ id: m.id, sender: m.sender, body: m.body, created_at: m.created_at })), unread: unread.length });
   } catch (err) {
     console.error('[Support] GET messages error:', err.message);
     res.status(500).json({ error: 'Failed to load support messages' });
   }
 });
 
-app.post('/api/support/messages', requireSubscription, async (req, res) => {
-  const body = (req.body && req.body.body || '').trim();
+app.post('/api/support/messages', requireEntitlement('prioritySupport'), async (req, res) => {
+  const body = (req.body && typeof req.body.body === 'string' ? req.body.body : '').trim();
   if (!body) return res.status(400).json({ error: 'Message body is required' });
   if (body.length > 4000) return res.status(400).json({ error: 'Message is too long' });
   try {
-    const { data: profile } = await supabaseAdmin
-      .from('profiles').select('subscription_status, email').eq('id', req.user.id).maybeSingle();
-    if (!profile || !planEntitlements.hasEntitlement(profile.subscription_status, 'prioritySupport')) {
-      return res.status(403).json({ error: 'Priority Support is a Professional plan feature', code: 'PLAN_REQUIRED' });
-    }
     const { error: insertErr } = await supabaseAdmin.from('support_messages')
       .insert({ user_id: req.user.id, sender: 'user', body });
     if (insertErr) throw insertErr;
 
     // Email is notification-only -- best-effort, never blocks the response.
     if (process.env.SMTP_USER && process.env.SMTP_PASS) {
+      const { data: profile } = await supabaseAdmin.from('profiles').select('email').eq('id', req.user.id).maybeSingle();
+      const who = (profile && profile.email) || req.user.id;
       _smtpTransporter().sendMail({
         from:    process.env.SMTP_FROM || `ORIVEN <${process.env.SMTP_USER}>`,
         to:      'contact@orivenai.com',
-        subject: `[Priority Support] New message from ${profile.email || req.user.id}`,
-        text:    `${profile.email || req.user.id} (Professional plan) sent a Priority Support message:\n\n${body}`,
+        subject: `[Priority Support] New message from ${who}`,
+        text:    `${who} (Professional plan) sent a Priority Support message:\n\n${body}\n\nReply from the support admin page: ${String(FRONTEND_URL).replace(/\/+$/, '')}/admin/support/`,
       }).catch((e) => console.warn('[Support] Notification email failed:', e.message));
     }
     res.json({ ok: true });
@@ -2915,28 +2934,101 @@ app.post('/api/support/messages', requireSubscription, async (req, res) => {
   }
 });
 
-// Minimal admin-reply path -- the seed of a future admin dashboard, not the
-// dashboard itself. Gated by a static env allowlist (reuses existing auth,
-// no new admin-auth system) since Oriven support is currently a one-person
-// operation; callable directly (curl/Postman) until a real UI exists.
-app.post('/api/support/admin-reply', async (req, res) => {
-  const user = await getUserFromToken(req);
-  if (!user) return res.status(401).json({ error: 'Unauthorized' });
-  const adminIds = (process.env.ADMIN_USER_IDS || '').split(',').map((s) => s.trim()).filter(Boolean);
-  if (!adminIds.includes(user.id)) return res.status(403).json({ error: 'Not authorized' });
-  const targetUserId = req.body && req.body.userId;
-  const body = (req.body && req.body.body || '').trim();
-  if (!targetUserId || !body) return res.status(400).json({ error: 'userId and body are required' });
+const _UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+app.get('/api/support/admin/threads', async (req, res) => {
+  const admin = await _requireAdmin(req, res);
+  if (!admin) return;
   try {
-    const { error } = await supabaseAdmin.from('support_messages')
-      .insert({ user_id: targetUserId, sender: 'admin', body });
+    const { data, error } = await supabaseAdmin.from('support_messages').select('user_id, sender, body, created_at')
+      .order('created_at', { ascending: false }).limit(2000);
     if (error) throw error;
-    res.json({ ok: true });
+    const threads = new Map();
+    (data || []).forEach((m) => {
+      if (!threads.has(m.user_id)) threads.set(m.user_id, { userId: m.user_id, lastAt: m.created_at, lastSender: m.sender, preview: String(m.body || '').slice(0, 140), count: 0 });
+      threads.get(m.user_id).count++;
+    });
+    const ids = Array.from(threads.keys());
+    if (ids.length) {
+      const { data: profs } = await supabaseAdmin.from('profiles').select('id, email, subscription_status').in('id', ids);
+      (profs || []).forEach((p) => { const t = threads.get(p.id); if (t) { t.email = p.email || null; t.plan = p.subscription_status || null; } });
+    }
+    res.set('Cache-Control', 'no-store');
+    res.json({ threads: Array.from(threads.values()).map((t) => Object.assign(t, { awaitingReply: t.lastSender === 'user' })) });
+  } catch (err) {
+    console.error('[Support] admin threads error:', err.message);
+    res.status(500).json({ error: 'Could not load support threads.' });
+  }
+});
+
+app.get('/api/support/admin/threads/:userId', async (req, res) => {
+  const admin = await _requireAdmin(req, res);
+  if (!admin) return;
+  const uid = String(req.params.userId || '');
+  if (!_UUID_RE.test(uid)) return res.status(400).json({ error: 'Invalid user id' });
+  try {
+    const [{ data: msgs, error }, { data: prof }] = await Promise.all([
+      supabaseAdmin.from('support_messages').select('id, sender, body, created_at').eq('user_id', uid).order('created_at', { ascending: true }).limit(500),
+      supabaseAdmin.from('profiles').select('email, subscription_status').eq('id', uid).maybeSingle(),
+    ]);
+    if (error) throw error;
+    if (!msgs || !msgs.length) return res.status(404).json({ error: 'No support thread for this user' });
+    res.set('Cache-Control', 'no-store');
+    res.json({ userId: uid, email: (prof && prof.email) || null, plan: (prof && prof.subscription_status) || null, messages: msgs });
+  } catch (err) {
+    console.error('[Support] admin thread error:', err.message);
+    res.status(500).json({ error: 'Could not load this thread.' });
+  }
+});
+
+app.post('/api/support/admin-reply', async (req, res) => {
+  const admin = await _requireAdmin(req, res);
+  if (!admin) return;
+  const targetUserId = String((req.body && req.body.userId) || '');
+  const body = (req.body && typeof req.body.body === 'string' ? req.body.body : '').trim();
+  if (!_UUID_RE.test(targetUserId) || !body) return res.status(400).json({ error: 'userId and body are required' });
+  if (body.length > 4000) return res.status(400).json({ error: 'Reply is too long' });
+  try {
+    // Replies only go to an existing thread (never to an arbitrary account).
+    const { data: existing } = await supabaseAdmin.from('support_messages').select('id').eq('user_id', targetUserId).limit(1);
+    if (!existing || !existing.length) return res.status(404).json({ error: 'No support thread for this user' });
+    const { data: row, error } = await supabaseAdmin.from('support_messages')
+      .insert({ user_id: targetUserId, sender: 'admin', body }).select('id').maybeSingle();
+    if (error) throw error;
+    const email = await _notifySupportReply(targetUserId, row && row.id);
+    res.json({ ok: true, email });
   } catch (err) {
     console.error('[Support] Admin reply error:', err.message);
     res.status(500).json({ error: 'Failed to send reply' });
   }
 });
+
+// Emails the customer that a reply is waiting (the reply text stays in the
+// app). Ledgered in email_sends per message, so a retried request can't mail
+// twice. Returns a short status for the admin page; never throws.
+async function _notifySupportReply(userId, messageId) {
+  try {
+    if (!messageId) return 'skipped';
+    const { data: prof } = await supabaseAdmin.from('profiles').select('email, preferences').eq('id', userId).maybeSingle();
+    if (!prof || !prof.email) return 'no_address';
+    if (!emailSender.canDeliver(prof.email)) return emailSender.mode() === 'off' ? 'email_off' : 'not_deliverable';
+    if (await emailLifecycle.isSuppressed(prof.email)) return 'suppressed';
+    const key = (emailSender.scope() === 'test' ? 'test:' : '') + 'support_reply:' + messageId;
+    const ins = await supabaseAdmin.from('email_sends').insert({ user_id: userId, template: 'support_reply', dedupe_key: key, category: 'service', status: 'sending', attempts: 1 }).select('id').maybeSingle();
+    if (ins.error || !ins.data) return 'already_sent';
+    const appUrl = String(FRONTEND_URL).replace(/\/+$/, '') + '/app';
+    const lang = prof.preferences && prof.preferences.language;
+    const out = emailTemplates.render('support_reply', { lang, url: appUrl + '?settings=subscription' }, { appUrl, postalAddress: process.env.EMAIL_POSTAL_ADDRESS || '' });
+    const r = await emailSender.send({ to: prof.email, subject: out.subject, html: out.html, text: out.text, tags: [{ name: 'template', value: 'support_reply' }], idempotencyKey: `oriven:${emailSender.scope()}:${userId}:support_reply:${messageId}` });
+    const now = new Date().toISOString();
+    const status = r && r.id ? 'sent' : r && r.skipped ? 'skipped' : 'error';
+    await supabaseAdmin.from('email_sends').update({ status, provider_id: r && r.id ? r.id : null, sent_at: r && r.id ? now : null, error: r && (r.error || r.skipped) ? String(r.error || r.skipped).slice(0, 80) : null, updated_at: now }).eq('id', ins.data.id);
+    return status;
+  } catch (err) {
+    console.warn('[Support] reply email failed:', err.message);
+    return 'error';
+  }
+}
 
 // Sends the verification email for a freshly stored token: Resend when it can
 // deliver to this address, the existing SMTP path otherwise (or if Resend
@@ -6944,12 +7036,15 @@ Reply ONLY with valid JSON array (no markdown, no extra text):
 // Returns: { reply }
 app.post('/api/ai/chat', requireSubIfAuthed, paidActions.laneGuard('chat'), async (req, res) => {
   const { message, context, brandCore, history } = req.body || {};
-  // The Oriven Chat assistant panel identifies itself (surface:'oriven-chat')
-  // and needs the orivenChat entitlement (Creator and Professional). Checked
-  // before any credit reservation. The same endpoint also answers inside the
-  // paid workflow (Research follow-ups, ad workspace, campaign results),
-  // which every paid plan keeps.
-  if (req.body && req.body.surface === 'oriven-chat' && !(req.user && planEntitlements.hasEntitlement(req.subscriptionStatus, 'orivenChat'))) {
+  // Oriven Chat entitlement — decided from the account's plan, never from
+  // what the request says it is (a `surface` field is ignored). Checked before
+  // any credit reservation. See _resolveChatMode: the full assistant needs
+  // orivenChat (Creator, Professional); without it a request is only served
+  // in one of the two restricted workflow modes (Create's ad editor, Research
+  // follow-ups), whose prompt and tools are limited server-side below.
+  const chatEntitled = !!(req.user && planEntitlements.hasEntitlement(req.subscriptionStatus, 'orivenChat'));
+  const chatMode = _resolveChatMode(req.body, chatEntitled, req.subscriptionStatus);
+  if (!chatMode) {
     return res.status(403).json({ error: 'Oriven Chat is available from the Creator plan.', code: 'PLAN_REQUIRED', feature: 'orivenChat', plan: 'creator' });
   }
   if (!message) return res.status(400).json({ error: 'message is required' });
@@ -7168,8 +7263,14 @@ app.post('/api/ai/chat', requireSubIfAuthed, paidActions.laneGuard('chat'), asyn
   // Research follow-ups (Research page, mode:'research-followup') answer from
   // the market map only: no tools are offered and exactly one model call is
   // made. The tool loop below stays for the Oriven Chat assistant.
-  const researchFollowup = !!(research && req.body && req.body.mode === 'research-followup');
-  const toolsSection = `\n\nTOOLS AVAILABLE — call one when the user is clearly asking for an action to be taken (not when they're just asking a question or making conversation):\n${toolRouter.getCatalogPrompt()}\n\nTo use a tool, reply with ONLY a JSON object on its own, nothing else: {"tool": "<tool_name>", "params": {...}}. No markdown fences, no extra text before or after. If a required param is missing or ambiguous, don't guess — ask the user a short clarifying question in plain text instead of calling the tool. For anything that isn't an action request, just reply normally in plain conversational text. Tool names like "create_campaign_package" are internal — never write them out in a conversational reply; describe the action in plain English instead (e.g. "generate a campaign package", not "use create_campaign_package").`;
+  const researchFollowup = chatMode === 'research-followup';
+  // Restricted modes (no orivenChat entitlement): the ad editor may only use
+  // the ad-editing tools on the open ad; nothing else from the assistant's
+  // context (business knowledge, accounts, workspace, performance data) is
+  // sent to the model.
+  const adEditOnly = chatMode === 'ad-edit';
+  const allowedTools = adEditOnly ? AD_EDIT_TOOL_NAMES : null;
+  const toolsSection = `\n\nTOOLS AVAILABLE — call one when the user is clearly asking for an action to be taken (not when they're just asking a question or making conversation):\n${toolRouter.getCatalogPrompt(allowedTools)}\n\nTo use a tool, reply with ONLY a JSON object on its own, nothing else: {"tool": "<tool_name>", "params": {...}}. No markdown fences, no extra text before or after. If a required param is missing or ambiguous, don't guess — ask the user a short clarifying question in plain text instead of calling the tool. For anything that isn't an action request, just reply normally in plain conversational text. Tool names like "create_campaign_package" are internal — never write them out in a conversational reply; describe the action in plain English instead (e.g. "generate a campaign package", not "use create_campaign_package").`;
 
   const systemPrompt = `You are Oriven, ORIVEN's AI marketing co-pilot. ORIVEN is organized as six steps — 01 Control Center (the start page: the user's business context — business, brand, audiences, competitors, connected accounts and knowledge — plus an overview of their advertising, what needs attention, and Planning: dated advertising plans, a monthly budget plan, briefs and naming/UTM templates), 02 Research (investigate a market, competitors, audiences and opportunities; results become a Market Map with sources, and chosen findings can go into Create), 03 Create (turn a brief into platform-ready ad creative and campaign structure; drafts go to Launch), 04 Launch (review drafts by platform with their readiness — ready, ready with warnings or blocked — and publish when the user chooses), 05 Campaigns (follow live campaign performance by platform, campaign and date range: spend, delivery, traffic and conversion metrics, with spend over time where the platform provides it), and 06 Automations (rules and schedules on Google, Meta, TikTok and Pinterest campaigns that pause, resume, adjust budgets, notify or ask for approval first — never acting on missing data — plus their activity; creating an automation costs 50 credits once, checks and actions are free). There is no separate Home or Business page; both live in Control Center. You help the user across all of them with their Google, Meta, TikTok and Pinterest ad campaigns. ORIVEN does not publish campaigns on a schedule: a planned start date is the user's plan, and launching is a manual step in Launch.${supportSection}${hasBrand ? `\n\nBRAND CONTEXT (draw on this when relevant):\n${brandSection}` : ''}${businessSection}${accountsSection}${pageSection}${campaignSection}${researchSection}${reviewSection}${launchSection}${autopilotSection}${businessSignalsSection}${workspaceSection}${opsSection}${researchFollowup ? '' : toolsSection}
 
@@ -7177,7 +7278,12 @@ Be conversational and natural. Match the energy of the message — brief for cas
 
 You are a senior marketing strategist, not a generic chatbot — assume responsibility, guide rather than react, and never ask for information already given above in this prompt. For analytical questions (score explanations, performance reviews, "why" questions), structure the answer as: the situation, the reason behind it, a concrete recommendation, and the result to expect — without labeling these parts or turning it into a rigid template for short/casual replies. If a claim would need evidence you don't have (sample size, historical performance, real conversion data), say so plainly instead of stating it with false confidence.`;
 
-  const messages = [{ role: 'system', content: systemPrompt }];
+  const restrictedDecline = 'This assistant only covers ' + (adEditOnly ? 'changes to the ad you have open' : 'this market map') + '. Broader questions are answered by Oriven Chat, available on the Creator and Professional plans.';
+  const restrictedPrompt = adEditOnly
+    ? `You are the ad editor inside ORIVEN Create. The user is editing one ad: "${currentCampaign.campaignName}" (${currentCampaign.platform || 'unknown platform'}). Only make or explain changes to this ad with the tools below. If the user asks for anything else (general marketing advice, other campaigns, performance analysis, strategy, questions about their account or OrivenAI), reply with exactly: "${restrictedDecline}" Never mention that you are powered by any specific AI provider or model.${hasBrand ? `\n\nBRAND CONTEXT (draw on this when relevant):\n${brandSection}` : ''}${toolsSection}`
+    : `You answer follow-up questions about one ORIVEN Research market map, using only the map data below.${researchSection}\n\nIf the question is not about this market map, reply with exactly: "${restrictedDecline}" Plain conversational text. Never mention that you are powered by any specific AI provider or model.`;
+
+  const messages = [{ role: 'system', content: chatEntitled ? systemPrompt : restrictedPrompt }];
   if (Array.isArray(history)) {
     history.slice(-20).forEach(turn => {
       if (turn && (turn.role === 'user' || turn.role === 'assistant') && turn.content) {
@@ -7206,7 +7312,7 @@ You are a senior marketing strategist, not a generic chatbot — assume responsi
   try {
     // Hard ceiling on model calls for ONE chat message: 5 for the assistant
     // (each tool step = 1 call), 1 for a research follow-up.
-    const MAX_TOOL_STEPS = researchFollowup ? 1 : 5;
+    const MAX_TOOL_STEPS = researchFollowup ? 1 : adEditOnly ? 3 : 5;
     let reply = null;
     let pendingAction = null;
     // Ad Editing Workspace — the last non-confirmation tool that actually
@@ -7224,6 +7330,9 @@ You are a senior marketing strategist, not a generic chatbot — assume responsi
 
       if (!intent) { reply = raw; break; }
 
+      // A tool outside the restricted mode's set is never run (the model was
+      // never offered it); research follow-ups get no tools at all.
+      if (researchFollowup || (allowedTools && !allowedTools.has(intent.tool))) { reply = chatEntitled ? "I wasn't able to complete that — could you rephrase?" : restrictedDecline; break; }
       const tool = toolRouter.getTool(intent.tool);
       if (!tool) { reply = raw; break; } // AI named an unknown tool — fall back to the raw text rather than erroring
 
@@ -7275,6 +7384,26 @@ You are a senior marketing strategist, not a generic chatbot — assume responsi
     res.status(500).json({ error: 'Failed to generate a response. Please try again.' });
   }
 });
+
+// The tools Create's ad editor may use without the orivenChat entitlement
+// (tools/adEditTools.js) — they only change the ad the user has open.
+const AD_EDIT_TOOL_NAMES = new Set(['edit_ad_copy', 'update_campaign_budget', 'update_audience', 'generate_new_creative', 'convert_platform', 'select_concept_variant', 'edit_campaign_settings']);
+
+// Which /api/ai/chat mode a request gets. `plan` is the authenticated
+// account's subscription_status (requireSubIfAuthed); nothing the client sends
+// can unlock the full assistant without the orivenChat entitlement.
+//   'assistant'         — Oriven Chat (orivenChat entitlement)
+//   'research-followup' — mode:'research-followup' with a market map (research entitlement)
+//   'ad-edit'           — Create's ad editor with an open ad (any paid plan)
+//   null                — refused
+function _resolveChatMode(body, chatEntitled, plan) {
+  const b = body && typeof body === 'object' ? body : {};
+  const ctx = b.context && typeof b.context === 'object' ? b.context : {};
+  if (b.mode === 'research-followup' && ctx.research && ctx.research.question && planEntitlements.hasEntitlement(plan, 'research')) return 'research-followup';
+  if (chatEntitled) return 'assistant';
+  if (ctx.page === 'ad-workspace' && ctx.currentCampaign && typeof ctx.currentCampaign.campaignName === 'string' && ctx.currentCampaign.campaignName.trim()) return 'ad-edit';
+  return null;
+}
 
 function _parseToolIntent(raw) {
   const cleaned = String(raw || '').replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/i, '').trim();
@@ -14282,6 +14411,32 @@ function _logCampaignEvent(user, opts) {
   }).catch(function(){});
 }
 
+// GET /api/notifications — the in-app notification center (the bell):
+// Creator and Professional (planEntitlements 'notifications'), enforced here,
+// not just by hiding the bell. Returns exactly what the panel shows: the
+// last 7 days of undismissed events (high-severity ones separately) and the
+// pending automation approvals. The read/dismiss routes below carry the same
+// gate. Automation emails are a separate feature (services/automations/
+// notify.js) and keep working on every plan that has Automations.
+app.get('/api/notifications', requireEntitlement('notifications'), async (req, res) => {
+  try {
+    const since = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString();
+    const base = () => supabaseAdmin.from('intelligence_events').select('*').eq('user_id', req.user.id).eq('dismissed', false).gte('created_at', since).order('created_at', { ascending: false }).limit(200);
+    const [high, all, appr] = await Promise.all([
+      base().eq('severity', 'high'),
+      base(),
+      supabaseAdmin.from('automation_approvals').select('*').eq('user_id', req.user.id).eq('status', 'pending').gt('expires_at', new Date().toISOString()).order('created_at', { ascending: false }).limit(100),
+    ]);
+    if (high.error) throw high.error;
+    if (all.error) throw all.error;
+    res.set('Cache-Control', 'no-store');
+    res.json({ highEvents: high.data || [], events: all.data || [], approvals: appr.error ? [] : (appr.data || []) });
+  } catch (err) {
+    console.error('[notifications]', err.message);
+    res.status(500).json({ error: 'Could not load your notifications right now.' });
+  }
+});
+
 app.get('/api/intelligence/events', requireSubIfAuthed, async (req, res) => {
   try {
     if (!req.user) return res.status(401).json({ error: 'Authentication required' });
@@ -14311,7 +14466,7 @@ app.get('/api/intelligence/events', requireSubIfAuthed, async (req, res) => {
   }
 });
 
-app.patch('/api/intelligence/events/:id/dismiss', requireSubIfAuthed, async (req, res) => {
+app.patch('/api/intelligence/events/:id/dismiss', requireEntitlement('notifications'), async (req, res) => {
   try {
     if (!req.user) return res.status(401).json({ error: 'Authentication required' });
     const { data, error } = await supabaseAdmin.from('intelligence_events')
@@ -14334,7 +14489,7 @@ app.patch('/api/intelligence/events/:id/dismiss', requireSubIfAuthed, async (req
 // dismissed removes it from the list entirely). Added for the Notification
 // system rewrite -- previously only `dismissed` existed, so there was no
 // way to represent "seen but still relevant" separately from "gone".
-app.patch('/api/intelligence/events/:id/read', requireSubIfAuthed, async (req, res) => {
+app.patch('/api/intelligence/events/:id/read', requireEntitlement('notifications'), async (req, res) => {
   try {
     if (!req.user) return res.status(401).json({ error: 'Authentication required' });
     const { data, error } = await supabaseAdmin.from('intelligence_events')
@@ -14354,7 +14509,7 @@ app.patch('/api/intelligence/events/:id/read', requireSubIfAuthed, async (req, r
 
 // PATCH /api/intelligence/events/read-all -- bulk mark-all-read, used by
 // the notification panel's "Mark all read" affordance.
-app.patch('/api/intelligence/events/read-all', requireSubIfAuthed, async (req, res) => {
+app.patch('/api/intelligence/events/read-all', requireEntitlement('notifications'), async (req, res) => {
   try {
     if (!req.user) return res.status(401).json({ error: 'Authentication required' });
     const { error } = await supabaseAdmin.from('intelligence_events')
@@ -14380,7 +14535,7 @@ app.patch('/api/intelligence/events/read-all', requireSubIfAuthed, async (req, r
 // same panel come from a different table (/api/autopilot/recommendations)
 // and are left untouched here, exactly as the single-item dismiss button
 // already never appears on those cards.
-app.patch('/api/intelligence/events/dismiss-all', requireSubIfAuthed, async (req, res) => {
+app.patch('/api/intelligence/events/dismiss-all', requireEntitlement('notifications'), async (req, res) => {
   try {
     if (!req.user) return res.status(401).json({ error: 'Authentication required' });
     const { error } = await supabaseAdmin.from('intelligence_events')
@@ -15026,6 +15181,49 @@ async function _unsubscribe(req, res, html) {
 app.get('/api/email/unsubscribe', (req, res) => _unsubscribe(req, res, true));
 app.post('/api/email/unsubscribe', (req, res) => _unsubscribe(req, res, false));
 
+// One-click "turn off weekly reports" (signed per user, same HMAC as the
+// unsubscribe links). Sets profiles.preferences.weeklyReportEmail = false —
+// the same preference Settings → Notifications writes. Nothing else changes.
+async function _weeklyReportOff(req, res, html) {
+  const u = String((req.query && req.query.u) || ''), t = String((req.query && req.query.t) || '');
+  if (!/^[0-9a-f-]{36}$/i.test(u) || !emailLifecycle.checkUnsubToken(u, t)) {
+    return html ? res.status(400).send(_unsubPage('Link not valid', 'This link isn’t valid. You can turn weekly reports off in Settings → Notifications in the app.')) : res.status(400).end();
+  }
+  try {
+    const { data } = await supabaseAdmin.from('profiles').select('preferences').eq('id', u).maybeSingle();
+    if (data) {
+      const prefs = Object.assign({}, data.preferences || {}, { weeklyReportEmail: false });
+      const { error } = await supabaseAdmin.from('profiles').update({ preferences: prefs }).eq('id', u);
+      if (error) throw error;
+    }
+    return html ? res.send(_unsubPage('Weekly reports turned off', 'You won’t receive the Weekly AI Performance Report any more. You can turn it back on in Settings → Notifications.')) : res.status(200).end();
+  } catch (err) {
+    console.error('[WeeklyReport] off link:', err.message);
+    return html ? res.status(500).send(_unsubPage('Something went wrong', 'Please try again, or turn weekly reports off in Settings → Notifications.')) : res.status(500).end();
+  }
+}
+app.get('/api/email/weekly-report/off', (req, res) => _weeklyReportOff(req, res, true));
+app.post('/api/email/weekly-report/off', (req, res) => _weeklyReportOff(req, res, false));
+
+// External scheduler trigger for the weekly report job (e.g. a Render Cron
+// Job or any scheduler that can send a POST). Server-to-server only:
+// requires the X-Weekly-Report-Secret header to equal WEEKLY_REPORTS_SECRET
+// (32+ characters; compared in constant time). It can't target a user — it
+// runs the same idempotent pass as the in-process job, and answers with
+// counts only.
+app.post('/api/internal/weekly-reports/run', async (req, res) => {
+  const { checkSchedulerSecret } = require('./services/weeklyReport/runner');
+  if (!checkSchedulerSecret(req.headers['x-weekly-report-secret'], process.env.WEEKLY_REPORTS_SECRET)) return res.status(401).json({ error: 'Unauthorized' });
+  if (!_weeklyReportsEnabled()) return res.status(503).json({ error: 'Weekly reports are not enabled', code: 'WEEKLY_REPORTS_DISABLED' });
+  try {
+    res.set('Cache-Control', 'no-store');
+    res.json(await _runWeeklyReports('scheduler'));
+  } catch (err) {
+    console.error('[WeeklyReport] triggered run failed:', err.message);
+    res.status(500).json({ error: 'Run failed' });
+  }
+});
+
 // Signed-in user's marketing-email preference. Body: { marketing: boolean }
 app.get('/api/email/preferences', async (req, res) => {
   const user = await getUserFromToken(req);
@@ -15079,6 +15277,11 @@ app.post('/api/account/delete', async (req, res) => {
     // unconfirmed FK cascade from auth.users -- so nothing is left
     // dangling if the schema doesn't cascade-delete.
     await supabaseAdmin.from('creative_assets').delete().eq('user_id', user.id);
+    // Priority Support thread and stored weekly reports reference the
+    // profile (support_messages has no cascade, so it would block the
+    // profile delete).
+    await supabaseAdmin.from('support_messages').delete().eq('user_id', user.id);
+    await supabaseAdmin.from('weekly_reports').delete().eq('user_id', user.id);
     // Disband any team this user owns (their invited seats).
     await supabaseAdmin.from('team_members').delete().eq('owner_user_id', user.id);
     // Remove this user's own seat on someone else's team, if any --
@@ -16080,6 +16283,42 @@ if (String(process.env.EMAIL_LIFECYCLE_ENABLED || '').trim().toLowerCase() === '
   _scheduleBackgroundJob('email-lifecycle', '*/15 * * * *', () => emailLifecycle.runOnce()
     .then((s) => { if (s.due || s.failed) console.log('[EmailLifecycle]', JSON.stringify({ mode: emailSender.mode(), considered: s.considered, due: s.due, sent: s.sent, skipped: s.skipped, failed: s.failed })); })
     .catch((err) => console.error('[EmailLifecycle] run failed:', err.message)));
+}
+
+// ── Weekly AI Performance Report (Professional) ───────────────────────
+// services/weeklyReport/*. Off unless WEEKLY_REPORTS_ENABLED=true; sending
+// additionally needs EMAIL_MODE=test|live, RESEND_API_KEY/EMAIL_FROM and the
+// weekly_reports table (docs/migrations/2026-10-weekly-reports.sql).
+// Delivery doesn't depend on this process staying up: every run (in-process
+// every 30 minutes, and/or an external scheduler calling the protected
+// POST /api/internal/weekly-reports/run) sends whatever is due and not yet
+// sent, from Monday 07:00 to Wednesday in each user's timezone.
+const _weeklyReportsEnabled = () => String(process.env.WEEKLY_REPORTS_ENABLED || '').trim().toLowerCase() === 'true';
+const _weeklyReports = require('./services/weeklyReport/runner').createRunner({
+  db: supabaseAdmin, sender: emailSender, templates: emailTemplates, lifecycle: emailLifecycle,
+  collect: require('./services/weeklyReport/collect').createCollector({
+    db: supabaseAdmin,
+    helpers: { getGadsAccess: _getGadsAccess, gadsQuery: _gadsQuery, getMetaAccess: _getMetaAccess, metaFetch: _metaFetch,
+      getTikTokAccess: _getTikTokAccess, tiktokFetch: _tiktokFetch, getPinterestAccess: _getPinterestAccess, pinterestApiRequest: _pinterestApiRequest },
+    log: (m) => console.warn(m),
+  }).collect,
+  aiCall: (system, user, opts) => _aimlText('weekly-report', system, user, opts),
+  appUrl: () => (process.env.FRONTEND_URL ? String(process.env.FRONTEND_URL).replace(/\/$/, '') + '/app' : 'https://orivenai.com/app'),
+  apiUrl: () => (process.env.PUBLIC_API_URL || 'https://oriven-backand-clean.onrender.com').replace(/\/$/, ''),
+  log: (m) => console.warn(m),
+});
+// One run at a time per process (an overlapping trigger joins the current
+// run); across processes the weekly_reports claim keeps every week single.
+let _weeklyReportsRun = null;
+function _runWeeklyReports(source) {
+  if (_weeklyReportsRun) return _weeklyReportsRun;
+  _weeklyReportsRun = aiUsage.withContext({ operation: 'weekly-reports:' + source }, () => _weeklyReports.runOnce())
+    .then((s) => { if (s.claimed || s.failed || s.disabled) console.log('[WeeklyReport]', JSON.stringify(Object.assign({ source, mode: emailSender.mode() }, s))); return s; })
+    .finally(() => { _weeklyReportsRun = null; });
+  return _weeklyReportsRun;
+}
+if (_weeklyReportsEnabled()) {
+  _scheduleBackgroundJob('weekly-reports', '*/30 * * * *', () => _runWeeklyReports('cron').catch((err) => console.error('[WeeklyReport] run failed:', err.message)));
 }
 
 _scheduleBackgroundJob('paid-actions-sweep', '*/15 * * * *', () => {

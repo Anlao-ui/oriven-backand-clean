@@ -47,9 +47,12 @@ function getTool(name) {
 }
 
 // ── Catalog prompt — injected into the chat system prompt ─────────
-function getCatalogPrompt() {
+// names (optional Set): only these tools — a restricted chat mode is never
+// even told about the others.
+function getCatalogPrompt(names) {
   const lines = [];
   for (const tool of TOOLS.values()) {
+    if (names && !names.has(tool.name)) continue;
     lines.push(`- ${tool.name}: ${tool.description} | params: ${tool.params}`);
   }
   return lines.join('\n');

@@ -68,6 +68,18 @@ Extracted directly from `process.env.*` references across `server.js`, `provider
 | `EMAIL_LIFECYCLE_SINCE` | Optional; only accounts created on/after this date get lifecycle email (default: onboarding rollout). |
 | `PUBLIC_API_URL` | Optional; base for unsubscribe links (default: the Render URL). |
 
+## Weekly AI Performance Report (Professional)
+
+Needs the `weekly_reports` table (`docs/migrations/2026-10-weekly-reports.sql`) and email sending (`EMAIL_MODE`, `RESEND_API_KEY`, `EMAIL_FROM`, `EMAIL_UNSUBSCRIBE_SECRET`). Off unless enabled.
+
+| Variable | Purpose |
+|---|---|
+| `WEEKLY_REPORTS_ENABLED` | `true` turns the job on: every 30 minutes (in-process, needs background jobs) and via the scheduler endpoint. Each run sends the reports that are due (Monday 07:00 → Wednesday, each user's timezone) and not yet sent. |
+| `WEEKLY_REPORTS_SECRET` | Long random string (32+ characters). An external scheduler calls `POST /api/internal/weekly-reports/run` with header `X-Weekly-Report-Secret: <value>`. Unset or short = the endpoint always answers 401. |
+| `WEEKLY_REPORT_AI_BUDGET` | Optional; maximum AI calls per run (default 50). `0` sends factual reports without AI insights. |
+
+Priority Support admin replies (`/admin/support/` → `/api/support/admin/*`) use `ADMIN_USER_IDS` (above). The customer's "you have a reply" email uses the same Resend settings and `EMAIL_MODE`.
+
 ## Not required to boot, but referenced
 
 None found — every variable above was observed in a real, successful local boot against the project's own `.env` (loaded via `dotenv` from the frontend repo root, `C:\files\.env`, one directory up from this server — an unusual but confirmed-working layout, not a typo).

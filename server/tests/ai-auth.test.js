@@ -167,7 +167,7 @@ const RICH = Object.assign({}, AD, { prompt: 'a cup of coffee on a table', quest
 const fs = require('fs');
 const SRC = fs.readFileSync(path.join(SERVER_DIR, 'server.js'), 'utf8');
 const GUARDED = [];
-{ const re = /\bapp\.(get|post|put|patch|delete)\(\s*'([^']+)'\s*,\s*(requireSubIfAuthed|requireSubOrFree|requireSubOrOnboardingGen)\b/g; let m;
+{ const re = /\bapp\.(get|post|put|patch|delete)\(\s*'([^']+)'\s*,\s*(requireSubIfAuthed|requireSubOrFree|requireSubOrOnboardingGen|requireEntitlement)\b/g; let m;
   while ((m = re.exec(SRC))) GUARDED.push([m[1].toUpperCase(), m[2].replace(/:([A-Za-z_]+)/g, 'x1'), m[3]]); }
 
 const NOW = new Date().toISOString();

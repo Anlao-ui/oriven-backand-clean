@@ -21,6 +21,7 @@ Supabase, service-role access only. **There is no migrations tool in this codeba
 
 `node-cron` schedules run in-process, inside the same web service — there is no separate worker/queue. This means:
 - The 4-hourly monitoring cron (`_runIntelligenceMonitoring`), the 3 daily-brief crons (8am/1pm/6pm UTC), and the nightly cleanup cron all depend on the web service staying up continuously. A restart mid-cycle simply skips that cycle's run (`node-cron` doesn't persist missed schedules) — acceptable for this app's cadence, worth knowing if Render's plan allows the instance to sleep.
+- The Weekly AI Performance Report does not rely on one timer firing: every run (in-process every 30 minutes, or an external call to `POST /api/internal/weekly-reports/run` with `X-Weekly-Report-Secret`) sends whatever is due and not yet sent, Monday 07:00 → Wednesday in each user's timezone, and the `weekly_reports` table keeps each week to one email. If the instance can sleep or restart, add an external scheduler (e.g. a Render Cron Job or any HTTPS scheduler) that POSTs to that endpoint every 30–60 minutes on Mondays and Tuesdays; extra calls are harmless.
 
 ## Local development
 
