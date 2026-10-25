@@ -340,6 +340,67 @@ const TEMPLATES = {
   },
 };
 
+// ── Marketing campaigns (services/email/campaigns.js) ────────────────
+// Dark variant of the layout above for one-off campaigns: the app's dark
+// surface throughout, lime only for the action and small accents. Same
+// table structure, inline styles and mobile rules, so it renders in Gmail,
+// Outlook and Apple Mail. Always category 'marketing' with an unsubscribe link.
+const D = { page: '#0A0A0A', card: '#141414', line: '#2A2A2A', ink: '#F4F4F2', body: '#D2D2CE', muted: '#9A9A96' };
+const dp = (t, extra) => `<p style="margin:0 0 16px;font-family:${SANS};font-size:16px;line-height:1.65;color:${D.body}${extra ? ';' + extra : ''}">${t}</p>`;
+const dsmall = (t) => `<p style="margin:0 0 10px;font-family:${SANS};font-size:13px;line-height:1.6;color:${D.muted}">${t}</p>`;
+
+function darkLayout({ heading, preheader, body, ctx, why }) {
+  const footer = dsmall(esc(why)) +
+    (ctx.unsubscribeUrl ? dsmall(`Don’t want these emails? <a href="${esc(ctx.unsubscribeUrl)}" style="color:${D.muted};text-decoration:underline">Unsubscribe</a>. Account and billing emails will still reach you.`) : '') +
+    dsmall(`${ctx.postalAddress ? esc(ctx.postalAddress) : 'OrivenAI'} · <a href="mailto:contact@orivenai.com" style="color:${D.muted};text-decoration:underline">contact@orivenai.com</a>`);
+  return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">` +
+    `<meta name="color-scheme" content="dark"><meta name="supported-color-schemes" content="dark"><title>${esc(heading)}</title>` +
+    `<link href="https://fonts.googleapis.com/css2?family=Instrument+Serif&family=Geist:wght@400;600;700&display=swap" rel="stylesheet">` +
+    `<style>a{color:inherit}@media only screen and (max-width:620px){.wrap{padding:16px 10px 28px!important}.bd{padding:28px 22px 16px!important}` +
+    `.h1{font-size:30px!important}.btn{width:100%!important}.btn td{display:block!important}.btn a{display:block!important;text-align:center!important}.ft{padding:20px 12px 0!important}}</style></head>` +
+    `<body style="margin:0;padding:0;background:${D.page};-webkit-text-size-adjust:100%">` +
+    (preheader ? `<div style="display:none;max-height:0;max-width:0;overflow:hidden;opacity:0;mso-hide:all">${esc(preheader)}&#8199;&#847;&#8199;&#847;&#8199;&#847;&#8199;&#847;&#8199;&#847;</div>` : '') +
+    `<table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" bgcolor="${D.page}" style="background:${D.page}"><tr><td align="center" class="wrap" style="padding:32px 16px 40px">` +
+    `<table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="max-width:600px">` +
+    `<tr><td class="bd" bgcolor="${D.card}" style="background:${D.card};border:1px solid ${D.line};border-radius:18px;padding:32px 36px 20px">` +
+    `<table role="presentation" cellspacing="0" cellpadding="0" border="0"><tr>` +
+    `<td valign="middle"><img src="${LOGO}" width="30" height="30" alt="" style="display:block;border:0;border-radius:8px"></td>` +
+    `<td valign="middle" style="padding-left:10px;font-family:${SANS};font-size:16px;font-weight:700;letter-spacing:.2px;color:${D.ink}">OrivenAI</td></tr></table>` +
+    `<div style="height:3px;width:44px;background:${C.lime};border-radius:2px;margin:28px 0 22px"></div>` +
+    `<h1 class="h1" style="margin:0 0 22px;font-family:${SERIF};font-weight:400;font-size:36px;line-height:1.15;color:${D.ink}">${esc(heading)}</h1>` +
+    body + `</td></tr>` +
+    `<tr><td class="ft" style="padding:24px 8px 0">${footer}</td></tr>` +
+    `</table></td></tr></table></body></html>`;
+}
+
+// Starter upgrade campaign for consenting Free accounts. Plan facts come from
+// PLAN_INTRO (price, credits) — never typed here.
+function campaignStarterUpgrade(d, ctx) {
+  const plan = PLAN_INTRO.starter;
+  const url = d.ctaUrl || ctx.appUrl + '?plans=1';
+  const price = `€${plan.price}/month`, credits = `${fmt(plan.credits)} credits`;
+  const includes = [`${credits} every month`, 'The full advertising workflow', 'Research, Create, Launch, Campaigns and Automations'];
+  const body =
+    dp('Hi there,') +
+    dp('You’ve already taken the first step by joining OrivenAI.') +
+    dp('With your Free account, you can explore AI-powered advertising and discover what the platform has to offer.') +
+    dp('But if you’re ready to take things further, OrivenAI Starter gives you access to the full advertising workflow.') +
+    dp('Research your market, create advertising content, launch campaigns, and manage your advertising activities in one place.') +
+    dp(`With ${credits} every month for just ${price}, Starter gives you more room to create, experiment, and grow.`) +
+    `<table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="margin:6px 0 18px"><tr><td style="border:1px solid ${D.line};border-radius:14px;padding:18px 20px 8px">` +
+    `<p style="margin:0 0 12px;font-family:${SANS};font-size:12px;font-weight:600;letter-spacing:1.2px;text-transform:uppercase;color:${C.lime}">Starter · ${esc(price)}</p>` +
+    includes.map((t) => `<p style="margin:0 0 10px;font-family:${SANS};font-size:15px;line-height:1.45;color:${D.body}"><span style="color:${C.lime};font-weight:700">&#10003;</span>&nbsp;&nbsp;${esc(t)}</p>`).join('') +
+    `</td></tr></table>` +
+    dp('No complicated setup. Just more possibilities.') +
+    button('Explore Starter', url) +
+    dp('The OrivenAI Team', 'margin-top:20px;color:' + D.ink);
+  const why = 'You’re receiving this because you turned on marketing emails in your OrivenAI settings.';
+  const text = `Hi there,\n\nYou’ve already taken the first step by joining OrivenAI.\n\nWith your Free account, you can explore AI-powered advertising and discover what the platform has to offer.\n\nBut if you’re ready to take things further, OrivenAI Starter gives you access to the full advertising workflow.\n\nResearch your market, create advertising content, launch campaigns, and manage your advertising activities in one place.\n\nWith ${credits} every month for just ${price}, Starter gives you more room to create, experiment, and grow.\n\nStarter (${price}):\n- ${includes.join('\n- ')}\n\nNo complicated setup. Just more possibilities.\n\nExplore Starter: ${url}\n\nThe OrivenAI Team` +
+    `\n\n—\n${why}` + (ctx.unsubscribeUrl ? `\nUnsubscribe: ${ctx.unsubscribeUrl}` : '') + `\n${ctx.postalAddress || 'OrivenAI'} · contact@orivenai.com`;
+  return { category: 'marketing', subject: 'Ready to do more with OrivenAI?', html: darkLayout({ heading: 'Ready to do more with OrivenAI?', preheader: 'Unlock the full advertising workflow with Starter.', body, ctx, why }), text };
+}
+TEMPLATES.campaign_starter_upgrade = campaignStarterUpgrade;
+
 // ── Weekly report rendering ──────────────────────────────────────────
 const wrCopy = require('../weeklyReport/copy');
 

@@ -15100,6 +15100,43 @@ app.get('/api/admin/analytics', async (req, res) => {
   }
 });
 
+// ── Marketing campaigns (admin only, manual) ─────────────────────────
+// services/email/campaigns.js. Preview, audience counts, a test send to the
+// EMAIL_TEST_ALLOWLIST, results, and the real send — which also needs
+// EMAIL_MODE=live, MARKETING_CAMPAIGN_APPROVED=<campaign id>, the confirmation
+// phrase and the reviewed eligible count. No job sends campaigns by itself.
+const _campaigns = require('./services/email/campaigns').createCampaigns({
+  db: supabaseAdmin, sender: emailSender, templates: emailTemplates, lifecycle: emailLifecycle,
+  appUrl: () => (process.env.FRONTEND_URL ? String(process.env.FRONTEND_URL).replace(/\/$/, '') + '/app' : 'https://orivenai.com/app'),
+  log: (m) => console.log(m),
+});
+function _campaignRoute(fn) {
+  return async (req, res) => {
+    const admin = await _requireAdmin(req, res);
+    if (!admin) return;
+    try {
+      res.set('Cache-Control', 'no-store');
+      const out = await fn(req, admin);
+      if (out == null) return res.status(404).json({ error: 'Unknown campaign' });
+      if (out.error) return res.status(out.error === 'confirmation_required' || out.error === 'audience_changed' ? 409 : 403).json(out);
+      res.json(out);
+    } catch (err) {
+      console.error('[Campaign] admin route error:', err.message);
+      res.status(500).json({ error: 'Campaign request failed.' });
+    }
+  };
+}
+app.get('/api/admin/campaigns', _campaignRoute(async () => ({ campaigns: _campaigns.list(), mode: emailSender.mode(), testRecipients: emailSender.testAllowlist().size })));
+app.get('/api/admin/campaigns/:id/preview', _campaignRoute(async (req) => _campaigns.preview(req.params.id)));
+app.get('/api/admin/campaigns/:id/audience', _campaignRoute(async (req) => _campaigns.audience(req.params.id)));
+app.get('/api/admin/campaigns/:id/results', _campaignRoute(async (req) => _campaigns.results(req.params.id)));
+app.post('/api/admin/campaigns/:id/test', _campaignRoute(async (req, admin) => { console.log('[Campaign] test requested by admin', String(admin.id).slice(0, 8)); return _campaigns.sendTest(req.params.id); }));
+app.post('/api/admin/campaigns/:id/send', _campaignRoute(async (req, admin) => {
+  console.log('[Campaign] send requested by admin', String(admin.id).slice(0, 8), '| mode', emailSender.mode());
+  const b = req.body || {};
+  return _campaigns.send(req.params.id, { confirm: b.confirm, expectedEligible: b.expectedEligible, limit: b.limit });
+}));
+
 // Marks onboarding complete. Body (optional): { goal: 'create'|'research'|
 // 'explore' } from the welcome screen, or { skipped: true }. Without a body it
 // behaves as before (older clients). Idempotent; no credit grant, no other
@@ -15224,21 +15261,42 @@ app.post('/api/internal/weekly-reports/run', async (req, res) => {
   }
 });
 
-// Signed-in user's marketing-email preference. Body: { marketing: boolean }
+// Signed-in user's marketing-email preference. Identity comes only from the
+// session token; a user id in the request is never read.
+// GET → { marketing, offers, offersInvite, available, suppressed }
+//   offers        consent recorded under wording that covers promotional
+//                 offers (emailLifecycle.consentCoversOffers — the same check
+//                 the campaigns use); signup consent alone is false
+//   offersInvite  show the Control Center opt-in card: Free plan, address not
+//                 suppressed, consent doesn't cover offers yet, not unsubscribed
+//                 (an explicit opt-out is respected; Settings still lets them
+//                 opt back in themselves), card not dismissed
+// PUT { marketing: boolean, source?: 'settings' | 'offers_invite' }
+//   records the person's own choice through setConsent (source + timestamp)
+// POST /api/email/preferences/offers-invite/dismiss
+//   "No thanks" on the card: stores the dismissal in the user's own
+//   preferences only — marketing consent is not touched
 app.get('/api/email/preferences', async (req, res) => {
   const user = await getUserFromToken(req);
   if (!user) return res.status(401).json({ error: 'Authentication required' });
-  const { data, error } = await supabaseAdmin.from('profiles').select('marketing_opt_in, email').eq('id', user.id).maybeSingle();
-  if (error) return res.json({ marketing: false, available: false, suppressed: false });
+  const { data, error } = await supabaseAdmin.from('profiles').select('marketing_opt_in, marketing_consent_source, marketing_opt_in_at, email, subscription_status, preferences').eq('id', user.id).maybeSingle();
+  if (error) return res.json({ marketing: false, offers: false, offersInvite: false, available: false, suppressed: false });
   let suppressed = false;
   try { suppressed = await emailLifecycle.isSuppressed((data && data.email) || user.email); } catch (_) {}
-  res.json({ marketing: !suppressed && !!(data && data.marketing_opt_in === true), available: true, suppressed });
+  const marketing = !suppressed && !!(data && data.marketing_opt_in === true);
+  const offers = marketing && emailLifecycle.consentCoversOffers(data);
+  const dismissed = !!(data && data.preferences && data.preferences.offersInviteDismissedAt);
+  const offersInvite = !!data && !suppressed && !offers && !dismissed && data.marketing_opt_in !== false && (data.subscription_status || 'free') === 'free' && !!(data.email || user.email);
+  res.set('Cache-Control', 'no-store');
+  res.json({ marketing, offers, offersInvite, available: true, suppressed });
 });
 app.put('/api/email/preferences', async (req, res) => {
   const user = await getUserFromToken(req);
   if (!user) return res.status(401).json({ error: 'Authentication required' });
   const want = req.body && req.body.marketing;
   if (typeof want !== 'boolean') return res.status(400).json({ error: 'marketing must be true or false' });
+  const source = req.body && req.body.source != null ? req.body.source : 'settings';
+  if (!emailLifecycle.USER_CONSENT_SOURCES.includes(source)) return res.status(400).json({ error: 'Unknown consent source' });
   try {
     if (want) {
       // An address that bounced or reported spam can't be opted back in here.
@@ -15247,11 +15305,27 @@ app.put('/api/email/preferences', async (req, res) => {
         return res.status(409).json({ error: 'We can’t send email to this address.', code: 'EMAIL_SUPPRESSED' });
       }
     }
-    const ok = await emailLifecycle.setConsent(user.id, want, 'settings');
+    const ok = await emailLifecycle.setConsent(user.id, want, source);
     if (!ok) return res.status(503).json({ error: 'Email preferences are not available yet.' });
-    res.json({ marketing: want });
+    res.json({ marketing: want, offers: want }); // a consent recorded now, from these sources, covers offers
   } catch (err) {
     console.error('[EmailPrefs]', err.message);
+    res.status(500).json({ error: 'Could not save that right now.' });
+  }
+});
+app.post('/api/email/preferences/offers-invite/dismiss', async (req, res) => {
+  const user = await getUserFromToken(req);
+  if (!user) return res.status(401).json({ error: 'Authentication required' });
+  try {
+    const { data, error } = await supabaseAdmin.from('profiles').select('preferences').eq('id', user.id).maybeSingle();
+    if (error) throw error;
+    if (!data) return res.status(404).json({ error: 'Profile not found' });
+    const prefs = Object.assign({}, data.preferences || {}, { offersInviteDismissedAt: new Date().toISOString() });
+    const { error: upErr } = await supabaseAdmin.from('profiles').update({ preferences: prefs }).eq('id', user.id);
+    if (upErr) throw upErr;
+    res.json({ ok: true });
+  } catch (err) {
+    console.error('[EmailPrefs] dismiss:', err.message);
     res.status(500).json({ error: 'Could not save that right now.' });
   }
 });

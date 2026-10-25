@@ -68,6 +68,14 @@ Extracted directly from `process.env.*` references across `server.js`, `provider
 | `EMAIL_LIFECYCLE_SINCE` | Optional; only accounts created on/after this date get lifecycle email (default: onboarding rollout). |
 | `PUBLIC_API_URL` | Optional; base for unsubscribe links (default: the Render URL). |
 
+## Marketing campaigns (manual, admin only)
+
+`/admin/campaigns/` → `/api/admin/campaigns/*` (`services/email/campaigns.js`). Preview, audience counts and test sends work with the email settings above; nothing is ever sent by a schedule.
+
+| Variable | Purpose |
+|---|---|
+| `MARKETING_CAMPAIGN_APPROVED` | The id of the ONE campaign approved for a real send, e.g. `starter-upgrade-2026-10`. Needed (with `EMAIL_MODE=live`, the confirmation phrase and the reviewed eligible count) before any customer receives it. Unset = real sends refused. Remove it again after the campaign. |
+
 ## Weekly AI Performance Report (Professional)
 
 Needs the `weekly_reports` table (`docs/migrations/2026-10-weekly-reports.sql`) and email sending (`EMAIL_MODE`, `RESEND_API_KEY`, `EMAIL_FROM`, `EMAIL_UNSUBSCRIBE_SECRET`). Off unless enabled.

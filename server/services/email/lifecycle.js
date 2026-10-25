@@ -252,6 +252,27 @@ async function setConsent(userId, optIn, source) {
   return true;
 }
 
+// ── Consent that covers promotional offers ──────────────────────────
+// marketing_opt_in alone doesn't say WHICH wording the person agreed to:
+//   signup checkbox   "Send me tips and product updates by email"  → no offers
+//   Settings switch   "…product updates, new features, tips, and special
+//                     offers from OrivenAI" (live since the 2026-10-09 17:43
+//                     +02:00 deploy; before that "Product tips and updates")
+//   Control Center    the same "…and special offers" wording ('offers_invite')
+// So promotional email needs consent recorded from one of those two sources,
+// given on or after the cutoff (margin for the deploy and open pages). Signup
+// consent is never upgraded silently; the person has to confirm. The single
+// answer for Settings, the opt-in card and campaigns.
+const OFFER_CONSENT = { sources: ['settings', 'offers_invite'], givenOnOrAfter: '2026-10-10T00:00:00Z' };
+// The only sources a signed-in user can record through /api/email/preferences.
+const USER_CONSENT_SOURCES = ['settings', 'offers_invite'];
+function consentCoversOffers(p) {
+  if (!p || p.marketing_opt_in !== true) return false;
+  if (!OFFER_CONSENT.sources.includes(p.marketing_consent_source)) return false;
+  const at = p.marketing_opt_in_at ? Date.parse(p.marketing_opt_in_at) : NaN;
+  return at >= Date.parse(OFFER_CONSENT.givenOnOrAfter);
+}
+
 async function isSuppressed(email) {
   if (!email) return false;
   const { data } = await _db.from('email_suppressions').select('email_hash').eq('email_hash', emailHash(email)).maybeSingle();
@@ -338,6 +359,7 @@ async function sendWelcomeAtSignup({ user, verifyUrl }) {
 
 module.exports = {
   init, decide, runOnce, retryFailed, setConsent, suppress, isSuppressed, handleProviderEvent,
+  consentCoversOffers, OFFER_CONSENT, USER_CONSENT_SOURCES,
   recordVerificationSend, sendWelcomeAtSignup,
   unsubscribeUrl, checkUnsubToken, emailHash, since, WELCOME_WINDOW,
 };
