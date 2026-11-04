@@ -56,24 +56,41 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
   log('\nD. An existing complete profile is never changed');
   const d = authUser(4, { first_name: 'AuthName', last_name: 'AuthLast' });
-  const orig = { id: d.id, email: 'chosen@example.invalid', first_name: 'Chosen', last_name: 'Name', subscription_status: 'professional', credits_balance: 4000, stripe_customer_id: 'cus_D', stripe_subscription_id: 'sub_D', onboarding_completed: true };
+  // A row as it exists after docs/migrations/2026-10-access-purchases.sql: the
+  // migration's legacy backfill gave every paying row an access period, so the
+  // fixture carries one (helpers/legacyAccess.js leaves such rows untouched).
+  const orig = { id: d.id, email: 'chosen@example.invalid', first_name: 'Chosen', last_name: 'Name', subscription_status: 'professional', credits_balance: 4000, stripe_customer_id: 'cus_D', stripe_subscription_id: 'sub_D', onboarding_completed: true, access_expires_at: new Date(Date.now() + 20 * 864e5).toISOString(), access_plan: 'professional' };
   H.rows('profiles').push(Object.assign({}, orig));
   await H.call('GET', '/api/onboarding/state', 'tok_' + d.id);
   check('row identical after a signed-in request (Auth metadata does not overwrite it)', JSON.stringify(prof(d.id)[0]) === JSON.stringify(orig), prof(d.id)[0]);
   r = await accounts.ensureProfile(d);
   check('ensureProfile directly: no write for a complete row', r.created === false && !r.filled && JSON.stringify(prof(d.id)[0]) === JSON.stringify(orig), r);
 
-  log('\nE. Account deletion never leaves a login without its profile');
+  log('\nE. Account deletion: personal data gone, financial references kept, login soft-deleted, retry-safe');
   const e = authUser(5);
   const eRow = { id: e.id, email: 'person5@example.invalid', first_name: 'Sam', subscription_status: 'creator', credits_balance: 1500, stripe_customer_id: 'cus_E', stripe_subscription_id: 'sub_E', onboarding_completed: true };
   H.rows('profiles').push(Object.assign({}, eRow));
+  // A legacy Stripe subscriber: the subscription is cancelled before anything is deleted.
+  const stripeCalls = [];
+  H.STRIPE['subscriptions.retrieve'] = async (id) => { stripeCalls.push('retrieve ' + id); return { id, status: 'active' }; };
+  H.STRIPE['subscriptions.cancel'] = async () => { const err = new Error('Stripe is unreachable'); err.statusCode = 500; throw err; };
+  r = await H.call('POST', '/api/account/delete', 'tok_' + e.id);
+  check('Stripe cannot cancel the subscription → nothing deleted, login kept, error shown (no billing a deleted account)', r.status === 500 && r.body && r.body.code === 'STRIPE_CANCEL_FAILED' && prof(e.id)[0].email === eRow.email && !H.AUTH.deleted.includes(e.id), r);
+  H.STRIPE['subscriptions.cancel'] = async (id) => { stripeCalls.push('cancel ' + id); return { id, status: 'canceled' }; };
   H.AUTH.deleteFail = 'Database error deleting user';
   r = await H.call('POST', '/api/account/delete', 'tok_' + e.id);
   p = prof(e.id);
-  check('Auth deletion fails → error to the user', r.status === 500, r);
-  check('…and the profile is back, identical (plan, credits, Stripe ids)', p.length === 1 && ['subscription_status', 'credits_balance', 'stripe_customer_id', 'stripe_subscription_id', 'email', 'first_name', 'onboarding_completed'].every((k) => p[0][k] === eRow[k]), p);
+  check('the Stripe subscription is cancelled first', stripeCalls.includes('cancel sub_E'), stripeCalls);
+  check('Auth deletion fails → error to the user (retry possible)', r.status === 500 && r.body && r.body.code === 'AUTH_DELETE_FAILED', r);
+  check('…the database step already ran atomically: profile anonymised (no email, no name), Stripe customer id kept for the kept purchases, subscription id gone, no credits, status deleted', p.length === 1 && !p[0].email && !p[0].first_name && p[0].stripe_customer_id === eRow.stripe_customer_id && !p[0].stripe_subscription_id && p[0].credits_balance === 0 && p[0].subscription_status === 'deleted' && !!p[0].deleted_at, p[0]);
   r = await H.call('POST', '/api/account/delete', 'tok_' + e.id);
-  check('a successful deletion removes both the profile and the login', r.status === 200 && prof(e.id).length === 0 && H.AUTH.deleted.includes(e.id), { status: r.status, rows: prof(e.id).length });
+  check('retrying completes it: login soft-deleted (no cascade into financial records), profile stays an anonymised tombstone', r.status === 200 && (H.AUTH.softDeleted || []).includes(e.id) && prof(e.id).length === 1 && !prof(e.id)[0].email, { status: r.status, soft: H.AUTH.softDeleted });
+  H.RPC.fail = (n) => n === 'delete_account_data';
+  const e2 = authUser(55);
+  H.rows('profiles').push({ id: e2.id, email: 'person55@example.invalid', first_name: 'Kim', subscription_status: 'free', credits_balance: 3 });
+  r = await H.call('POST', '/api/account/delete', 'tok_' + e2.id);
+  H.RPC.fail = null;
+  check('database step fails → nothing deleted, login kept, error shown (fail closed)', r.status === 500 && prof(e2.id)[0].email === 'person55@example.invalid' && !H.AUTH.deleted.includes(e2.id), r);
 
   log('\nF. Restore logic (scripts/restore-missing-profiles.js uses accounts.ensureProfile)');
   const f = authUser(6, {});

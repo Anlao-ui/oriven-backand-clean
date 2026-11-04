@@ -14,7 +14,7 @@
 // No scheduled job sends campaigns.
 //
 // Eligible = all of, checked again right before each email:
-//   - subscription_status is 'free' (paid plans are never mailed);
+//   - subscription_status is 'free' (never bought access; customers are never mailed);
 //   - profiles.marketing_opt_in === true (NULL/false = no consent), AND the
 //     consent was given under wording that covers this email (the campaign's
 //     `consent` rule, checked on marketing_consent_source + marketing_opt_in_at);
@@ -32,11 +32,12 @@
 const crypto = require('crypto');
 
 const CAMPAIGNS = {
-  'starter-upgrade-2026-10': {
-    id: 'starter-upgrade-2026-10',
-    name: 'Ready to do more with OrivenAI? (Free → Starter)',
-    template: 'campaign_starter_upgrade',
+  'access-plans-2026-11': {
+    id: 'access-plans-2026-11',
+    name: 'Ready to do more with OrivenAI? (no plan → plans)',
+    template: 'campaign_access_plans',
     audiencePlan: 'free',
+    // Replaces starter-upgrade-2026-10 (never sent; the Starter plan is retired).
     // Promotional (a paid-plan offer): only consent given under wording that
     // names offers — signup consent ("tips and product updates") is not used.
     // The rule (sources + date cutoff) lives in lifecycle.consentCoversOffers,

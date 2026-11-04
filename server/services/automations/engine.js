@@ -615,6 +615,9 @@ function createEngine(deps) {
       const it = (r.schedule.items || []).find((i) => i.key === job.item_key);
       if (it && it.type === 'weekly' && r.enabled) await materialize(row, Math.max(now, new Date(job.run_at).getTime()) + 1000);
     };
+    // No access (never bought, or the access period ended): scheduled actions
+    // don't run and the schedule isn't extended; it resumes when access returns.
+    if (deps.planOf && !forPlan(await deps.planOf(job.user_id)).evalMinutes) { await finalize('skipped', { error: 'no_access' }, { reason: 'no_access' }); return 'skipped'; }
     const settings = await getSettings(job.user_id);
     if (!r.enabled || settings.paused_all) { await finalize('skipped', { error: !r.enabled ? 'automation_paused' : 'paused_all' }, { reason: !r.enabled ? 'automation_paused' : 'paused_all' }); await next(); return 'skipped'; }
     if (now - new Date(job.run_at).getTime() > lim.missedGraceMinutes * 60e3) {

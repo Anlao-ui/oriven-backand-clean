@@ -9,14 +9,18 @@
 // Shared, all plans:
 //   emailsPerHour, maxRetries, maxScheduleItems, approvalHours,
 //   missedGraceMinutes, maxCampaignsPerRule
-// Free has no Automations (planEntitlements: autopilot=false), unchanged.
+// Every paying customer gets the same limits ('paid'); legacy subscribers get
+// at least that (Professional keeps its higher contract limits). An account
+// without access ('free') has no Automations.
 // ════════════════════════════════════════════════════════════════
 'use strict';
 
+const PAID = { active: 25, pendingJobs: 250, evalMinutes: 60 };
 const PLAN = {
   free:         { active: 0,  pendingJobs: 0,   evalMinutes: null },
-  starter:      { active: 5,  pendingJobs: 50,  evalMinutes: 240 },
-  creator:      { active: 15, pendingJobs: 150, evalMinutes: 120 },
+  paid:         PAID,
+  starter:      PAID,
+  creator:      PAID,
   professional: { active: 50, pendingJobs: 500, evalMinutes: 60 },
 };
 const SHARED = {

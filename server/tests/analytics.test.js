@@ -6,7 +6,9 @@
 // ════════════════════════════════════════════════════════════════
 const { boot, reporter } = require('./helpers/mockServer');
 const ADMIN = '00000000-0000-4000-8000-00000000ad01';
-const H = boot({ port: 5594, env: { SMTP_USER: 'mailer@example.invalid', SMTP_PASS: 'x', SIGNUP_LIMIT_PER_IP_HOUR: '50', ADMIN_USER_IDS: ADMIN + ', not-a-uuid', ANALYTICS_SALT: 'test-salt' } });
+// The guided onboarding is switched off here (its documented switch): these are the
+// welcome-tour events; the guided flow's own behaviour: onboarding-activation.test.js.
+const H = boot({ port: 5594, env: { ONBOARDING_FLOW_DISABLED: 'true', SMTP_USER: 'mailer@example.invalid', SMTP_PASS: 'x', SIGNUP_LIMIT_PER_IP_HOUR: '50', ADMIN_USER_IDS: ADMIN + ', not-a-uuid', ANALYTICS_SALT: 'test-salt' } });
 const { check, log, done } = reporter();
 const prof = (id) => H.rows('profiles').find((p) => p.id === id);
 const ip = (n) => ({ 'X-Forwarded-For': '203.0.113.' + n });
@@ -94,6 +96,11 @@ const wait = (ms) => new Promise((r) => setTimeout(r, ms));
   const before = H.rows('events').length;
   const resUp = await H.call('POST', '/api/events', 'tok_' + u1.id, { event: 'checkout_started', props: { plan: 'starter' } });
   check('browser copies of checkout events are refused (server records them)', resUp.status >= 400 && H.rows('events').length === before);
+  // Paid-only: an account without access is refused before the build starts.
+  r = await H.call('POST', '/api/ai/create-ad', 'tok_' + u1.id, { product: 'x' });
+  await wait(40);
+  check('no access → 403 SUBSCRIPTION_REQUIRED, no first_ad_started', r.status === 403 && r.body.code === 'SUBSCRIPTION_REQUIRED' && !H.rows('events').some((e) => e.event_name === 'first_ad_started' && e.user_id === u1.id));
+  Object.assign(prof(u1.id), { subscription_status: 'paid', access_plan: 'monthly', access_expires_at: new Date(Date.now() + 20 * 864e5).toISOString(), credits_balance: 1000 });
   r = await H.call('POST', '/api/ai/create-ad', 'tok_' + u1.id, { product: 'x' });
   await H.call('POST', '/api/ai/create-ad', 'tok_' + u1.id, { product: 'y' });
   await wait(40);

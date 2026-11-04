@@ -21,8 +21,10 @@
 -- create profiles at signup — the browser does — so applying this before the
 -- backend deploy would leave new sign-ups without a profile row.
 --
--- Changes no data. Safe to run more than once.
+-- Changes no data. Safe to run more than once. One transaction.
 -- ═══════════════════════════════════════════════════════════════════
+
+BEGIN;
 
 -- 1. Keep row-level security on.
 ALTER TABLE public.profiles ENABLE ROW LEVEL SECURITY;
@@ -44,6 +46,8 @@ BEGIN
     EXECUTE format('REVOKE INSERT (%1$I), UPDATE (%1$I), REFERENCES (%1$I) ON public.profiles FROM anon, authenticated', c);
   END LOOP;
 END $$;
+
+COMMIT;
 
 -- The existing "update own profile" policy is left in place; without the
 -- UPDATE privilege it can no longer be used. It can be dropped later once

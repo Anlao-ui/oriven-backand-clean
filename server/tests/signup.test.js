@@ -118,7 +118,8 @@ const tokenFromMail = (m) => (String(m && m.text || '').match(/verify_token=([a-
   r = await H.call('POST', '/api/profile/ensure', 'tok_' + orphan.id);
   check('second call → nothing created or changed', r.status === 200 && r.body.created === false && H.rows('profiles').filter((p) => p.id === orphan.id).length === 1);
   const paidRow = prof(u1.id);
-  Object.assign(paidRow, { subscription_status: 'professional', credits_balance: 4000, stripe_customer_id: 'cus_x' });
+  // A paying row as it exists after the access migration (with its access period).
+  Object.assign(paidRow, { subscription_status: 'professional', credits_balance: 4000, stripe_customer_id: 'cus_x', access_expires_at: new Date(Date.now() + 20 * 864e5).toISOString(), access_plan: 'professional' });
   const snap = JSON.stringify(paidRow);
   r = await H.call('POST', '/api/profile/ensure', 'tok_' + u1.id, { subscription_status: 'free', credits_balance: 0 });
   check('existing paid row is never touched (body ignored)', r.status === 200 && r.body.created === false && JSON.stringify(prof(u1.id)) === snap);

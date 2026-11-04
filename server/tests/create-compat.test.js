@@ -17,6 +17,7 @@
 
 const Module = require('module');
 const path = require('path');
+const FC = require('../services/pricing').FEATURE_COSTS; // credit costs come from the one pricing source
 const SERVER_DIR = path.resolve(__dirname, '..');
 const PORT = 5598;
 const BASE = `http://127.0.0.1:${PORT}`;
@@ -50,6 +51,7 @@ const UNIQUE = {
   ],
 };
 const db = { missing: new Set(), rpcCalls: [] };
+const legacyAccess = require('./helpers/legacyAccess'); // mirrors the 2026-10 access migration
 function rows(t) { return (TABLES[t] = TABLES[t] || []); }
 function violates(t, cand, ignore) {
   for (const u of UNIQUE[t] || []) {
@@ -81,6 +83,7 @@ class Q {
   async run() {
     await null;
     if (db.missing.has(this.t)) return { data: null, error: { code: 'PGRST205', message: `Could not find the table 'public.${this.t}' in the schema cache` } };
+    if (this.t === 'profiles') legacyAccess.backfill(rows('profiles'));
     const all = rows(this.t);
     const match = () => all.filter((r) => this.f.every((fn) => fn(r)));
     if (this.op === 'insert' || this.op === 'upsert') {
@@ -107,7 +110,9 @@ const supabaseMock = {
   from: (t) => new Q(t),
   rpc: async (name, args) => {
     db.rpcCalls.push({ name, args });
+    legacyAccess.backfill(rows('profiles'));
     const p = rows('profiles').find((r) => r.id === (args && args.p_user_id));
+    if (name === 'spend_credits' && p && !legacyAccess.spendAllowed(p)) return { data: [{ ok: false, balance: 0 }], error: null };
     if (name === 'spend_credits') {
       if (!p) return { data: [{ ok: false, balance: null }], error: null };
       if (p.credits_balance >= args.p_amount) { p.credits_balance -= args.p_amount; return { data: [{ ok: true, balance: p.credits_balance }], error: null }; }
@@ -364,7 +369,7 @@ const say0 = (...a) => console.info(...a);
 
   reset();
   r = await post('/api/ai/create-ad', { product: 'Organic coffee subscription', goal: 'Sales', platform: 'google', platforms: ['google'], mode: 'full', creativeMode: 'images' });
-  check('old Create (Google, creativeMode images, no format) still works: 200, one charge of 25', r.status === 200 && bal('u1') === 975 && spendRpcs() === 1, { status: r.status, bal: bal('u1') });
+  check('old Create (Google, creativeMode images, no format) still works: 200, one campaign_generation charge', r.status === 200 && bal('u1') === 1000 - FC.campaign_generation && spendRpcs() === 1, { status: r.status, bal: bal('u1') });
 
   reset();
   let sysPrompt = '';
@@ -372,7 +377,7 @@ const say0 = (...a) => console.info(...a);
   const brief = { productName: 'Leren portemonnee', description: 'Handgemaakte leren portemonnees uit ons atelier in Amsterdam, met gratis naamgravure.', website: 'leathershop.example/wallets', offer: '', audience: 'Mannen 25-45 die van cadeaus houden', language: 'nl', languageSource: 'profile', tone: 'Premium', styles: ['Minimalist', 'Premium look'], notes: 'Highlight the free engraving. Also run this on TikTok with a €50/day budget.' };
   r = await post('/api/ai/create-ad', { mode: 'full', platform: 'meta', goal: 'Sales', format: 'image', brief });
   const pkg = r.body && r.body.data;
-  check('guided brief (no free-text product) is accepted: 200, one charge of 25', r.status === 200 && bal('u1') === 975 && spendRpcs() === 1, { status: r.status, bal: bal('u1') });
+  check('guided brief (no free-text product) is accepted: 200, one campaign_generation charge', r.status === 200 && bal('u1') === 1000 - FC.campaign_generation && spendRpcs() === 1, { status: r.status, bal: bal('u1') });
   check('AD LANGUAGE: the model is told to write all copy in Dutch', /AD LANGUAGE: Write ALL customer-facing ad copy in Dutch/.test(sysPrompt));
   check('AD BRIEF carries the structured fields, priority stated', /AD BRIEF \(structured settings/.test(sysPrompt) && /Product or service: Leren portemonnee/.test(sysPrompt) && /Who the ad is for: Mannen 25-45/.test(sysPrompt) && /Tone of voice: Premium/.test(sysPrompt) && /Creative direction: Minimalist, Premium look/.test(sysPrompt));
   check('no price and no offer given → the model is told not to mention any price or promotion', /Product price: none given — do not mention any price/.test(sysPrompt) && /Special offer: none given — do not mention any discount, sale or promotion/.test(sysPrompt));
@@ -392,7 +397,7 @@ const say0 = (...a) => console.info(...a);
 
   reset();
   r = await post('/api/ai/create-ad', { mode: 'full', platform: 'google', campaignType: 'SEARCH', goal: 'Leads', format: 'text', brief: { productName: 'Bookkeeping', description: 'Bookkeeping for freelancers' } });
-  check('Google Search text ad: 200, 25 credits, campaign type Search on the package', r.status === 200 && bal('u1') === 975 && r.body.data.googleAds && r.body.data.googleAds.campaignType === 'SEARCH' && r.body.data.creativeFormat === 'text', { status: r.status, bal: bal('u1') });
+  check('Google Search text ad: 200, campaign_generation credits, campaign type Search on the package', r.status === 200 && bal('u1') === 1000 - FC.campaign_generation && r.body.data.googleAds && r.body.data.googleAds.campaignType === 'SEARCH' && r.body.data.creativeFormat === 'text', { status: r.status, bal: bal('u1') });
 
   reset();
   r = await post('/api/ai/create-ad', { mode: 'full', platform: 'meta', goal: 'Sales', format: 'image' });
@@ -405,17 +410,17 @@ const say0 = (...a) => console.info(...a);
   reset();
   prov.handler = () => { throw err('AIML API timed out after 180s', { timeout: true }); };
   r = await post('/api/ai/create-ad', { product: 'Wallet', mode: 'full', platform: 'meta', goal: 'Sales', format: 'image' });
-  check('AI timeout → 503, the 25 credits are refunded (net 0)', r.status === 503 && bal('u1') === 1000 && refundRpcs() === 1, { status: r.status, bal: bal('u1') });
+  check('AI timeout → 503, the credits are refunded (net 0)', r.status === 503 && bal('u1') === 1000 && refundRpcs() === 1, { status: r.status, bal: bal('u1') });
 
   reset();
   prov.handler = async (c) => { await sleep(200); return defaultHandler(c); };
   const same = key();
   const dup = await Promise.all([1, 2].map(() => call('POST', '/api/ai/create-ad', 'tok1', { product: 'Wallet', mode: 'full', platform: 'meta', goal: 'Sales', format: 'image' }, { 'X-Idempotency-Key': same })));
-  check('retry with the same action key (double click) → one generation, one charge', dup.filter((x) => x.status === 200).length === 1 && bal('u1') === 975 && textCalls() === 1, dup.map((x) => x.status));
+  check('retry with the same action key (double click) → one generation, one charge', dup.filter((x) => x.status === 200).length === 1 && bal('u1') === 1000 - FC.campaign_generation && textCalls() === 1, dup.map((x) => x.status));
   reset();
   prov.handler = async (c) => { await sleep(200); return defaultHandler(c); };
   const burst = await Promise.all([1, 2, 3, 4, 5].map(() => post('/api/ai/create-ad', { product: 'Wallet', mode: 'full', platform: 'meta', goal: 'Sales', format: 'image' })));
-  check('5 concurrent creates (different keys) → 1 runs, 4 refused, 1 charge', burst.filter((x) => x.status === 200).length === 1 && bal('u1') === 975 && spendRpcs() === 1, burst.map((x) => x.status));
+  check('5 concurrent creates (different keys) → 1 runs, 4 refused, 1 charge', burst.filter((x) => x.status === 200).length === 1 && bal('u1') === 1000 - FC.campaign_generation && spendRpcs() === 1, burst.map((x) => x.status));
 
   say('\nD. Image / video routes refuse creatives the ad cannot use');
   reset();
@@ -423,13 +428,13 @@ const say0 = (...a) => console.info(...a);
   check('image for a Google Search ad → 422 IMAGE_NOT_NEEDED, 0 credits, 0 image calls', r.status === 422 && r.body.code === 'IMAGE_NOT_NEEDED' && spendRpcs() === 0 && prov.calls.length === 0, { status: r.status, body: r.body });
   reset();
   r = await post('/api/generate-image', { prompt: 'wallet', size: '1:1', adContext: { platform: 'meta' } });
-  check('image for a Meta ad → generated, 75 credits', r.status === 200 && bal('u1') === 925, { status: r.status, bal: bal('u1') });
+  check('image for a Meta ad → generated, image_generation credits', r.status === 200 && bal('u1') === 1000 - FC.image_generation, { status: r.status, bal: bal('u1') });
   reset();
   r = await post('/api/generate-image', { prompt: 'wallet', size: '1200x628', adContext: { platform: 'google', campaignType: 'PERFORMANCE_MAX' } });
-  check('image for a Performance Max asset → generated, 75 credits', r.status === 200 && bal('u1') === 925);
+  check('image for a Performance Max asset → generated, image_generation credits', r.status === 200 && bal('u1') === 1000 - FC.image_generation);
   reset();
   r = await post('/api/generate-image', { prompt: 'wallet', size: '1:1' });
-  check('image without adContext (other features, old clients) → unchanged behaviour', r.status === 200 && bal('u1') === 925);
+  check('image without adContext (other features, old clients) → unchanged behaviour', r.status === 200 && bal('u1') === 1000 - FC.image_generation);
   reset();
   r = await post('/api/generate-ugc-video', { script: 'A short ad', adContext: { platform: 'meta' } });
   check('video for a Meta ad → 422 VIDEO_NOT_SUPPORTED, 0 credits, 0 video calls', r.status === 422 && r.body.code === 'VIDEO_NOT_SUPPORTED' && spendRpcs() === 0 && prov.calls.length === 0, { status: r.status, body: r.body });
@@ -438,7 +443,7 @@ const say0 = (...a) => console.info(...a);
   check('video for a Google ad → 422, 0 credits', r.status === 422 && spendRpcs() === 0);
   reset();
   r = await post('/api/generate-ugc-video', { script: 'A short ad', adContext: { platform: 'tiktok' } });
-  check('video for a TikTok ad → submitted, 200 credits held', r.status === 200 && bal('u1') === 800);
+  check('video for a TikTok ad → submitted, video_generation credits held', r.status === 200 && bal('u1') === 1000 - FC.video_generation);
 
   say('\nE. Price, ad quantity, own images and the credit estimate');
   const sharp = require('sharp');
@@ -469,24 +474,24 @@ const say0 = (...a) => console.info(...a);
   r = await post('/api/ai/create-ad', { mode: 'full', platform: 'meta', goal: 'Sales', format: 'image', metaStructure: { adSets: 2, adsPerAdSet: 3 }, brief: B() });
   let inp = r.body && r.body.data && r.body.data.inputs;
   check('Meta 2 ad sets × 3 ads: 200, package keeps the structure Launch publishes (metaStructure 2×3)', r.status === 200 && r.body.data.metaStructure.adSets === 2 && r.body.data.metaStructure.adsPerAdSet === 3, r.body.data && r.body.data.metaStructure);
-  check('…pkg.inputs.structure = ad sets, 6 ads; server estimate = 25 + 6 × 75 = 475 (same rule as Review)', inp && inp.structure.unit === 'adSet' && inp.structure.ads === 6 && inp.creditEstimate.total === 475 && inp.creditEstimate.images === 6 && inp.imageSource === 'ai', inp);
-  check('…only the 25-credit ad text is charged here (images are charged by their own route)', bal('u1') === 975 && spendRpcs() === 1);
+  check('…pkg.inputs.structure = ad sets, 6 ads; server estimate = copy + 6 images (same rule as Review)', inp && inp.structure.unit === 'adSet' && inp.structure.ads === 6 && inp.creditEstimate.total === FC.campaign_generation + 6 * FC.image_generation && inp.creditEstimate.images === 6 && inp.imageSource === 'ai', inp);
+  check('…only the ad text (campaign_generation) is charged here (images are charged by their own route)', bal('u1') === 1000 - FC.campaign_generation && spendRpcs() === 1);
   reset();
   r = await post('/api/ai/create-ad', { mode: 'full', platform: 'meta', goal: 'Sales', format: 'image', metaStructure: { adSets: 2, adsPerAdSet: 3 }, brief: B({ imageSource: 'own' }) });
   inp = r.body && r.body.data && r.body.data.inputs;
-  check('Meta 2×3 with "Use my own image": estimate 25 (6 own image slots, 0 image credits), imageSource own', r.status === 200 && inp.imageSource === 'own' && inp.creditEstimate.total === 25 && inp.creditEstimate.images === 0 && inp.creditEstimate.ownImageSlots === 6, inp && inp.creditEstimate);
+  check('Meta 2×3 with "Use my own image": estimate = copy only (6 own image slots, 0 image credits), imageSource own', r.status === 200 && inp.imageSource === 'own' && inp.creditEstimate.total === FC.campaign_generation && inp.creditEstimate.images === 0 && inp.creditEstimate.ownImageSlots === 6, inp && inp.creditEstimate);
   reset();
   r = await post('/api/ai/create-ad', { mode: 'full', platform: 'google', campaignType: 'SEARCH', goal: 'Sales', format: 'text', campaignStructure: { groups: 2, adsPerGroup: 2 }, brief: B() });
-  check('Google Search 2×2: estimate 25 (text only), structure ad groups, 4 ads', r.status === 200 && r.body.data.inputs.creditEstimate.total === 25 && r.body.data.inputs.structure.ads === 4 && r.body.data.inputs.structure.unit === 'adGroup' && r.body.data.inputs.imageSource === null, r.body.data && r.body.data.inputs);
+  check('Google Search 2×2: estimate = copy only (text), structure ad groups, 4 ads', r.status === 200 && r.body.data.inputs.creditEstimate.total === FC.campaign_generation && r.body.data.inputs.structure.ads === 4 && r.body.data.inputs.structure.unit === 'adGroup' && r.body.data.inputs.imageSource === null, r.body.data && r.body.data.inputs);
   reset();
   r = await post('/api/ai/create-ad', { mode: 'full', platform: 'tiktok', goal: 'Traffic', format: 'video', campaignStructure: { groups: 1, adsPerGroup: 2 }, brief: B() });
-  check('TikTok 1×2 video: estimate 25 + 2 × 200 = 425', r.status === 200 && r.body.data.inputs.creditEstimate.total === 425, r.body.data && r.body.data.inputs);
+  check('TikTok 1×2 video: estimate = copy + 2 videos', r.status === 200 && r.body.data.inputs.creditEstimate.total === FC.campaign_generation + 2 * FC.video_generation, r.body.data && r.body.data.inputs);
   reset();
   r = await post('/api/ai/create-ad', { mode: 'full', platform: 'pinterest', goal: 'Awareness', format: 'video', campaignStructure: { groups: 2, adsPerGroup: 2 }, brief: B() });
-  check('Pinterest 2×2 video: one shared video → estimate 25 + 200 = 225', r.status === 200 && r.body.data.inputs.creditEstimate.total === 225, r.body.data && r.body.data.inputs);
+  check('Pinterest 2×2 video: one shared video → estimate = copy + 1 video', r.status === 200 && r.body.data.inputs.creditEstimate.total === FC.campaign_generation + FC.video_generation, r.body.data && r.body.data.inputs);
   reset();
   r = await post('/api/ai/create-ad', { mode: 'full', platform: 'google', campaignType: 'PERFORMANCE_MAX', goal: 'Sales', format: 'image', brief: B() });
-  check('Performance Max: 1 asset group, estimate 25 + 3 × 75 = 250', r.status === 200 && r.body.data.inputs.structure.unit === 'assetGroup' && r.body.data.inputs.structure.ads === 1 && r.body.data.inputs.creditEstimate.total === 250, r.body.data && r.body.data.inputs);
+  check('Performance Max: 1 asset group, estimate = copy + 3 images', r.status === 200 && r.body.data.inputs.structure.unit === 'assetGroup' && r.body.data.inputs.structure.ads === 1 && r.body.data.inputs.creditEstimate.total === FC.campaign_generation + 3 * FC.image_generation, r.body.data && r.body.data.inputs);
   for (const [label, body, code] of [
     ['6 ad sets (limit 5)', { platform: 'meta', goal: 'Sales', format: 'image', metaStructure: { adSets: 6, adsPerAdSet: 1 } }, 'structure_range'],
     ['0 ads per ad group', { platform: 'tiktok', goal: 'Traffic', format: 'video', campaignStructure: { groups: 1, adsPerGroup: 0 } }, 'structure_range'],
@@ -520,8 +525,7 @@ const say0 = (...a) => console.info(...a);
   r = await post('/api/manual-campaigns/upload-creative', { dataUrl: gif });
   check('the existing "Add existing campaign" upload (no purpose) still accepts GIF, unchanged', r.status === 200 && !!r.body.url, r.body);
 
-  const COSTS = { ai_chat: 5, ai_analysis: 25, campaign_improvement: 10, audience_generation: 10, product_analysis: 10, competitor_analysis: 15, brand_voice: 20, campaign_generation: 25, website_analysis: 30, image_generation: 75, video_generation: 200, automation: 50 };
-  check('credit prices: unchanged except Automations = 50 credits once per new automation (was 25 per execution)', JSON.stringify(creditManager.FEATURE_COSTS) === JSON.stringify(COSTS), creditManager.FEATURE_COSTS);
+  check('credit prices: creditManager charges exactly services/pricing.js FEATURE_COSTS', JSON.stringify(creditManager.FEATURE_COSTS) === JSON.stringify(FC), creditManager.FEATURE_COSTS);
   check('no outbound network requests were attempted', blocked.length === 0, blocked);
 
   say(`\n${pass + fail} checks run, ${pass} passed, ${fail} failed.`);

@@ -104,12 +104,12 @@ const { check, log, done } = reporter();
 
   // ── F. Campaign uses the same rule; exclusions unchanged ───────
   log('\nF. Campaign eligibility');
-  r = await H.call('GET', '/api/admin/campaigns/starter-upgrade-2026-10/audience', 'tok_admin');
+  r = await H.call('GET', '/api/admin/campaigns/access-plans-2026-11/audience', 'tok_admin');
   // free: 1 (signup again), 2 (settings, re-enabled now), 3 (offers_invite), 5 (bounced), 6 (no consent), 7 (old settings), 8 (opted out)
   check('eligible = only offers-covering consent (users 2 and 3)', r.status === 200 && r.body.eligible === 2 && r.body.consentSources.settings === 1 && r.body.consentSources.offers_invite === 1, r.body);
   check('signup + old-wording consent → consent_not_covering; others keep their reasons', r.body.excluded.consent_not_covering === 2 && r.body.excluded.no_consent === 2 && r.body.excluded.opted_out === 1, r.body.excluded);
   H.rows('email_sends').push({ id: 'mk3', user_id: uid(3), template: 'inactive', dedupe_key: 'inactive:9', category: 'marketing', status: 'sent', sent_at: new Date().toISOString() });
-  r = await H.call('GET', '/api/admin/campaigns/starter-upgrade-2026-10/audience', 'tok_admin');
+  r = await H.call('GET', '/api/admin/campaigns/access-plans-2026-11/audience', 'tok_admin');
   check('recent-marketing exclusion still applies', r.body.eligible === 1 && r.body.excluded.recent_marketing === 1);
 
   // ── G. Unsubscribe and complaints unchanged ────────────────────
@@ -120,7 +120,7 @@ const { check, log, done } = reporter();
   await L.handleProviderEvent({ type: 'email.complained', data: { email_id: 'x', to: ['c3@example.invalid'] } });
   r = await get(3);
   check('spam complaint → suppressed + opted out; no card, no offers', r.body.suppressed === true && r.body.offers === false && r.body.offersInvite === false && prof(3).marketing_opt_in === false);
-  r = await H.call('GET', '/api/admin/campaigns/starter-upgrade-2026-10/audience', 'tok_admin');
+  r = await H.call('GET', '/api/admin/campaigns/access-plans-2026-11/audience', 'tok_admin');
   check('…and the campaign has nobody left to mail', r.body.eligible === 0);
 
   await new Promise((res) => setTimeout(res, 300)); // let sockets close before exiting (Windows)

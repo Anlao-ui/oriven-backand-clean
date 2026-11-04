@@ -43,6 +43,15 @@ Extracted directly from `process.env.*` references across `server.js`, `provider
 | `ADMIN_USER_IDS` | Comma-separated Supabase user ids allowed to open the owner analytics (`/admin/` → `/api/admin/analytics`). Checked on the server. Unset = nobody. |
 | `ANALYTICS_SALT` | Secret used to derive the daily-rotating visitor hash for cookieless page views. Set a long random value; without it a key-derived fallback is used. Never log or share it. |
 
+## Guided onboarding (questionnaire → strategy → plans)
+
+Needs `docs/migrations/2026-10-onboarding-sessions.sql`; without that table the app shows the existing welcome tour.
+
+| Variable | Purpose |
+|---|---|
+| `ONBOARDING_FLOW_DISABLED` | `true` switches the guided onboarding off (new accounts get the welcome tour). Unset = on once the table exists. |
+| `ONBOARDING_AI_DAILY_CALLS` | Onboarding AI calls (website readings + strategies) allowed per UTC day across all accounts, default `300`. Accounts are free to create, so this caps what throwaway signups can spend; once reached, new calls answer "busy" without using an account's attempts. At most ~$0.033 per strategy and ~$0.008 per reading on the fast model. |
+
 ## Free first ad (onboarding)
 
 | Variable | Purpose |
@@ -74,7 +83,7 @@ Extracted directly from `process.env.*` references across `server.js`, `provider
 
 | Variable | Purpose |
 |---|---|
-| `MARKETING_CAMPAIGN_APPROVED` | The id of the ONE campaign approved for a real send, e.g. `starter-upgrade-2026-10`. Needed (with `EMAIL_MODE=live`, the confirmation phrase and the reviewed eligible count) before any customer receives it. Unset = real sends refused. Remove it again after the campaign. |
+| `MARKETING_CAMPAIGN_APPROVED` | The id of the ONE campaign approved for a real send, e.g. `access-plans-2026-11`. Needed (with `EMAIL_MODE=live`, the confirmation phrase and the reviewed eligible count) before any customer receives it. Unset = real sends refused. Remove it again after the campaign. |
 
 ## Weekly AI Performance Report (Professional)
 

@@ -1,3 +1,14 @@
+// Development only: `node server.js --onboarding-preview` (npm run
+// dev:onboarding-preview) runs the local server as an isolated onboarding
+// preview instead — simulated signup, onboarding, strategy and payment, no
+// .env, no outbound connections (devPreview/onboardingPreview.js). It refuses
+// to start on Render or with NODE_ENV=production. Without the flag nothing
+// below changes.
+if (process.argv.includes('--onboarding-preview')) {
+  require('./devPreview/onboardingPreview').start();
+  return;
+}
+
 const express = require('express');
 const cors = require('cors');
 const Stripe = require('stripe');
@@ -30,7 +41,9 @@ const planEntitlements = require('./services/planEntitlements'); // Free/Starter
 const aiUsage = require('./services/aiUsage'); // prompt sanitizer + size guard + metadata-only AI usage telemetry
 const paidActions = require('./services/paidActions'); // one transaction pattern for every credit charge (claim → charge → settle/refund)
 const spendGuard = require('./services/spendGuard'); // daily provider-spend safety net
-const stripeBilling = require('./services/stripeBilling'); // Stripe → plan/credit reconciliation (authoritative, idempotent)
+const stripeBilling = require('./services/stripeBilling'); // legacy monthly subscriptions (existing subscribers only)
+const pricing = require('./services/pricing'); // plans, prices, periods, credits and the credit cost of every action (one source)
+const purchases = require('./services/purchases'); // one-time access purchases: checkout, fulfilment, refunds, disputes, instalments, expiry
 const onboarding = require('./services/onboarding'); // welcome eligibility, completion, first value, activation events
 const accounts = require('./services/accounts'); // signup validation, profile creation, email verification
 const firstAd = require('./services/firstAd'); // free first-ad image for new Free accounts (off unless FREE_FIRST_AD_ENABLED)
@@ -265,6 +278,7 @@ Object.keys(PRICE_IDS).forEach(function (plan) {
   if (priceId) PLAN_BY_PRICE_ID[priceId] = plan;
 });
 stripeBilling.init({ stripe, db: supabaseAdmin, creditManager, planByPriceId: PLAN_BY_PRICE_ID });
+purchases.init({ stripe, db: supabaseAdmin });
 onboarding.init({ db: supabaseAdmin });
 accounts.init({ db: supabaseAdmin });
 firstAd.init({ db: supabaseAdmin });
@@ -293,7 +307,71 @@ const LOCAL_FRONTEND_DIR = process.env.FRONTEND_DIR || (function () {
   const sibling = path.resolve(__dirname, '..', '..', 'oriven-frontend');
   return require('fs').existsSync(sibling) ? sibling : path.resolve(__dirname, '..', '..');
 })();
+// Local development: route the frontend's clean URLs (/about, /faq,
+// /blog/<post>, …) the way Netlify does in production (localFrontendRoutes.js).
+if (!process.env.RENDER) app.use(require('./localFrontendRoutes')(LOCAL_FRONTEND_DIR));
+// Local development only (never registered on Render, where production runs):
+// tells the app at localhost that it may open every page for inspection while
+// Stripe products and access periods are still being set up. It unlocks page
+// VIEWS in the browser only — every paid or AI route keeps its own server-side
+// access, credit and idempotency checks, unchanged.
+if (!process.env.RENDER && process.env.NODE_ENV !== 'production') {
+  app.get('/api/dev/local-preview', (req, res) => res.json({ localPreview: true, note: 'Pages unlocked for local inspection; paid actions still check access on the server.' }));
+}
 app.use(express.static(LOCAL_FRONTEND_DIR));
+
+// ── Mandatory onboarding: no app access before the first payment ─────
+// A new account (services/onboarding.js eligibility: created since the
+// rollout, onboarding not completed) without confirmed paid access
+// (pricing.hasAccess) may only use what the onboarding and the payment need:
+// every other API route answers 403 ONBOARDING_REQUIRED, whatever the
+// browser does (closed overlay, direct /app, scripts, another tab). The
+// frontend reopens the onboarding on that code. Accounts that completed
+// onboarding or have access (every existing customer) are never affected,
+// and nothing changes while the onboarding table is missing (the documented
+// fallback). Paid actions keep their own access checks underneath.
+const _GATE_OPEN = [/^\/onboarding\//, /^\/events$/, /^\/t$/, /^\/signup$/, /^\/profile\/(ensure|sync-email)$/, /^\/create-checkout-session$/,
+  /^\/billing\/sync-checkout$/, /^\/get-subscription$/, /^\/user\/preferences$/, /^\/account\/delete$/, /^\/stripe-webhook$/,
+  // account and privacy, needed before paying: email verification, email
+  // preferences and unsubscribe; admin routes check admins themselves
+  /^\/email\//, /^\/verify-email$/, /^\/resend-verification$/, /^\/admin\//];
+const _gateClear = new Map(); // userId -> time until which "not required" is trusted
+async function _onboardingRequired(user) {
+  const hit = _gateClear.get(user.id);
+  if (hit && hit > Date.now()) return false;
+  if (process.env.ONBOARDING_FLOW_DISABLED === 'true' || !(await onboardingFlow.available())) return false;
+  const { data, error } = await supabaseAdmin.from('profiles').select('created_at, onboarding_completed, subscription_status, access_expires_at').eq('id', user.id).maybeSingle();
+  if (error) throw error;
+  const prof = data || { created_at: user.created_at, onboarding_completed: null };
+  const required = onboarding.eligibility(prof).eligible && !pricing.hasAccess(prof);
+  if (!required) { _gateClear.set(user.id, Date.now() + 60e3); if (_gateClear.size > 50000) _gateClear.clear(); }
+  return required;
+}
+app.use('/api', async (req, res, next) => {
+  if (!req.headers.authorization || _GATE_OPEN.some((r) => r.test(req.path))) return next();
+  try {
+    const user = await getUserFromToken(req);
+    if (user && await _onboardingRequired(user)) {
+      return res.status(403).json({ error: 'Finish setting up your account to continue.', code: 'ONBOARDING_REQUIRED' });
+    }
+  } catch (err) {
+    // Fail open for data routes; every paid or AI route still checks access itself.
+    console.warn('[OnboardingGate] check failed:', err.code || err.message);
+  }
+  next();
+});
+
+// A confirmed access purchase (webhook or checkout sync): finish the
+// buyer's onboarding right away (unlock the plan, mark complete), so the
+// next page load goes straight into the app. Never throws.
+async function _afterAccessPurchase(result) {
+  if (!result || !result.userId || !(result.fulfilled || result.already)) return;
+  _gateClear.delete(result.userId);
+  try {
+    const { data: prof } = await supabaseAdmin.from('profiles').select('subscription_status, access_expires_at, access_plan').eq('id', result.userId).maybeSingle();
+    if (await onboardingFlow.available()) await onboardingFlow.completeAfterPayment(result.userId, prof);
+  } catch (err) { console.warn('[OnboardingFlow] completion after payment deferred to the next visit:', err.code || err.message); }
+}
 
 // â”€â”€ Stripe webhook â€” must be registered BEFORE express.json() â”€â”€
 app.post('/api/stripe-webhook', express.raw({ type: 'application/json' }), async (req, res) => {
@@ -310,8 +388,16 @@ app.post('/api/stripe-webhook', express.raw({ type: 'application/json' }), async
   //    reconciliation layer (services/stripeBilling.js): plan = the
   //    subscription's current price + status; credits only after a
   //    confirmed payment, for Stripe's real billing period.
+  // One-time access purchases (services/purchases.js) and, for existing
+  // subscribers only, legacy monthly subscriptions (services/stripeBilling.js).
   const HANDLERS = {
-    'checkout.session.completed': stripeBilling.onCheckoutCompleted,
+    'checkout.session.completed': (s) => (s && s.mode === 'payment' ? purchases.onCheckoutCompleted(s) : stripeBilling.onCheckoutCompleted(s)),
+    'checkout.session.async_payment_succeeded': purchases.onAsyncPaymentSucceeded,
+    'checkout.session.async_payment_failed': purchases.onAsyncPaymentFailed,
+    'checkout.session.expired': purchases.onCheckoutExpired,
+    'charge.refunded': purchases.onChargeRefunded,
+    'charge.dispute.created': purchases.onDisputeCreated,
+    'charge.dispute.closed': purchases.onDisputeClosed,
     'invoice.payment_succeeded': stripeBilling.onInvoicePaid,
     'customer.subscription.updated': stripeBilling.onSubscriptionUpdated,
     'customer.subscription.deleted': stripeBilling.onSubscriptionDeleted,
@@ -332,6 +418,7 @@ app.post('/api/stripe-webhook', express.raw({ type: 'application/json' }), async
     await stripeBilling.finishEvent(event, true);
     console.log('[Webhook]', event.type, event.id, JSON.stringify(result || {}));
     _billingConversionEvents(event.type, result);
+    if (result && result.purchaseId) await _afterAccessPurchase(result);
     return res.json({ received: true });
   } catch (err) {
     // Failed mid-way: report failure so Stripe retries. Every step is
@@ -346,11 +433,17 @@ app.post('/api/stripe-webhook', express.raw({ type: 'application/json' }), async
 // the checkout sync below). Each Stripe event is processed once
 // (stripe_webhook_events), and a state change happens once, so a replay or
 // the second of two paths finds changed=false and records nothing.
-const _PAID_PLANS_EV = ['starter', 'creator', 'professional'];
+const _PAID_PLANS_EV = pricing.LEGACY_PLANS;
 function _billingConversionEvents(type, r) {
   try {
     if (!r || !r.userId) return;
     const rec = (name, props) => onboarding.recordEvent({ name, userId: r.userId, props });
+    if (r.purchaseId) { // access purchases
+      if (r.fulfilled) rec('checkout_completed', { plan: r.plan });
+      if (r.failed) rec('payment_failed', { plan: r.plan });
+      if (r.revoked) rec('purchase_revoked', { plan: r.plan });
+      return;
+    }
     if (type === 'checkout.session.completed' && _PAID_PLANS_EV.includes(r.plan)) rec('checkout_completed', { plan: r.plan });
     if (r.paymentFailed) rec('payment_failed', r.plan ? { plan: r.plan } : undefined);
     if (r.cancelScheduled) rec('subscription_cancel_scheduled', r.plan ? { plan: r.plan } : undefined);
@@ -377,21 +470,56 @@ app.post('/api/billing/sync-checkout', express.json({ limit: '4kb' }), async (re
   const sessionId = req.body && req.body.session_id;
   if (typeof sessionId !== 'string' || !/^cs_(test|live)_[A-Za-z0-9]{10,200}$/.test(sessionId)) return res.status(400).json({ error: 'Invalid session' });
   try {
-    const session = await stripe.checkout.sessions.retrieve(sessionId);
-    const owner = (session.metadata && session.metadata.userId) || null;
-    if (owner !== user.id || (session.client_reference_id && session.client_reference_id !== user.id)) {
-      console.warn('[CheckoutSync] session does not belong to the caller | user:', user.id);
-      return res.status(404).json({ error: 'Session not found' });
-    }
-    const result = await stripeBilling.onCheckoutCompleted(session);
-    console.log('[CheckoutSync]', JSON.stringify(Object.assign({ user: user.id }, result || {})));
-    _billingConversionEvents('checkout.session.completed', result);
+    const result = await _reconcileCheckoutSession(user.id, sessionId);
+    if (!result) return res.status(404).json({ error: 'Session not found' });
     res.json({ ok: true, plan: (result && result.plan) || null, skipped: (result && result.skipped) || null });
   } catch (err) {
     console.error('[CheckoutSync] error:', err.message);
     res.status(502).json({ error: 'Could not confirm the payment right now.' });
   }
 });
+
+// Reads one Checkout Session from Stripe and applies it through the same
+// reconciliation as the webhook. null when the session isn't the user's.
+async function _reconcileCheckoutSession(userId, sessionId) {
+  const session = await stripe.checkout.sessions.retrieve(sessionId);
+  const owner = (session.metadata && session.metadata.userId) || null;
+  if (owner !== userId || (session.client_reference_id && session.client_reference_id !== userId)) {
+    console.warn('[CheckoutSync] session does not belong to the caller | user:', userId);
+    return null;
+  }
+  const result = session.mode === 'payment' ? await purchases.fulfillFromSession(session) : await stripeBilling.onCheckoutCompleted(session);
+  console.log('[CheckoutSync]', JSON.stringify(Object.assign({ user: userId }, result || {})));
+  _billingConversionEvents('checkout.session.completed', result);
+  if (result && result.purchaseId) await _afterAccessPurchase(result);
+  return result;
+}
+
+// The account's open checkout, if any: the latest pending access purchase
+// started within the last 24 hours that has a Stripe session.
+async function _pendingCheckout(userId) {
+  try {
+    const { data, error } = await supabaseAdmin.from('purchases').select('id, stripe_checkout_session_id, created_at')
+      .eq('user_id', userId).eq('status', 'pending').gte('created_at', new Date(Date.now() - 24 * 3600e3).toISOString())
+      .order('created_at', { ascending: false }).limit(1);
+    if (error || !Array.isArray(data) || !data[0] || !data[0].stripe_checkout_session_id) return null;
+    return data[0];
+  } catch (_) { return null; }
+}
+// Without paid access, an open checkout is re-checked with Stripe (at most
+// every 10 s per account): covers a closed browser and a late webhook. The
+// browser never decides; only Stripe's own session state can grant access.
+const _pendingSyncAt = new Map();
+async function _syncPendingCheckout(userId) {
+  const last = _pendingSyncAt.get(userId) || 0;
+  if (Date.now() - last < (parseInt(process.env.CHECKOUT_RESYNC_MS, 10) >= 0 ? parseInt(process.env.CHECKOUT_RESYNC_MS, 10) : 10e3)) return null;
+  _pendingSyncAt.set(userId, Date.now());
+  if (_pendingSyncAt.size > 20000) _pendingSyncAt.clear();
+  const open = await _pendingCheckout(userId);
+  if (!open) return null;
+  try { return await _reconcileCheckoutSession(userId, open.stripe_checkout_session_id); }
+  catch (err) { console.warn('[CheckoutSync] pending re-check failed:', err.message); return null; }
+}
 
 // ── Resend webhook (delivery, bounce, complaint) — raw body for the Svix
 // signature, so registered before express.json(). Without
@@ -468,6 +596,20 @@ async function _persistGeneratedImage(userId, src) {
     console.warn('[Image] could not store generated image, keeping provider URL:', err.message);
     return src;
   }
+}
+
+// A finished video's stable link, written once onto its creative_assets
+// record (the record is created when the job starts, with only the job id),
+// so My Content can show and download it later. Own records only; never
+// throws.
+async function _attachVideoUrl(userId, generationId, url) {
+  if (!userId || !generationId || !url) return;
+  try {
+    const { data } = await supabaseAdmin.from('creative_assets').select('id, content').eq('user_id', userId).eq('kind', 'video').order('created_at', { ascending: false }).limit(100);
+    const row = (data || []).find((r) => r.content && r.content.generationId === generationId);
+    if (!row || row.content.url === url) return;
+    await supabaseAdmin.from('creative_assets').update({ content: Object.assign({}, row.content, { url }) }).eq('id', row.id).eq('user_id', userId);
+  } catch (err) { console.warn('[Video] link not saved to the asset record:', err.message); }
 }
 
 // Finished provider videos are copied once into Supabase storage so the
@@ -608,7 +750,7 @@ OUTPUT: Return ONLY the HTML document. No explanation, no preamble, no markdown 
   let reservation;
   if (req.user) {
     try {
-      reservation = await creditManager.reserveCredits(req.user, 'campaign_generation');
+      reservation = await creditManager.reserveCredits(req.user, 'web_generation');
     } catch (err) {
       if (err instanceof creditManager.InsufficientCreditsError) return res.status(402).json({ error: 'Out of credits', code: 'CREDITS_EXHAUSTED', balance: err.balance });
       return res.status(500).json({ error: 'Could not verify credits right now.' });
@@ -631,17 +773,17 @@ OUTPUT: Return ONLY the HTML document. No explanation, no preamble, no markdown 
 
     if (!html || html.length < 100) {
       console.error('[Web] response too short or missing HTML');
-      if (reservation) creditManager.finalizeCreditLog(reservation, 'campaign_generation', { success: false, error: 'response too short or missing HTML', route: req.path }).catch(() => {});
+      if (reservation) creditManager.finalizeCreditLog(reservation, 'web_generation', { success: false, error: 'response too short or missing HTML', route: req.path }).catch(() => {});
       return res.status(500).json({ error: 'Failed to generate website' });
     }
 
     console.log(`[Web] page ready â€” ${html.length} chars`);
     _recordCreativeAsset(req.user && req.user.id, { kind: 'landing_page', title: brand_name || product || 'Landing page', content: { html }, source_route: '/api/generate-web' });
-    if (reservation) creditManager.finalizeCreditLog(reservation, 'campaign_generation', { provider: 'aiml', success: true, route: req.path }).catch(() => {});
+    if (reservation) creditManager.finalizeCreditLog(reservation, 'web_generation', { provider: 'aiml', success: true, route: req.path }).catch(() => {});
     res.json({ html });
   } catch (err) {
     console.error('[Web] Anthropic error:', err.message);
-    if (reservation) creditManager.finalizeCreditLog(reservation, 'campaign_generation', { success: false, error: err.message, route: req.path }).catch(() => {});
+    if (reservation) creditManager.finalizeCreditLog(reservation, 'web_generation', { success: false, error: err.message, route: req.path }).catch(() => {});
     res.status(500).json({ error: 'Failed to generate website' });
   }
 });
@@ -701,40 +843,24 @@ function _ensureProfileOnce(user) {
 //                           (there is no guest demo any more — AI generation always
 //                           needs a signed-in user), signed-in but unpaid → 403.
 
-const PAID_PLANS = ['starter', 'creator', 'professional'];
+// ── Access: one time-based rule behind every gate ─────────────────
+// OrivenAI is paid-only: an account has access while profiles.
+// access_expires_at lies in the future (services/pricing.js hasAccess) —
+// set by a confirmed purchase (fulfill_purchase) or, for legacy monthly
+// subscribers, by their paid billing period. The status label alone never
+// grants access. Every paying customer gets the same functionality, so the
+// former plan-tier gates (Starter/Creator/Professional, the free tier, the
+// free daily campaign build) are all this same check now; their names stay
+// so the routes read as before.
+const PAID_PLANS = pricing.PAID_STATUSES;
+const ACCESS_REQUIRED = { error: 'Your OrivenAI access isn’t active. Choose a plan to continue.', code: 'SUBSCRIPTION_REQUIRED' };
 
-async function requireSubscription(req, res, next) {
-  const auth = req.headers.authorization || '';
-  if (!auth) return res.status(401).json({ error: 'Authentication required', code: 'AUTH_REQUIRED' });
-  const user = await getUserFromToken(req);
-  if (!user) return res.status(401).json({ error: 'Invalid or expired session', code: 'AUTH_INVALID' });
-  try {
-    const { data } = await supabaseAdmin
-      .from('profiles').select('subscription_status').eq('id', user.id).maybeSingle();
-    if (!PAID_PLANS.includes((data && data.subscription_status) || '')) {
-      return res.status(403).json({ error: 'Active subscription required', code: 'SUBSCRIPTION_REQUIRED' });
-    }
-    req.user = user;
-    next();
-  } catch (err) {
-    console.error('[Auth] Subscription check error:', err.message);
-    return res.status(500).json({ error: 'Could not verify subscription' });
-  }
+async function _loadAccess(userId) {
+  const { data, error } = await supabaseAdmin.from('profiles').select('subscription_status, access_expires_at').eq('id', userId).maybeSingle();
+  if (error) throw error;
+  return { status: (data && data.subscription_status) || 'free', active: pricing.hasAccess(data), expiresAt: (data && data.access_expires_at) || null };
 }
 
-// requireSubOrFree / requireSubOrFreeStrict -- same two tiers as above, but
-// also let a real 'free' plan through (not just paid). Free is a legitimate,
-// server-enforced plan with its own credit/Intelligence/Autopilot limits
-// (creditManager.js) -- it must be able to reach the routes it's actually
-// entitled to use (creative generation funded by its own credit balance,
-// and publishing a generated ad), which requireSubscription/requireSubIfAuthed
-// deliberately do NOT allow (those two stay strictly paid-only for routes
-// that should remain paid-only, e.g. account/plan-management). Kept as
-// separate functions rather than editing the two above so every other
-// route's behavior is completely unaffected.
-// Signed-in user or a 401 — the AI/paid-route middlewares below never let a
-// guest through: a request without a user would skip the credit claim and
-// charge (paidActions.laneGuard, creditManager) and still reach the provider.
 async function _requireSignedIn(req, res) {
   const auth = req.headers.authorization || '';
   if (!auth) { res.status(401).json({ error: 'Authentication required', code: 'AUTH_REQUIRED' }); return null; }
@@ -742,236 +868,35 @@ async function _requireSignedIn(req, res) {
   if (!user) { res.status(401).json({ error: 'Invalid or expired session', code: 'AUTH_INVALID' }); return null; }
   return user;
 }
-// The subscription lookup itself failed: refuse (fail closed). Passing the
-// request on without a user would turn it into an unpaid guest request.
 function _authCheckFailed(res, where, err) {
   console.error(`[Auth] ${where} check error:`, err && err.message);
   return res.status(503).json({ error: 'Could not verify your plan right now. Please try again.', code: 'AUTH_CHECK_FAILED' });
 }
 
-async function requireSubOrFree(req, res, next) {
+async function _accessGate(req, res, next, where, feature) {
   const user = await _requireSignedIn(req, res);
   if (!user) return;
   try {
-    const { data } = await supabaseAdmin
-      .from('profiles').select('subscription_status').eq('id', user.id).maybeSingle();
-    const status = (data && data.subscription_status) || 'none';
-    if (!PAID_PLANS.includes(status) && status !== 'free') {
-      return res.status(403).json({ error: 'Active subscription required', code: 'SUBSCRIPTION_REQUIRED' });
-    }
+    const a = await _loadAccess(user.id);
+    if (!a.active) return res.status(403).json(Object.assign({}, ACCESS_REQUIRED, feature ? { feature, plan: 'paid' } : {}, { accessExpiresAt: a.expiresAt }));
     req.user = user;
+    req.subscriptionStatus = a.status;
+    req.accessExpiresAt = a.expiresAt;
     next();
   } catch (err) {
-    return _authCheckFailed(res, 'requireSubOrFree', err);
+    return _authCheckFailed(res, where, err);
   }
 }
-
-async function requireSubOrFreeStrict(req, res, next) {
-  const auth = req.headers.authorization || '';
-  if (!auth) return res.status(401).json({ error: 'Authentication required', code: 'AUTH_REQUIRED' });
-  const user = await getUserFromToken(req);
-  if (!user) return res.status(401).json({ error: 'Invalid or expired session', code: 'AUTH_INVALID' });
-  try {
-    const { data } = await supabaseAdmin
-      .from('profiles').select('subscription_status').eq('id', user.id).maybeSingle();
-    const status = (data && data.subscription_status) || '';
-    if (!PAID_PLANS.includes(status) && status !== 'free') {
-      return res.status(403).json({ error: 'Active subscription required', code: 'SUBSCRIPTION_REQUIRED' });
-    }
-    req.user = user;
-    next();
-  } catch (err) {
-    console.error('[Auth] requireSubOrFreeStrict check error:', err.message);
-    return res.status(500).json({ error: 'Could not verify subscription' });
-  }
-}
-
-async function requireSubIfAuthed(req, res, next) {
-  const route = req.path || req.url || '?';
-  const auth = req.headers.authorization || '';
-  console.log(`[middleware] requireSubIfAuthed — ${req.method} ${route} | auth header: ${auth ? 'present' : 'MISSING'}`);
-  const user = await _requireSignedIn(req, res);
-  if (!user) return;
-  console.log('[middleware] User resolved:', user.id); // id only — no email address in logs
-  try {
-    const { data, error: dbErr } = await supabaseAdmin
-      .from('profiles').select('subscription_status').eq('id', user.id).maybeSingle();
-    if (dbErr) console.warn('[middleware] Supabase profiles query error:', dbErr.message);
-    const status = (data && data.subscription_status) || 'none';
-    console.log('[middleware] subscription_status:', status, '| paid:', PAID_PLANS.includes(status));
-    if (!PAID_PLANS.includes(status)) {
-      console.log('[middleware] 403 — subscription required for', user.id);
-      return res.status(403).json({ error: 'Active subscription required', code: 'SUBSCRIPTION_REQUIRED' });
-    }
-    req.user = user;
-    req.subscriptionStatus = status;
-    console.log('[middleware] ✓ Authorized — proceeding to route');
-    next();
-  } catch (err) {
-    return _authCheckFailed(res, 'requireSubIfAuthed', err);
-  }
-}
-
-// â”€â”€ Shared SMTP transporter factory â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-// requireSubOrOnboardingGen -- used ONLY on /api/ai/create-ad, nowhere else.
-// Identical to requireSubIfAuthed, with exactly one addition: a non-paid
-// user whose free_campaign_used_at is null or more than 24h old gets waved
-// through for one real, uncounted generation instead of a 403 -- this is
-// the Free plan's "experience the core workflow" mechanism (campaign
-// generation + image generation together cost far more than the Free
-// plan's 20-credit/day balance, so this daily bypass is what actually lets
-// a Free user generate a full ad once/day; the 20 credits/day cover
-// smaller metered actions between generations, see PLAN_ALLOWANCES.free in
-// creditManager.js). Originally a lifetime-once exception (bound to
-// onboarding_completed/free_campaign_used); now a rolling 24h window bound
-// to free_campaign_used_at so it also serves returning Free users, not just
-// first-time onboarding. Marks free_campaign_used_at=now() server-side on
-// successful generation (see _consumeOnboardingFreeGen) so it can't be
-// reused within the same 24h by refreshing/retrying.
-async function requireSubOrOnboardingGen(req, res, next) {
-  const user = await _requireSignedIn(req, res);
-  if (!user) return;
-  try {
-    const { data, error: dbErr } = await supabaseAdmin
-      .from('profiles').select('subscription_status, free_campaign_used_at').eq('id', user.id).maybeSingle();
-    if (dbErr) console.warn('[middleware] requireSubOrOnboardingGen query error:', dbErr.message);
-    const status = (data && data.subscription_status) || 'none';
-    if (PAID_PLANS.includes(status)) { req.user = user; return next(); }
-
-    const lastUsedAt = data ? data.free_campaign_used_at : null;
-    const dayElapsed = !lastUsedAt || (Date.now() - new Date(lastUsedAt).getTime()) >= 24 * 60 * 60 * 1000;
-    if (dayElapsed) {
-      console.log('[middleware] Free daily generation granted for', user.id, '| lastUsedAt:', lastUsedAt || '(never)');
-      req.user = user;
-      req._onboardingFreeGen = true;
-      return next();
-    }
-
-    console.log('[middleware] 403 - subscription required for', user.id, '| free_campaign_used_at:', lastUsedAt);
-    return res.status(403).json({ error: 'Active subscription required', code: 'SUBSCRIPTION_REQUIRED' });
-  } catch (err) {
-    return _authCheckFailed(res, 'requireSubOrOnboardingGen', err);
-  }
-}
-
-// Called once a generation actually succeeds for a user who was let through
-// via the onboarding exception above -- burns the one-time allowance
-// server-side so it can't be triggered again by retrying, refreshing, or
-// never finishing onboarding. Fire-and-forget, matches the DB-write style
-// already used elsewhere in this file.
-function _consumeOnboardingFreeGen(req) {
-  if (!req._onboardingFreeGen || !req.user) return;
-  // upsert, not update -- a brand-new signup's profiles row can lag behind
-  // the very first authenticated request (confirmed directly against
-  // prod: immediately after /api/signup returns, the row can still be
-  // unreadable). .update() on a not-yet-existent row silently matches zero
-  // rows and "succeeds" while writing nothing, which would let the
-  // exception be used more than once. Same fix already applied to the
-  // preferences route for the same underlying timing issue.
-  // free_campaign_used (boolean) keeps its original meaning -- "has this
-  // account ever generated anything" -- for any other reader (e.g. the
-  // client's _isFreeUser()/_freeCampaignUsed() helpers). free_campaign_used_at
-  // is the new field requireSubOrOnboardingGen's rolling-24h check actually
-  // reads; both are written from the same successful-generation moment.
-  supabaseAdmin.from('profiles').upsert({ id: req.user.id, free_campaign_used: true, free_campaign_used_at: new Date().toISOString() }, { onConflict: 'id' })
-    .then((r) => {
-      if (r && r.error) console.warn('[middleware] Could not persist free_campaign_used:', r.error.message);
-      else console.log('[middleware] free_campaign_used/free_campaign_used_at persisted for', req.user.id, '(daily onboarding-generation exception consumed)');
-    })
-    .catch((e) => console.warn('[middleware] _consumeOnboardingFreeGen threw:', e.message));
-}
-
-// requireAutopilotAccess -- applied to every /api/autopilot/* route.
-// Previously only POST /api/autopilot/rules had a plan check at all, and it
-// was a narrow `=== 'starter'` string comparison (now removed in favor of
-// this shared middleware) -- the other 13 Autopilot routes, including
-// POST /api/autopilot/workflows (which executes real AI generation steps),
-// had no server-side gate whatsoever. Reuses creditManager.PLAN_AUTOPILOT_LIMITS
-// (the same map _evaluateAutomationRules already enforces at execution
-// time) as the single source of truth for "does this plan include
-// Autopilot at all" -- a plan is eligible if its limit is greater than 0.
-// This is what makes Autopilot's rejection real at the API layer for Free
-// (and, as a direct, unavoidable consequence of using the existing
-// allowance map instead of a one-off '=== free' check, for Starter too,
-// closing a pre-existing gap rather than adding a new inconsistent one).
-async function requireAutopilotAccess(req, res, next) {
-  const auth = req.headers.authorization || '';
-  if (!auth) return res.status(401).json({ error: 'Authentication required', code: 'AUTH_REQUIRED' });
-  const user = await getUserFromToken(req);
-  if (!user) return res.status(401).json({ error: 'Invalid or expired session', code: 'AUTH_INVALID' });
-  try {
-    const { data } = await supabaseAdmin
-      .from('profiles').select('subscription_status').eq('id', user.id).maybeSingle();
-    const status = (data && data.subscription_status) || 'free';
-    if (!planEntitlements.hasEntitlement(status, 'autopilot')) {
-      // planEntitlements is the authority: Autopilot is part of the full
-      // workflow from Starter up (executions still cost credits).
-      return res.status(403).json({ error: 'Automations are available from the Starter plan.', code: 'AUTOPILOT_NOT_AVAILABLE' });
-    }
-    req.user = user;
-    next();
-  } catch (err) {
-    console.error('[Auth] Autopilot access check error:', err.message);
-    return res.status(500).json({ error: 'Could not verify Autopilot access' });
-  }
-}
-
-// Marketing/Pricing Redesign, updated by the Homepage + Pricing Polish
-// Pass — "Creator = Starter + Research" is the current final plan
-// positioning (Business moved to being included starting at Starter; its
-// route no longer uses this gate — see POST /api/business/website/refresh).
-// Now applied only to Research's one route. Kept as a named, reusable
-// middleware (mirrors requireAutopilotAccess's exact shape) rather than an
-// inline check, in case a future Creator+-only route needs the same gate.
-// requireEntitlement(key) — authenticated user + their persisted plan must
-// include the capability (services/planEntitlements.js). Runs before any
-// credit reservation, so a plan without the capability is never charged.
-function requireEntitlement(key) {
-  return async function (req, res, next) {
-    const auth = req.headers.authorization || '';
-    if (!auth) return res.status(401).json({ error: 'Authentication required', code: 'AUTH_REQUIRED' });
-    const user = await getUserFromToken(req);
-    if (!user) return res.status(401).json({ error: 'Invalid or expired session', code: 'AUTH_INVALID' });
-    try {
-      const { data } = await supabaseAdmin
-        .from('profiles').select('subscription_status').eq('id', user.id).maybeSingle();
-      const status = (data && data.subscription_status) || 'free';
-      if (!planEntitlements.hasEntitlement(status, key)) {
-        const min = planEntitlements.minPlanFor(key);
-        const label = min ? min.charAt(0).toUpperCase() + min.slice(1) : 'a paid';
-        return res.status(403).json({ error: 'This feature is available from the ' + label + ' plan.', code: 'PLAN_REQUIRED', feature: key, plan: min });
-      }
-      req.user = user;
-      req.subscriptionStatus = status;
-      next();
-    } catch (err) {
-      console.error('[Auth] Entitlement check error (' + key + '):', err.message);
-      return res.status(500).json({ error: 'Could not verify plan access' });
-    }
-  };
-}
-
-// Superseded by requireEntitlement('research') (Research is now included from
-// Starter). Kept, unused, so nothing that still references it breaks.
-async function requireCreatorPlus(req, res, next) {
-  const auth = req.headers.authorization || '';
-  if (!auth) return res.status(401).json({ error: 'Authentication required', code: 'AUTH_REQUIRED' });
-  const user = await getUserFromToken(req);
-  if (!user) return res.status(401).json({ error: 'Invalid or expired session', code: 'AUTH_INVALID' });
-  try {
-    const { data } = await supabaseAdmin
-      .from('profiles').select('subscription_status').eq('id', user.id).maybeSingle();
-    const status = (data && data.subscription_status) || 'free';
-    if (!['creator', 'professional'].includes(status)) {
-      return res.status(403).json({ error: 'This feature is available on the Creator plan and above.', code: 'CREATOR_PLAN_REQUIRED' });
-    }
-    req.user = user;
-    next();
-  } catch (err) {
-    console.error('[Auth] Creator-plan access check error:', err.message);
-    return res.status(500).json({ error: 'Could not verify plan access' });
-  }
-}
+function requireSubscription(req, res, next) { return _accessGate(req, res, next, 'requireSubscription'); }
+function requireSubOrFree(req, res, next) { return _accessGate(req, res, next, 'requireSubOrFree'); }
+function requireSubOrFreeStrict(req, res, next) { return _accessGate(req, res, next, 'requireSubOrFreeStrict'); }
+function requireSubIfAuthed(req, res, next) { return _accessGate(req, res, next, 'requireSubIfAuthed'); }
+function requireSubOrOnboardingGen(req, res, next) { return _accessGate(req, res, next, 'requireSubOrOnboardingGen'); }
+function requireAutopilotAccess(req, res, next) { return _accessGate(req, res, next, 'requireAutopilotAccess', 'autopilot'); }
+function requireCreatorPlus(req, res, next) { return _accessGate(req, res, next, 'requireCreatorPlus'); }
+function requireEntitlement(key) { return function (req, res, next) { return _accessGate(req, res, next, 'requireEntitlement:' + key, key); }; }
+// The free daily campaign build is retired; kept as a no-op for its call sites.
+function _consumeOnboardingFreeGen() {}
 
 function _smtpTransporter() {
   return nodemailer.createTransport({
@@ -1266,7 +1191,7 @@ app.post('/api/generate-text', requireSubIfAuthed, async (req, res) => {
   // it needs the same entitlement (Creator, Professional). Copy generation
   // (every other type) stays on every paid plan.
   if (type === 'assistant' && !(req.user && planEntitlements.hasEntitlement(req.subscriptionStatus, 'orivenChat'))) {
-    return res.status(403).json({ error: 'Oriven Chat is available from the Creator plan.', code: 'PLAN_REQUIRED', feature: 'orivenChat', plan: 'creator' });
+    return res.status(403).json({ error: 'Your OrivenAI access isn’t active. Choose a plan to continue.', code: 'SUBSCRIPTION_REQUIRED', feature: 'orivenChat', plan: 'paid' });
   }
 
   const brandSection = _buildBrandSection(brandContext);
@@ -1616,10 +1541,9 @@ app.post('/api/generate-image', requireSubOrFree, paidActions.laneGuard('image')
   // generation trial (requireSubIfAuthed, not requireSubscription), which
   // stays unbilled just like the identical guard on every other route below.
   let reservation;
-  // A new Free account's first ad image (services/firstAd.js, off unless
-  // enabled): claimed instead of charging credits; released by the normal
-  // paid-action settlement if the image fails.
-  const firstAdClaim = req.user ? await firstAd.claim(req.user.id) : null;
+  // The free first-ad image (services/firstAd.js) is retired with the free
+  // tier: OrivenAI is paid-only, every image is charged.
+  const firstAdClaim = null;
   if (firstAdClaim) {
     paidActions.attachReservation(firstAdClaim);
   } else if (req.user) {
@@ -2268,6 +2192,16 @@ Rules:
 // tied to the authenticated user three ways — client_reference_id, session
 // metadata and subscription metadata — and the webhook only links a
 // subscription to that user after ownership checks (services/stripeBilling).
+// ── Plans (public): prices, periods and credits from services/pricing.js ──
+app.get('/api/pricing', (req, res) => {
+  res.set('Cache-Control', 'public, max-age=300');
+  res.json({ plans: pricing.publicPlans(), featureCosts: pricing.FEATURE_COSTS, vatRate: pricing.VAT_RATE, currency: pricing.CURRENCY, renewal: 'manual', creditsExpireWithAccess: true });
+});
+
+// ── POST /api/create-checkout-session: buy an access period (one-time) ──
+// body: { plan: 'flex' | 'monthly' | 'quarterly' | 'semiannual' | 'annual' }.
+// Identity comes from the signed-in session only. Nothing is granted here:
+// access and credits follow the confirmed payment (services/purchases.js).
 app.post('/api/create-checkout-session', async (req, res) => {
   const user = await getUserFromToken(req);
   if (!user) return res.status(401).json({ error: 'Sign in to choose a plan.', code: 'AUTH_REQUIRED' });
@@ -2276,122 +2210,30 @@ app.post('/api/create-checkout-session', async (req, res) => {
     console.warn('[Checkout] Refused: body userId does not match the signed-in user', user.id);
     return res.status(403).json({ error: 'This checkout request does not match your account.', code: 'IDENTITY_MISMATCH' });
   }
-
-  const validPlans = ['starter', 'creator', 'professional'];
-  if (!plan || !validPlans.includes(plan)) return res.status(400).json({ error: 'Choose a valid plan.' });
-  const priceId = PRICE_IDS[plan];
-  if (!priceId) {
-    console.error('[Checkout] No price ID configured for plan', plan, '(STRIPE_PRICE_' + plan.toUpperCase() + ')');
-    return res.status(400).json({ error: `No price configured for plan: ${plan}. Contact support.` });
-  }
-
-  const { data: profile, error: profErr } = await supabaseAdmin.from('profiles')
-    .select('stripe_customer_id, stripe_subscription_id').eq('id', user.id).maybeSingle();
-  if (profErr) return res.status(500).json({ error: 'Could not verify your account right now.' });
-
-  // One subscription per account: an existing live subscription is changed
-  // from Settings (schedule-plan-change), never by buying a second one.
-  if (profile && profile.stripe_subscription_id) {
-    try {
-      const existing = await stripe.subscriptions.retrieve(profile.stripe_subscription_id);
-      if (stripeBilling.LIVE.includes(existing.status)) {
-        return res.status(409).json({ error: 'You already have a subscription. Change your plan in Settings → Subscription.', code: 'ALREADY_SUBSCRIBED' });
-      }
-    } catch (err) {
-      if (!(err && (err.statusCode === 404 || err.code === 'resource_missing'))) {
-        console.error('[Checkout] Could not verify existing subscription:', err.message);
-        return res.status(502).json({ error: 'Could not reach the payment provider. Please try again.' });
-      }
-    }
-  }
-
+  if (pricing.LEGACY_PLANS.includes(plan)) return res.status(410).json({ error: 'This plan is no longer offered. Choose one of the current plans.', code: 'PLAN_RETIRED' });
+  if (!pricing.planById(plan)) return res.status(400).json({ error: 'Choose a valid plan.', code: 'UNKNOWN_PLAN' });
+  if (!analytics.allow('checkout:' + user.id, 6, 60e3)) return res.status(429).json({ error: 'Too many checkout attempts. Try again in a minute.' });
   try {
-    const params = {
-      mode: 'subscription',
-      payment_method_types: ['card'],
-      line_items: [{ price: priceId, quantity: 1 }],
-      // Stripe Tax: Stripe calculates any tax due from the customer's location
-      // and tax status, on top of the price (the paid prices are tax-
-      // exclusive in Stripe). OrivenAI never computes a rate itself. The
-      // full billing address gives Stripe the location and puts it on the
-      // invoice; businesses can add a VAT/tax ID (e.g. for reverse charge).
-      automatic_tax: { enabled: true },
-      billing_address_collection: 'required',
-      tax_id_collection: { enabled: true },
-      client_reference_id: user.id,
-      metadata: { userId: user.id, plan },
-      subscription_data: { metadata: { userId: user.id, plan } },
-      // session_id lets the app reconcile this checkout directly
-      // (/api/billing/sync-checkout) even if a webhook is delayed or misrouted.
-      success_url: `${FRONTEND_URL}/app?success=true&session_id={CHECKOUT_SESSION_ID}`,
-      cancel_url:  `${FRONTEND_URL}/app?canceled=true`,
-    };
-    if (profile && profile.stripe_customer_id) {
-      // Returning customer: reuse their own Stripe customer (never one from
-      // the request). Tax needs Checkout to save the collected address/name.
-      params.customer = profile.stripe_customer_id;
-      params.customer_update = { address: 'auto', name: 'auto' };
-    } else {
-      params.customer_email = user.email || undefined;
-    }
-    const session = await stripe.checkout.sessions.create(params);
-    console.log('[Checkout] Session created for user', user.id, '| plan:', plan);
+    const r = await purchases.createCheckout({
+      user, planId: plan, source: (req.body && req.body.source) || null,
+      // session_id lets the app confirm this payment directly
+      // (/api/billing/sync-checkout) even if a webhook is delayed.
+      successUrl: `${FRONTEND_URL}/app?success=true&session_id={CHECKOUT_SESSION_ID}`,
+      cancelUrl: `${FRONTEND_URL}/app?canceled=true`,
+    });
     onboarding.recordEvent({ name: 'checkout_started', userId: user.id, props: { plan } });
-    res.json({ url: session.url });
+    res.json({ url: r.url });
   } catch (err) {
-    console.error('[Checkout] Stripe error creating session:', err.message, '| type:', err.type || '-', '| code:', err.code || '-');
+    if (err instanceof purchases.PurchaseError) return res.status(err.status).json({ error: err.message, code: err.code });
+    console.error('[Checkout] could not create checkout:', err.message, '| type:', err.type || '-', '| code:', err.code || '-');
     res.status(500).json({ error: 'Could not create checkout session. Please try again.' });
   }
 });
 
-// â”€â”€ POST /api/select-free-plan â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-// The Free plan's equivalent of /api/create-checkout-session -- deliberately
-// never touches Stripe. Most callers are already on subscription_status
-// 'free' by default (every new signup starts there, auth.js:1222), so this
-// is usually an idempotent no-op that just confirms the plan and ensures a
-// fresh daily credit cycle exists before the client re-reads status. The
-// one real guard: refuse to flip an ACTIVE paid Stripe subscriber back to
-// 'free' from here -- that must go through real subscription cancellation
-// (Settings), not a client-side "Continue Free" click, so a stray/forged
-// call here can't silently stop their billing from the account's point of
-// view while Stripe keeps charging them.
-app.post('/api/select-free-plan', async (req, res) => {
-  const user = await getUserFromToken(req);
-  if (!user) return res.status(401).json({ error: 'Authentication required', code: 'AUTH_REQUIRED' });
-  try {
-    const { data: profile, error: profErr } = await supabaseAdmin
-      .from('profiles').select('subscription_status, stripe_subscription_id').eq('id', user.id).maybeSingle();
-    if (profErr) throw profErr;
-
-    const currentlyPaid = profile && PAID_PLANS.includes(profile.subscription_status) && !!profile.stripe_subscription_id;
-    if (currentlyPaid) {
-      return res.status(409).json({
-        error: 'You already have an active paid subscription. Manage or cancel it from Settings.',
-        code: 'ALREADY_PAID',
-      });
-    }
-
-    if (!profile || profile.subscription_status !== 'free') {
-      const { error: updErr } = await supabaseAdmin.from('profiles').update({ subscription_status: 'free' }).eq('id', user.id);
-      if (updErr) throw updErr;
-    }
-
-    try {
-      await supabaseAdmin.rpc('ensure_free_daily_cycle', {
-        p_user_id: user.id,
-        p_allowance: creditManager.PLAN_ALLOWANCES.free,
-        p_cycle_days: creditManager.FREE_PLAN_CYCLE_DAYS,
-      });
-    } catch (e) {
-      console.warn('[select-free-plan] ensure_free_daily_cycle failed:', e.message);
-    }
-
-    const credits = await creditManager.getCreditStatus(user.id);
-    res.json({ ok: true, plan: 'free', credits });
-  } catch (err) {
-    console.error('[select-free-plan] error:', err.message);
-    res.status(500).json({ error: 'Could not switch to the Free plan. Please try again.' });
-  }
+// ── POST /api/select-free-plan: retired ──
+// OrivenAI is paid-only; there is no free plan to choose any more.
+app.post('/api/select-free-plan', (req, res) => {
+  res.status(410).json({ error: 'There is no free plan. Choose one of the plans to start.', code: 'FREE_PLAN_RETIRED' });
 });
 
 // â”€â”€ GET /api/get-subscription â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
@@ -2420,12 +2262,12 @@ app.get('/api/get-subscription', async (req, res) => {
   try {
     const { data, error } = await supabaseAdmin
       .from('profiles')
-      .select('subscription_status, pending_plan, pending_plan_date, stripe_subscription_id, stripe_customer_id')
+      .select('subscription_status, pending_plan, pending_plan_date, stripe_subscription_id, stripe_customer_id, access_expires_at, access_plan')
       .eq('id', user.id)
       .maybeSingle();
 
     if (error) return res.status(500).json({ error: error.message });
-    if (!data) return res.json({ subscription_status: 'free', pending_plan: null, pending_plan_date: null, billing: 'none' });
+    if (!data) return res.json({ subscription_status: 'free', pending_plan: null, pending_plan_date: null, billing: 'none', has_access: false, access_expires_at: null, access_plan: null, purchases: [], grants: [] });
 
     const out = {
       subscription_status: data.subscription_status || 'free',
@@ -2433,17 +2275,25 @@ app.get('/api/get-subscription', async (req, res) => {
       pending_plan_date:   data.pending_plan_date   || null,
       // 'stripe' = billed through a Stripe subscription; 'none' = no Stripe
       // subscription on record (Free, or a manually granted plan).
-      billing:             data.stripe_subscription_id ? 'stripe' : 'none',
+      billing:             pricing.LEGACY_PLANS.includes(data.subscription_status) && data.stripe_subscription_id ? 'stripe' : (data.subscription_status === 'paid' ? 'purchase' : 'none'),
       current_period_end:  null,
       cancel_at_period_end: false,
+      // Access periods (one-time purchases, renewed manually)
+      has_access:          pricing.hasAccess(data),
+      access_expires_at:   data.access_expires_at || null,
+      access_plan:         data.access_plan || null,
+      purchases:           [],
+      grants:              [],
     };
+    try { const h = await purchases.historyFor(user.id); out.purchases = h.purchases; out.grants = h.grants; }
+    catch (e) { console.warn('[GetSubscription] purchase history unavailable:', e.message); }
 
     // Stripe is the source of truth for the billing period and for whether a
     // cancellation is scheduled (it may also have been scheduled or undone in
     // the Customer Portal). Resolved from this user's own profile row only;
     // Stripe ids are never returned to the client. Fail-soft: if Stripe is
     // unreachable the DB values above are returned unchanged.
-    if (data.stripe_subscription_id && PAID_PLANS.includes(out.subscription_status)) {
+    if (data.stripe_subscription_id && pricing.LEGACY_PLANS.includes(out.subscription_status)) {
       try {
         const sub = await stripe.subscriptions.retrieve(data.stripe_subscription_id);
         if (!data.stripe_customer_id || sub.customer === data.stripe_customer_id) {
@@ -2501,7 +2351,10 @@ app.post('/api/schedule-plan-change', requireSubscription, async (req, res) => {
   const { plan } = req.body;
   if (!plan) return res.status(400).json({ error: 'plan is required' });
 
-  const validPlans = ['free', 'starter', 'creator', 'professional'];
+  // Legacy monthly subscriptions can only be cancelled now (plan 'free' = end
+  // at the period end). New access is bought as a period (create-checkout-session).
+  if (pricing.LEGACY_PLANS.includes(plan)) return res.status(410).json({ error: 'Plan changes are no longer offered. Cancel your subscription and choose one of the current plans when it ends.', code: 'PLAN_RETIRED' });
+  const validPlans = ['free'];
   if (!validPlans.includes(plan)) return res.status(400).json({ error: 'Invalid plan' });
 
   const { data: profile, error: profileError } = await supabaseAdmin
@@ -2516,6 +2369,9 @@ app.post('/api/schedule-plan-change', requireSubscription, async (req, res) => {
   const subId = profile && profile.stripe_subscription_id;
 
   if (plan === currentPlan) return res.json({ ok: true, message: 'Already on this plan' });
+  // A period plan was paid once and never renews: there is nothing to cancel,
+  // and its access must run to the end the customer paid for.
+  if (currentPlan === 'paid') return res.status(409).json({ error: 'Your plan doesn’t renew automatically, so there is nothing to cancel. Your access runs until the end of the period you bought.', code: 'NOTHING_TO_CANCEL' });
 
   // Upgrading from free to paid â€” tell client to use checkout
   if (currentPlan === 'free' && plan !== 'free') {
@@ -2924,7 +2780,7 @@ app.post('/api/support/messages', requireEntitlement('prioritySupport'), async (
         from:    process.env.SMTP_FROM || `ORIVEN <${process.env.SMTP_USER}>`,
         to:      'contact@orivenai.com',
         subject: `[Priority Support] New message from ${who}`,
-        text:    `${who} (Professional plan) sent a Priority Support message:\n\n${body}\n\nReply from the support admin page: ${String(FRONTEND_URL).replace(/\/+$/, '')}/admin/support/`,
+        text:    `${who} (paid plan) sent a Priority Support message:\n\n${body}\n\nReply from the support admin page: ${String(FRONTEND_URL).replace(/\/+$/, '')}/admin/support/`,
       }).catch((e) => console.warn('[Support] Notification email failed:', e.message));
     }
     res.json({ ok: true });
@@ -3443,17 +3299,19 @@ app.post('/api/video-ads/generate', requireSubIfAuthed, paidActions.laneGuard('v
     return res.status(503).json({ error: 'Video Ads is not configured â€” set AIML_API_KEY in environment variables.' });
   }
 
+  const _rawDuration = Number(String(length || '5').replace(/[^0-9]/g, '')) || 5;
+  const normDuration = _rawDuration <= 7 ? 5 : 10;
+  // Priced by length: a 10-second video costs the provider twice a 5-second one.
+  const _videoKey = normDuration === 10 ? 'video_generation_10s' : 'video_generation';
   let reservation;
   try {
-    reservation = await creditManager.reserveCredits(user, 'video_generation');
+    reservation = await creditManager.reserveCredits(user, _videoKey);
   } catch (err) {
     if (err instanceof creditManager.InsufficientCreditsError) return res.status(402).json({ error: 'Out of credits', code: 'CREDITS_EXHAUSTED', balance: err.balance });
     console.warn('[VideoAds] Credit reservation error:', err.message);
     return res.status(503).json({ error: 'Could not verify credits right now. Nothing was charged — please try again.', code: 'CREDIT_CHECK_FAILED' });
   }
 
-  const _rawDuration = Number(String(length || '5').replace(/[^0-9]/g, '')) || 5;
-  const normDuration = _rawDuration <= 7 ? 5 : 10;
   const t1 = Math.round(normDuration * 0.33);
   const t2  = Math.round(normDuration * 0.72);
 
@@ -3469,11 +3327,11 @@ app.post('/api/video-ads/generate', requireSubIfAuthed, paidActions.laneGuard('v
       });
       console.log('[VideoAds/image] Generation started:', result.generationId, 'â€” user:', user.id);
       _recordCreativeAsset(user.id, { kind: 'video', title: 'Image-to-video', content: { generationId: result.generationId }, source_route: '/api/video-ads/generate' });
-      if (reservation) creditManager.finalizeCreditLog(reservation, 'video_generation', { provider: 'aiml', success: true, route: req.path }).catch(() => {});
+      if (reservation) creditManager.finalizeCreditLog(reservation, _videoKey, { provider: 'aiml', success: true, route: req.path }).catch(() => {});
       videoJobs.record(result.generationId, user.id); paidActions.awaitAsync(result.generationId); return res.json({ generationId: result.generationId, status: 'queued' });
     } catch (err) {
       console.error('[VideoAds/image] error:', err.message);
-      if (reservation) creditManager.finalizeCreditLog(reservation, 'video_generation', { success: false, error: err.message, route: req.path }).catch(() => {});
+      if (reservation) creditManager.finalizeCreditLog(reservation, _videoKey, { success: false, error: err.message, route: req.path }).catch(() => {});
       return res.status(500).json({ error: err.message });
     }
   }
@@ -3486,11 +3344,11 @@ app.post('/api/video-ads/generate', requireSubIfAuthed, paidActions.laneGuard('v
       const result = await aiml.generateVideo(script.trim(), { duration: normDuration, aspect_ratio: '16:9' });
       console.log('[VideoAds/script] Generation started:', result.generationId, 'â€” user:', user.id);
       _recordCreativeAsset(user.id, { kind: 'video', title: script.trim().slice(0, 80), content: { generationId: result.generationId, script: script.trim() }, source_route: '/api/video-ads/generate' });
-      if (reservation) creditManager.finalizeCreditLog(reservation, 'video_generation', { provider: 'aiml', success: true, route: req.path }).catch(() => {});
+      if (reservation) creditManager.finalizeCreditLog(reservation, _videoKey, { provider: 'aiml', success: true, route: req.path }).catch(() => {});
       videoJobs.record(result.generationId, user.id); paidActions.awaitAsync(result.generationId); return res.json({ generationId: result.generationId, status: 'queued' });
     } catch (err) {
       console.error('[VideoAds/script] error:', err.message);
-      if (reservation) creditManager.finalizeCreditLog(reservation, 'video_generation', { success: false, error: err.message, route: req.path }).catch(() => {});
+      if (reservation) creditManager.finalizeCreditLog(reservation, _videoKey, { success: false, error: err.message, route: req.path }).catch(() => {});
       return res.status(500).json({ error: err.message });
     }
   }
@@ -3550,11 +3408,11 @@ Rules:
     const result = await aiml.generateVideo(vidPrompt, { duration: normDuration, aspect_ratio: '16:9' });
     console.log('[VideoAds/ai] Generation started:', result.generationId, 'â€” user:', user.id);
     _recordCreativeAsset(user.id, { kind: 'video', title: _product.trim().slice(0, 80), content: { generationId: result.generationId, prompt: vidPrompt }, source_route: '/api/video-ads/generate' });
-    if (reservation) creditManager.finalizeCreditLog(reservation, 'video_generation', { provider: 'aiml', success: true, route: req.path }).catch(() => {});
+    if (reservation) creditManager.finalizeCreditLog(reservation, _videoKey, { provider: 'aiml', success: true, route: req.path }).catch(() => {});
     videoJobs.record(result.generationId, user.id); paidActions.awaitAsync(result.generationId); return res.json({ generationId: result.generationId, status: 'queued' });
   } catch (err) {
     console.error('[VideoAds/ai] error:', err.message);
-    if (reservation) creditManager.finalizeCreditLog(reservation, 'video_generation', { success: false, error: err.message, route: req.path }).catch(() => {});
+    if (reservation) creditManager.finalizeCreditLog(reservation, _videoKey, { success: false, error: err.message, route: req.path }).catch(() => {});
     return res.status(500).json({ error: err.message });
   }
 });
@@ -3575,9 +3433,11 @@ app.get('/api/video-ads/status/:generationId', async (req, res) => {
     const result = await aiml.getVideoStatus(req.params.generationId);
     // Final state settles the video charge: failed → refunded (once).
     const settled = (result.status === 'completed' || result.status === 'failed') ? await paidActions.settleAsync(req.params.generationId, result.status === 'completed', user.id) : null;
+    const videoUrl = result.status === 'completed' && result.videoUrl ? await _storedVideoUrl(user.id, req.params.generationId, result.videoUrl) : result.videoUrl;
+    if (result.status === 'completed' && videoUrl) _attachVideoUrl(user.id, req.params.generationId, videoUrl);
     return res.json({
       status:        result.status,
-      videoUrl:      result.status === 'completed' && result.videoUrl ? await _storedVideoUrl(user.id, req.params.generationId, result.videoUrl) : result.videoUrl,
+      videoUrl,
       failureReason: result.failureReason,
       creditsRefunded: !!(settled && settled.refunded),
     });
@@ -3597,9 +3457,12 @@ app.post('/api/motion-graphics/generate', requireSubIfAuthed, paidActions.laneGu
 
   const { style, duration, notes, brandCore, logoUrl, customPrompt } = req.body || {};
 
+  const normDuration = parseInt(duration || '5', 10) <= 7 ? 5 : 10;
+  // Priced by length: a 10-second video costs the provider twice a 5-second one.
+  const _videoKey = normDuration === 10 ? 'video_generation_10s' : 'video_generation';
   let reservation;
   try {
-    reservation = await creditManager.reserveCredits(user, 'video_generation');
+    reservation = await creditManager.reserveCredits(user, _videoKey);
   } catch (err) {
     if (err instanceof creditManager.InsufficientCreditsError) return res.status(402).json({ error: 'Out of credits', code: 'CREDITS_EXHAUSTED', balance: err.balance });
     console.warn('[MotionGraphics] Credit reservation error:', err.message);
@@ -3621,7 +3484,6 @@ app.post('/api/motion-graphics/generate', requireSubIfAuthed, paidActions.laneGu
     custom:     { label: 'Motion Graphic',     motion: 'Branded graphic elements animate with intentional movement and visual rhythm.' },
   };
   const styleInfo    = styleMap[style] || styleMap.custom;
-  const normDuration = parseInt(duration || '5', 10) <= 7 ? 5 : 10;
 
   // Extract only the visual elements from Brand Core (colours + name â€” no brand strategy in video prompts)
   const bc    = brandCore || await _getBrandCore(user.id).catch(() => null) || {};
@@ -3686,11 +3548,11 @@ Strict rules:
       : await aiml.generateVideo(videoPrompt, genOpts);
     console.log('[MotionGraphics] Generation queued:', result.generationId);
     _recordCreativeAsset(user.id, { kind: 'video', title: styleInfo.label, content: { generationId: result.generationId, prompt: videoPrompt }, source_route: '/api/motion-graphics/generate' });
-    if (reservation) creditManager.finalizeCreditLog(reservation, 'video_generation', { provider: 'aiml', success: true, route: req.path }).catch(() => {});
+    if (reservation) creditManager.finalizeCreditLog(reservation, _videoKey, { provider: 'aiml', success: true, route: req.path }).catch(() => {});
     videoJobs.record(result.generationId, user.id); paidActions.awaitAsync(result.generationId); return res.json({ generationId: result.generationId, status: 'queued' });
   } catch (err) {
     console.error('[MotionGraphics] Generation error:', err.message);
-    if (reservation) creditManager.finalizeCreditLog(reservation, 'video_generation', { success: false, error: err.message, route: req.path }).catch(() => {});
+    if (reservation) creditManager.finalizeCreditLog(reservation, _videoKey, { success: false, error: err.message, route: req.path }).catch(() => {});
     return res.status(500).json({ error: err.message || 'Motion graphic generation failed.' });
   }
 });
@@ -3711,6 +3573,9 @@ app.get('/api/motion-graphics/status/:generationId', async (req, res) => {
     const result = await aiml.getVideoStatus(req.params.generationId);
     // Final state settles the video charge: failed → refunded (once).
     const settled = (result.status === 'completed' || result.status === 'failed') ? await paidActions.settleAsync(req.params.generationId, result.status === 'completed', user.id) : null;
+    // The response keeps the provider link (unchanged); the asset record
+    // gets the stored copy, like Video Ads.
+    if (result.status === 'completed' && result.videoUrl) _storedVideoUrl(user.id, req.params.generationId, result.videoUrl).then((u) => _attachVideoUrl(user.id, req.params.generationId, u)).catch(() => {});
     return res.json({
       status:        result.status,
       videoUrl:      result.videoUrl,
@@ -5665,7 +5530,7 @@ async function _runResearchJob(job) {
   const fail = async (code, err) => {
     if (err) console.error('[Research] job failed', JSON.stringify({ id: reportId, code, error: String(err && err.message || err).slice(0, 200) }));
     try { await save({ stage: 'failed', error: { code, message: RESEARCH_FAIL[code] || RESEARCH_FAIL.RESEARCH_FAILED }, failedAt: new Date().toISOString() }, RS_FAILED); } catch (_) {}
-    if (reservation) creditManager.finalizeCreditLog(reservation, 'ai_analysis', { success: false, error: code, route }).catch(() => {});
+    if (reservation) creditManager.finalizeCreditLog(reservation, 'research_report', { success: false, error: code, route }).catch(() => {});
     const pe = aiUsage.lastProviderError();
     const why = 'research_' + code.toLowerCase().replace(/^research_/, '') + (pe ? ':' + pe.category + (pe.status != null ? ':' + pe.status : '') : '');
     await paidActions.settleAsync(jobId, false, user.id, why).catch(() => {});
@@ -5754,7 +5619,7 @@ async function _runResearchJob(job) {
     if (report.title && cur && cur.title === _researchReport.defaultTitle(question)) upd.title = report.title;
     const { data: moved, error: saveErr } = await _researchRows().update(upd).eq('id', reportId).eq('user_id', user.id).eq('kind', 'research').eq('status', RS_RUNNING).select('id');
     if (saveErr || !moved || !moved.length) return fail('RESEARCH_SAVE_FAILED', saveErr || 'row no longer running');
-    if (reservation) creditManager.finalizeCreditLog(reservation, 'ai_analysis', { provider: 'aiml', success: true, route }).catch(() => {});
+    if (reservation) creditManager.finalizeCreditLog(reservation, 'research_report', { provider: 'aiml', success: true, route }).catch(() => {});
     await paidActions.settleAsync(jobId, true, user.id).catch(() => {});
     onboarding.recordFirstValue(user.id, 'research');
   } catch (err) {
@@ -5784,7 +5649,7 @@ app.post('/api/research/query', requireEntitlement('research'), paidActions.lane
   } catch (_) {}
 
   let reservation;
-  try { reservation = await creditManager.reserveCredits(req.user, 'ai_analysis'); }
+  try { reservation = await creditManager.reserveCredits(req.user, 'research_report'); }
   catch (err) {
     if (err instanceof creditManager.InsufficientCreditsError) return res.status(402).json({ error: 'Out of credits', code: 'CREDITS_EXHAUSTED', balance: err.balance });
     const rid = _researchLogFailure('credit_reservation', 'CREDIT_CHECK_FAILED', err, { userId: req.user.id });
@@ -5868,6 +5733,30 @@ app.patch('/api/research/reports/:id', async (req, res) => {
   } catch (err) {
     console.error('[research/report rename]', err.message);
     res.status(500).json({ error: 'Could not rename that research.' });
+  }
+});
+// Research → Insights: what the saved reports contain, collected across
+// them (key conclusions, opportunities, recommended next actions, recurring
+// competitors), each linked to its report. Read-only; no AI call, no credits.
+// Saved insights are the account's own list (preferences.savedInsights).
+app.get('/api/research/insights', async (req, res) => {
+  const user = await _researchUser(req, res); if (!user) return;
+  await _researchWatchdog(user.id);
+  try {
+    const { data, error } = await _researchRows().select('id, title, created_at, status, content')
+      .eq('user_id', user.id).eq('kind', 'research').eq('archived', false).order('created_at', { ascending: false }).limit(50);
+    if (error) throw error;
+    const rows = data || [];
+    const ready = rows.filter((r) => _researchState(r.status) === 'ready');
+    let saved = [];
+    try {
+      const { data: p } = await supabaseAdmin.from('profiles').select('preferences').eq('id', user.id).maybeSingle();
+      saved = Array.isArray(p && p.preferences && p.preferences.savedInsights) ? p.preferences.savedInsights.filter((x) => typeof x === 'string').slice(0, 200) : [];
+    } catch (_) { /* no preferences */ }
+    res.json(Object.assign({ reports: rows.map(_researchReportSummary), saved }, _researchReport.insightsFrom(ready)));
+  } catch (err) {
+    console.error('[research/insights]', err.message);
+    res.status(500).json({ error: 'Could not load your insights.' });
   }
 });
 // Removing a report archives it (recoverable), never deletes. A running
@@ -7045,7 +6934,7 @@ app.post('/api/ai/chat', requireSubIfAuthed, paidActions.laneGuard('chat'), asyn
   const chatEntitled = !!(req.user && planEntitlements.hasEntitlement(req.subscriptionStatus, 'orivenChat'));
   const chatMode = _resolveChatMode(req.body, chatEntitled, req.subscriptionStatus);
   if (!chatMode) {
-    return res.status(403).json({ error: 'Oriven Chat is available from the Creator plan.', code: 'PLAN_REQUIRED', feature: 'orivenChat', plan: 'creator' });
+    return res.status(403).json({ error: 'Your OrivenAI access isn’t active. Choose a plan to continue.', code: 'SUBSCRIPTION_REQUIRED', feature: 'orivenChat', plan: 'paid' });
   }
   if (!message) return res.status(400).json({ error: 'message is required' });
 
@@ -7250,15 +7139,15 @@ app.post('/api/ai/chat', requireSubIfAuthed, paidActions.laneGuard('chat'), asyn
     }
   }
 
-  // Support / contact — the only facts the assistant may state. Professional
-  // includes Priority Support: an in-app message thread to the OrivenAI team
-  // (Settings → Subscription), stored in support_messages; replies appear in
-  // that thread. No response times or other guarantees exist, so none are
-  // stated.
-  const isProfessional = req.subscriptionStatus === 'professional';
-  const supportSection = `\n\nSUPPORT AND CONTACT: The official OrivenAI contact address is contact@orivenai.com — for support, billing, subscription, account or general questions. When the user asks how to contact OrivenAI, support or billing, give that exact address.${isProfessional
-    ? ' This user is on the Professional plan, which includes Priority Support: they can message the OrivenAI team from Settings → Subscription → Priority Support (replies appear in that thread), or email contact@orivenai.com.'
-    : ' Priority Support (an in-app message thread to the OrivenAI team, in Settings → Subscription) is part of the Professional plan; anyone can email contact@orivenai.com.'} Never promise response times, 24/7 availability, phone support, live chat, a dedicated account manager or any other support guarantee. You cannot send emails or open tickets yourself.`;
+  // Support / contact — the only facts the assistant may state. Every paid
+  // plan includes Priority Support: an in-app message thread to the OrivenAI
+  // team (Settings → Subscription), stored in support_messages; replies
+  // appear in that thread. No response times or other guarantees exist, so
+  // none are stated.
+  const hasPrioritySupport = planEntitlements.hasEntitlement(req.subscriptionStatus, 'prioritySupport');
+  const supportSection = `\n\nSUPPORT AND CONTACT: The official OrivenAI contact address is contact@orivenai.com — for support, billing, subscription, account or general questions. When the user asks how to contact OrivenAI, support or billing, give that exact address.${hasPrioritySupport
+    ? ' This user\'s plan includes Priority Support: they can message the OrivenAI team from Settings → Subscription → Priority Support (replies appear in that thread), or email contact@orivenai.com.'
+    : ' Priority Support (an in-app message thread to the OrivenAI team, in Settings → Subscription) is included in every OrivenAI plan; anyone can email contact@orivenai.com.'} Never promise response times, 24/7 availability, phone support, live chat, a dedicated account manager or any other support guarantee. You cannot send emails or open tickets yourself.`;
 
   // Research follow-ups (Research page, mode:'research-followup') answer from
   // the market map only: no tools are offered and exactly one model call is
@@ -7278,16 +7167,28 @@ Be conversational and natural. Match the energy of the message — brief for cas
 
 You are a senior marketing strategist, not a generic chatbot — assume responsibility, guide rather than react, and never ask for information already given above in this prompt. For analytical questions (score explanations, performance reviews, "why" questions), structure the answer as: the situation, the reason behind it, a concrete recommendation, and the result to expect — without labeling these parts or turning it into a rigid template for short/casual replies. If a claim would need evidence you don't have (sample size, historical performance, real conversion data), say so plainly instead of stating it with false confidence.`;
 
-  const restrictedDecline = 'This assistant only covers ' + (adEditOnly ? 'changes to the ad you have open' : 'this market map') + '. Broader questions are answered by Oriven Chat, available on the Creator and Professional plans.';
+  const restrictedDecline = 'This assistant only covers ' + (adEditOnly ? 'changes to the ad you have open' : 'this market map') + '. Broader questions are answered by Oriven Chat, the assistant included in every OrivenAI plan.';
   const restrictedPrompt = adEditOnly
     ? `You are the ad editor inside ORIVEN Create. The user is editing one ad: "${currentCampaign.campaignName}" (${currentCampaign.platform || 'unknown platform'}). Only make or explain changes to this ad with the tools below. If the user asks for anything else (general marketing advice, other campaigns, performance analysis, strategy, questions about their account or OrivenAI), reply with exactly: "${restrictedDecline}" Never mention that you are powered by any specific AI provider or model.${hasBrand ? `\n\nBRAND CONTEXT (draw on this when relevant):\n${brandSection}` : ''}${toolsSection}`
     : `You answer follow-up questions about one ORIVEN Research market map, using only the map data below.${researchSection}\n\nIf the question is not about this market map, reply with exactly: "${restrictedDecline}" Plain conversational text. Never mention that you are powered by any specific AI provider or model.`;
 
-  const messages = [{ role: 'system', content: chatEntitled ? systemPrompt : restrictedPrompt }];
+  // The assistant the user chose during onboarding (profiles.preferences.
+  // assistant, stored by PUT /api/onboarding/session): the full assistant
+  // speaks in that persona. Server data only; never taken from the request.
+  let assistantSection = '';
+  if (chatEntitled && req.user) {
+    try {
+      const { data: pr } = await supabaseAdmin.from('profiles').select('preferences').eq('id', req.user.id).maybeSingle();
+      const persona = onboardingFlow.ASSISTANTS[pr && pr.preferences && pr.preferences.assistant];
+      if (persona) assistantSection = `\n\nYOUR PERSONA: The user chose ${persona.name} (${persona.role}) as their OrivenAI assistant. Answer as ${persona.name}. Tone: ${persona.tone} ${persona.name} ${persona.voice}. Keep every rule above; the persona changes only your voice and emphasis, never the facts.`;
+    } catch (_) { /* no persona: default voice */ }
+  }
+  const messages = [{ role: 'system', content: chatEntitled ? systemPrompt + assistantSection : restrictedPrompt }];
   if (Array.isArray(history)) {
-    history.slice(-20).forEach(turn => {
+    // Bounded history: every model call resends it (pricing.CHAT_LIMITS).
+    history.slice(-pricing.CHAT_LIMITS.historyTurns).forEach(turn => {
       if (turn && (turn.role === 'user' || turn.role === 'assistant') && turn.content) {
-        messages.push({ role: turn.role, content: String(turn.content).slice(0, 4000) });
+        messages.push({ role: turn.role, content: String(turn.content).slice(0, pricing.CHAT_LIMITS.historyTurnChars) });
       }
     });
   }
@@ -7312,7 +7213,12 @@ You are a senior marketing strategist, not a generic chatbot — assume responsi
   try {
     // Hard ceiling on model calls for ONE chat message: 5 for the assistant
     // (each tool step = 1 call), 1 for a research follow-up.
-    const MAX_TOOL_STEPS = researchFollowup ? 1 : adEditOnly ? 3 : 5;
+    // One message = at most CHAT_LIMITS.maxModelCalls model calls. The first is
+    // the message price (ai_chat); each further call (to read a tool result) is
+    // charged ai_chat_step before it is made, so a long tool loop never runs on
+    // one message's price. All of it is refunded if the message fails
+    // (paidActions settles every reservation of the request).
+    const MAX_TOOL_STEPS = Math.min(researchFollowup ? 1 : adEditOnly ? 3 : 5, pricing.CHAT_LIMITS.maxModelCalls);
     let reply = null;
     let pendingAction = null;
     // Ad Editing Workspace — the last non-confirmation tool that actually
@@ -7325,7 +7231,14 @@ You are a senior marketing strategist, not a generic chatbot — assume responsi
     let creditsExhausted = false;
 
     for (let step = 0; step < MAX_TOOL_STEPS; step++) {
-      const raw = await _aimlChat(messages, { max_tokens: 1200 });
+      if (step > 0 && req.user) {
+        try { await creditManager.reserveCredits(req.user, 'ai_chat_step'); }
+        catch (err) {
+          if (err instanceof creditManager.InsufficientCreditsError) { reply = 'You’re out of credits for this follow-up step. Buy more access to continue.'; creditsExhausted = true; break; }
+          throw err;
+        }
+      }
+      const raw = await _aimlChat(messages, { max_tokens: pricing.CHAT_LIMITS.maxTokens });
       const intent = _parseToolIntent(raw);
 
       if (!intent) { reply = raw; break; }
@@ -7514,7 +7427,9 @@ const _automations = require('./routes/automationRoutes')(app, {
   apiUrl: () => (process.env.PUBLIC_API_URL || 'https://oriven-backand-clean.onrender.com').replace(/\/$/, ''),
   killSwitch: _automationsKilled,
   backgroundJobs: () => BACKGROUND_JOBS_ENABLED,
-  planOf: async (userId) => { const { data } = await supabaseAdmin.from('profiles').select('subscription_status').eq('id', userId).maybeSingle(); return (data && data.subscription_status) || 'free'; },
+  // Time-based: an account whose access period ended is 'free' here, so its
+  // rules and schedules stop (services/pricing.js hasAccess).
+  planOf: async (userId) => { const { data } = await supabaseAdmin.from('profiles').select('subscription_status, access_expires_at').eq('id', userId).maybeSingle(); return pricing.hasAccess(data) ? data.subscription_status : 'free'; },
   log: (m) => console.warn(m),
   // Switching a Meta / TikTok / Pinterest campaign on goes through the same
   // activation as Launch (services/campaignActivation.js).
@@ -10629,7 +10544,7 @@ app.post('/api/meta/analyze', async (req, res) => {
     // the 1/day check and then unconditionally fail on insufficient
     // credits -- "1 Intelligence use/day" would be advertised but never
     // actually usable.
-    reservation = await creditManager.reserveCredits(user, 'ai_analysis', { charge: _intelPlan !== 'free' });
+    reservation = await creditManager.reserveCredits(user, 'ai_analysis') /* always charged: there is no free tier (needs active access) */;
     // Explicit "Analyze with AI" click -- always bypasses the shared cache.
     const dr = resolveDateRange(req.body && req.body.date_range, req.body && req.body.date_since, req.body && req.body.date_until);
     const result = await getOrRefreshAnalysis(user, 'meta', dr.key, { forceRefresh: true });
@@ -13774,7 +13689,7 @@ app.post('/api/ads/analyze', async (req, res) => {
     // see the matching comment in /api/meta/analyze for why it must not
     // also be charged the 25-credit ai_analysis cost (more than Free's
     // entire daily balance).
-    reservation = await creditManager.reserveCredits(user, 'ai_analysis', { charge: _intelPlan !== 'free' });
+    reservation = await creditManager.reserveCredits(user, 'ai_analysis') /* always charged: there is no free tier (needs active access) */;
     // Explicit "Analyze with AI" click -- always bypasses the shared cache.
     const dr = resolveDateRange(req.body && req.body.date_range, req.body && req.body.date_since, req.body && req.body.date_until);
     const result = await getOrRefreshAnalysis(user, 'google', dr.key, { forceRefresh: true });
@@ -14412,7 +14327,7 @@ function _logCampaignEvent(user, opts) {
 }
 
 // GET /api/notifications — the in-app notification center (the bell):
-// Creator and Professional (planEntitlements 'notifications'), enforced here,
+// every paid plan with current access (planEntitlements 'notifications'), enforced here,
 // not just by hiding the bell. Returns exactly what the panel shows: the
 // last 7 days of undismissed events (high-severity ones separately) and the
 // pending automation approvals. The read/dismiss routes below carry the same
@@ -15016,11 +14931,30 @@ app.get('/api/onboarding/state', async (req, res) => {
     const user = await getUserFromToken(req);
     if (!user) return res.status(401).json({ error: 'Authentication required' });
     const state = await onboarding.getState(user.id, user.created_at);
-    const fa = await firstAd.status(user.id); // { available, reason } — off unless FREE_FIRST_AD_ENABLED
+    const fa = { available: false, reason: 'retired' }; // the free first ad is retired (paid-only product)
     // used: the free image was claimed by a successful image (or both
     // attempts failed). Server data only — the browser can't reset either.
     state.freeFirstAd = { available: !!fa.available, used: fa.reason === 'used' || fa.reason === 'attempts_used' };
     state.stage = onboarding.stage(state, fa);
+    // The guided onboarding (questionnaire → plan → paywall) replaces the
+    // welcome tour for eligible accounts once its table exists.
+    state.flow = { enabled: false };
+    if (state.eligible && process.env.ONBOARDING_FLOW_DISABLED !== 'true' && await onboardingFlow.available()) {
+      const row = await onboardingFlow.getRow(user.id);
+      // An account that already has paid access and never started the guided
+      // onboarding (e.g. bought from the pricing page) is a customer: it goes
+      // straight into the app. One that started it continues (its plan unlocks).
+      let paid = false;
+      if (!row) {
+        const { data: acc } = await supabaseAdmin.from('profiles').select('subscription_status, access_expires_at').eq('id', user.id).maybeSingle();
+        paid = pricing.hasAccess(acc);
+      }
+      if (!paid) {
+        const view = onboardingFlow.publicView(row);
+        if (view) view.checkoutPending = !!(await _pendingCheckout(user.id));
+        state.flow = { enabled: true, session: view };
+      }
+    }
     res.json(state);
   } catch (err) {
     console.error('[onboarding/state GET]', err.message);
@@ -15048,6 +14982,214 @@ app.put('/api/onboarding/goal', async (req, res) => {
     console.error('[onboarding/goal PUT]', err.message);
     res.status(500).json({ error: 'Could not save that right now. Please try again.' });
   }
+});
+
+// ── Guided onboarding: questionnaire, website reading, marketing plan ──
+// services/onboardingFlow.js. No route here reserves or spends credits; the
+// two AI calls (website reading, plan) run on the fast model through
+// _aimlText, so the spend guard's global and per-user caps apply. The plan
+// itself is only returned by GET /api/onboarding/plan, and only while the
+// account has paid access (checked against profiles on every request).
+const onboardingFlow = require('./services/onboardingFlow');
+onboardingFlow.init({
+  db: supabaseAdmin,
+  aiText: (task, system, user, opts) => _aimlText(task, system, user, opts),
+  fetchUrl: (url, opts) => _urlContextFetcher.fetchUrlContext(url, opts),
+  validateUrl: (url) => _urlContextFetcher.validateUrlSyntax(url),
+  // Plan generation runs as a job for the account (it can start from the
+  // Stripe webhook, outside a signed-in request); spend caps still apply.
+  runAs: (userId, fn) => aiUsage.withContext({ operation: 'onboarding-plan', userId: String(userId) }, fn),
+  // First unlock after payment: onboarding is complete, and the business
+  // profile gets the onboarding answers in any field that's still empty.
+  onComplete: async (userId, row) => {
+    await onboarding.complete(userId, null);
+    onboarding.recordEvent({ name: 'onboarding_completed', userId, props: { source: 'guided_flow' } });
+    const b = (row.answers || {}).business || {};
+    const seed = { company_name: b.name, website: b.website, industry: b.industry === 'Other' ? b.industryOther : b.industry, description: b.offer };
+    const { data: existing } = await supabaseAdmin.from('business_profile').select('user_id, company_name, website, industry, description').eq('user_id', userId).maybeSingle();
+    const fill = {};
+    for (const k of Object.keys(seed)) if (seed[k] && !(existing && existing[k])) fill[k] = seed[k];
+    if (!Object.keys(fill).length) return;
+    fill.updated_at = new Date().toISOString();
+    const { error } = existing
+      ? await supabaseAdmin.from('business_profile').update(fill).eq('user_id', userId)
+      : await supabaseAdmin.from('business_profile').insert(Object.assign({ user_id: userId }, fill));
+    if (error) console.warn('[OnboardingFlow] business profile not seeded:', error.code || error.message);
+  },
+});
+
+function _flowError(res, where, err) {
+  if (err instanceof onboardingFlow.FlowError) return res.status(err.status).json({ error: err.message, code: err.code, missing: err.details || undefined });
+  if (err && err.code === 'AI_SPEND_LIMIT') return res.status(503).json({ error: 'OrivenAI is busy right now. Please try again in a few minutes.', code: 'BUSY' });
+  console.error('[onboarding/' + where + ']', err && (err.code || err.message));
+  return res.status(500).json({ error: 'Something went wrong on our side. Your answers are saved — please try again.' });
+}
+// opts.eligibleOnly: the account must still be in onboarding (new since the
+// rollout and not completed: services/onboarding.js eligibility). Everything
+// that writes or calls the AI requires it; reading an unlocked plan does not.
+async function _flowUser(req, res, bucket, limit, opts) {
+  const user = await getUserFromToken(req);
+  if (!user) { res.status(401).json({ error: 'Authentication required', code: 'AUTH_REQUIRED' }); return null; }
+  if (!analytics.allow('obf:' + bucket + ':' + user.id, limit, 60e3)) { res.status(429).json({ error: 'Too many requests. Please wait a moment.', code: 'RATE_LIMITED' }); return null; }
+  if (!(await onboardingFlow.available())) { res.status(503).json({ error: 'Onboarding is not available right now.', code: 'FLOW_UNAVAILABLE' }); return null; }
+  if (opts && opts.eligibleOnly) {
+    let st;
+    try { st = await onboarding.getState(user.id, user.created_at); }
+    catch (err) { _flowError(res, 'eligibility', err); return null; }
+    if (!st.eligible) { res.status(403).json({ error: 'Onboarding is only available for new accounts.', code: 'FLOW_NOT_AVAILABLE' }); return null; }
+  }
+  res.set('Cache-Control', 'no-store');
+  return user;
+}
+
+// The signed-in account's onboarding progress (never the plan).
+app.get('/api/onboarding/session', async (req, res) => {
+  const user = await _flowUser(req, res, 'read', 120, { eligibleOnly: true }); if (!user) return;
+  try { res.json({ session: Object.assign(onboardingFlow.publicView(await onboardingFlow.ensureSession(user.id)), { checkoutPending: !!(await _pendingCheckout(user.id)) }) }); }
+  catch (err) { _flowError(res, 'session GET', err); }
+});
+
+// Autosave: { step?, answers?: { <section>: {...} , suggested?: [...] }, assistant? }.
+app.put('/api/onboarding/session', async (req, res) => {
+  const user = await _flowUser(req, res, 'save', 90, { eligibleOnly: true }); if (!user) return;
+  try {
+    const row = await onboardingFlow.saveProgress(user.id, req.body);
+    // The chosen assistant is also an account preference: Oriven Chat speaks
+    // in its persona from then on (see /api/ai/chat).
+    if (req.body && req.body.assistant) {
+      try {
+        const { data: p } = await supabaseAdmin.from('profiles').select('preferences').eq('id', user.id).maybeSingle();
+        const prefs = Object.assign({}, (p && p.preferences) || {}, { assistant: row.assistant });
+        await supabaseAdmin.from('profiles').update({ preferences: prefs }).eq('id', user.id);
+      } catch (e) { console.warn('[OnboardingFlow] assistant preference not mirrored:', e.message); }
+    }
+    res.json({ session: onboardingFlow.publicView(row) });
+  } catch (err) { _flowError(res, 'session PUT', err); }
+});
+
+// Reads the business's own website once and returns suggestions the user
+// reviews. SSRF-safe fetch (services/urlContextFetcher.js), capped per account.
+app.post('/api/onboarding/website', async (req, res) => {
+  const user = await _flowUser(req, res, 'web', 6, { eligibleOnly: true }); if (!user) return;
+  try {
+    const row = await onboardingFlow.analyzeWebsite(user.id, req.body && req.body.url);
+    res.json({ session: onboardingFlow.publicView(row) });
+  } catch (err) { _flowError(res, 'website POST', err); }
+});
+
+async function _flowAccess(userId) {
+  const { data, error } = await supabaseAdmin.from('profiles').select('subscription_status, access_expires_at, access_plan').eq('id', userId).maybeSingle();
+  if (error) throw error;
+  return data;
+}
+
+// Starts the plan (one AI call, claimed atomically) — only with confirmed
+// paid access, for the purchased period. The first attempt starts by itself
+// after payment (onboardingFlow.getPlan / completeAfterPayment); this route
+// is the customer's "Try again" after a failed attempt (MAX_PLAN_ATTEMPTS in
+// total, no credits). 202 while generating; the client polls GET plan.
+app.post('/api/onboarding/plan', async (req, res) => {
+  const user = await _flowUser(req, res, 'plan', 10); if (!user) return;
+  try {
+    const profile = await _flowAccess(user.id);
+    if (!pricing.hasAccess(profile)) return res.status(402).json({ error: 'Your marketing plan is prepared once your plan is active.', code: 'ACCESS_REQUIRED' });
+    const planId = await onboardingFlow.paidPlanId(user.id, profile);
+    const out = await onboardingFlow.startPlan(user.id, { planId });
+    res.status(out.status === 'ready' ? 200 : 202).json(await onboardingFlow.getPlan(user.id, profile));
+  } catch (err) { _flowError(res, 'plan POST', err); }
+});
+
+// ── Missing marketing plan: recovery for paying customers ──────────
+// Customers who paid before the guided onboarding existed (or paid with
+// answers incomplete) create the plan they're owed — no new purchase, no
+// access time or credits added (services/onboardingFlow.js recoveryState /
+// recover). Paid access is checked on every request.
+//
+// The purchased period: the access plan (flex … annual) or the latest paid
+// purchase; for a legacy Stripe subscription (starter/creator/professional)
+// the billing interval Stripe reports for it. Nothing found → null, and the
+// recovery says so instead of guessing a length.
+const _legacyPeriodCache = new Map(); // userId -> { at, id }
+async function _planPeriodFor(userId, profile) {
+  const id = await onboardingFlow.paidPlanId(userId, profile);
+  if (id) return id;
+  if (!profile || !pricing.LEGACY_PLANS.includes(profile.subscription_status) || !profile.stripe_subscription_id) return null;
+  const hit = _legacyPeriodCache.get(userId);
+  if (hit && Date.now() - hit.at < 10 * 60e3) return hit.id;
+  let period = null;
+  try {
+    const sub = await stripe.subscriptions.retrieve(profile.stripe_subscription_id);
+    const rec = sub && sub.items && sub.items.data && sub.items.data[0] && sub.items.data[0].price && sub.items.data[0].price.recurring;
+    if (rec) {
+      const n = rec.interval_count || 1;
+      if (rec.interval === 'year' && n === 1) period = 'annual';
+      else if (rec.interval === 'month') period = ({ 1: 'monthly', 3: 'quarterly', 6: 'semiannual', 12: 'annual' })[n] || null;
+    }
+  } catch (err) { console.warn('[Recovery] legacy subscription interval unavailable:', err.code || err.message); return null; }
+  _legacyPeriodCache.set(userId, { at: Date.now(), id: period });
+  return period;
+}
+async function _recoveryCtx(userId) {
+  const { data: profile, error } = await supabaseAdmin.from('profiles').select('subscription_status, access_expires_at, access_plan, stripe_subscription_id, preferences').eq('id', userId).maybeSingle();
+  if (error) throw error;
+  let business = null;
+  try {
+    const { data } = await supabaseAdmin.from('business_profile').select('company_name, website, industry, description, country').eq('user_id', userId).maybeSingle();
+    business = data || null;
+  } catch (_) { /* no business profile */ }
+  const planId = pricing.hasAccess(profile) ? await _planPeriodFor(userId, profile) : null;
+  return { profile, business, prefs: (profile && profile.preferences) || {}, planId };
+}
+app.get('/api/onboarding/recovery', async (req, res) => {
+  const user = await _flowUser(req, res, 'recovery', 60); if (!user) return;
+  try { res.json(await onboardingFlow.recoveryState(user.id, await _recoveryCtx(user.id))); }
+  catch (err) { _flowError(res, 'recovery GET', err); }
+});
+app.post('/api/onboarding/recovery', async (req, res) => {
+  const user = await _flowUser(req, res, 'recovery-start', 6); if (!user) return;
+  try {
+    const ctx = await _recoveryCtx(user.id);
+    await onboardingFlow.recover(user.id, ctx, req.body || {});
+    res.status(202).json(await onboardingFlow.getPlan(user.id, ctx.profile));
+  } catch (err) { _flowError(res, 'recovery POST', err); }
+});
+
+// Progress steps from the plan's roadmap (Control Center → Progress), and
+// ticking one off: { stepId, done }. Paid access, like the plan itself.
+app.get('/api/onboarding/progress', async (req, res) => {
+  const user = await _flowUser(req, res, 'progress', 60); if (!user) return;
+  try {
+    if (!pricing.hasAccess(await _flowAccess(user.id))) return res.json({ status: 'locked', locked: true, phases: [], total: 0, completed: 0 });
+    res.json(Object.assign({ locked: false }, await onboardingFlow.getProgress(user.id)));
+  } catch (err) { _flowError(res, 'progress GET', err); }
+});
+app.post('/api/onboarding/progress', async (req, res) => {
+  const user = await _flowUser(req, res, 'progress-set', 120); if (!user) return;
+  try {
+    if (!pricing.hasAccess(await _flowAccess(user.id))) return res.status(402).json({ error: 'Your plan isn’t active.', code: 'ACCESS_REQUIRED' });
+    const b = req.body || {};
+    if (typeof b.stepId !== 'string' || typeof b.done !== 'boolean') return res.status(400).json({ error: 'stepId and done are required.', code: 'INVALID_REQUEST' });
+    res.json(Object.assign({ locked: false }, await onboardingFlow.setStep(user.id, b.stepId, b.done)));
+  } catch (err) { _flowError(res, 'progress POST', err); }
+});
+
+// The plan. Content only with paid access, checked now against profiles —
+// never from the request, a stored client flag or an earlier response.
+app.get('/api/onboarding/plan', async (req, res) => {
+  const user = await _flowUser(req, res, 'planread', 60); if (!user) return;
+  try {
+    const readAccess = () => _flowAccess(user.id);
+    let profile = await readAccess();
+    // No access yet but a checkout was started: ask Stripe (late webhook,
+    // closed browser). Only Stripe's confirmation can change the answer.
+    if (!pricing.hasAccess(profile)) {
+      const synced = await _syncPendingCheckout(user.id);
+      if (synced && (synced.fulfilled || synced.already)) profile = await readAccess();
+    }
+    const out = await onboardingFlow.getPlan(user.id, profile);
+    if (out.locked) out.checkoutPending = !!(await _pendingCheckout(user.id));
+    res.json(out);
+  } catch (err) { _flowError(res, 'plan GET', err); }
 });
 
 // ── POST /api/t — cookieless site page views (marketing site) ─────────
@@ -15148,6 +15290,12 @@ app.post('/api/onboarding/complete', async (req, res) => {
     const body = req.body || {};
     if (body.goal !== undefined && !onboarding.WELCOME_GOALS[body.goal]) {
       return res.status(400).json({ error: 'goal must be one of: ' + Object.keys(onboarding.WELCOME_GOALS).join(', ') });
+    }
+    // In the mandatory onboarding only a confirmed payment completes it
+    // (services/onboardingFlow.js); this older route (the welcome tour) can't
+    // mark an account done and so skip the paywall.
+    if (await _onboardingRequired(user)) {
+      return res.status(403).json({ error: 'Finish setting up your account to continue.', code: 'ONBOARDING_REQUIRED' });
     }
     const result = await onboarding.complete(user.id, body.goal || null);
     onboarding.recordEvent({ name: 'onboarding_completed', userId: user.id, props: body.goal ? { goal: body.goal } : (body.skipped ? { reason: 'skipped' } : undefined) });
@@ -15342,51 +15490,57 @@ app.post('/api/email/preferences/offers-invite/dismiss', async (req, res) => {
 // the existing unverified-account cleanup cron just above
 // (`cron.schedule('0 2 * * *', ...)`), which already deletes real Supabase
 // Auth users the same way.
+// One deletion path for the account page and the unverified-account
+// cleanup: delete_account_data (docs/migrations/2026-11-account-deletion.sql)
+// removes the personal application data and anonymises the profile in ONE
+// transaction, keeping purchases and the credit ledger (bookkeeping); then
+// the auth user is soft-deleted (no sign-in, no cascade into the kept
+// records). Both steps are idempotent, so a failure can simply be retried.
+// Without the migration nothing is deleted (fail closed).
+// A legacy subscriber's Stripe subscription is cancelled FIRST: deleting the
+// account must never leave Stripe billing a person who no longer has one.
+// If Stripe cannot confirm, nothing is deleted (STRIPE_CANCEL_FAILED, retry).
+async function _cancelSubscriptionForDeletion(userId) {
+  const { data: profile, error } = await supabaseAdmin.from('profiles').select('stripe_subscription_id').eq('id', userId).maybeSingle();
+  if (error) { const e = new Error(error.message); e.code = 'DELETION_FAILED'; throw e; }
+  const subId = profile && profile.stripe_subscription_id;
+  if (!subId) return null;
+  try {
+    const sub = await stripe.subscriptions.retrieve(subId);
+    if (['canceled', 'incomplete_expired'].includes(sub.status)) return sub.status;
+    await stripe.subscriptions.cancel(subId);
+    return 'canceled';
+  } catch (err) {
+    // Unknown to this Stripe account: nothing is billing.
+    if (err && (err.code === 'resource_missing' || err.statusCode === 404)) return 'missing';
+    const e = new Error('Stripe subscription could not be cancelled: ' + ((err && err.message) || err)); e.code = 'STRIPE_CANCEL_FAILED'; throw e;
+  }
+}
+
+async function _deleteAccount(userId) {
+  await _cancelSubscriptionForDeletion(userId);
+  const { data, error } = await supabaseAdmin.rpc('delete_account_data', { p_user_id: userId });
+  if (error) {
+    const missing = /delete_account_data|PGRST202|42883/.test((error.code || '') + ' ' + (error.message || ''));
+    const e = new Error(missing ? 'account deletion is not available until the account-deletion migration has run' : error.message);
+    e.code = missing ? 'DELETION_NOT_MIGRATED' : 'DELETION_FAILED';
+    throw e;
+  }
+  const { error: authErr } = await supabaseAdmin.auth.admin.deleteUser(userId, true);
+  if (authErr && !/not.?found/i.test(authErr.message || '')) { const e = new Error(authErr.message); e.code = 'AUTH_DELETE_FAILED'; throw e; }
+  return data;
+}
+
 app.post('/api/account/delete', async (req, res) => {
   const user = await getUserFromToken(req);
   if (!user) return res.status(401).json({ error: 'Authentication required' });
-
   try {
-    // Explicit cleanup of owned application data rather than assuming an
-    // unconfirmed FK cascade from auth.users -- so nothing is left
-    // dangling if the schema doesn't cascade-delete.
-    await supabaseAdmin.from('creative_assets').delete().eq('user_id', user.id);
-    // Priority Support thread and stored weekly reports reference the
-    // profile (support_messages has no cascade, so it would block the
-    // profile delete).
-    await supabaseAdmin.from('support_messages').delete().eq('user_id', user.id);
-    await supabaseAdmin.from('weekly_reports').delete().eq('user_id', user.id);
-    // Disband any team this user owns (their invited seats).
-    await supabaseAdmin.from('team_members').delete().eq('owner_user_id', user.id);
-    // Remove this user's own seat on someone else's team, if any --
-    // leaves that owner's other members untouched.
-    await supabaseAdmin.from('team_members').delete().eq('accepted_user_id', user.id);
-    // credit_transactions is an append-only audit ledger (financial/usage
-    // history) -- deliberately left in place, matching how the cleanup
-    // cron above also only removes the auth user, not historical rows.
-    // The profile goes first (rows referencing it must not block the auth
-    // deletion), but if the auth deletion then fails the account must not be
-    // left signed-in-able without its profile — plan, credits and Stripe ids
-    // would be lost. Keep the row and put it back exactly on failure.
-    const { data: profileSnapshot } = await supabaseAdmin.from('profiles').select('*').eq('id', user.id).maybeSingle();
-    const { error: profileDelErr } = await supabaseAdmin.from('profiles').delete().eq('id', user.id);
-    if (profileDelErr) console.warn('[Account] profiles delete warning (continuing to auth deletion):', profileDelErr.message);
-
-    const { error: authDelErr } = await supabaseAdmin.auth.admin.deleteUser(user.id);
-    if (authDelErr) {
-      if (profileSnapshot && !profileDelErr) {
-        const { error: restoreErr } = await supabaseAdmin.from('profiles').upsert(profileSnapshot, { onConflict: 'id', ignoreDuplicates: true });
-        if (restoreErr) console.error('[Account] PROFILE RESTORE FAILED after auth delete error — manual review needed for', user.id, ':', restoreErr.message);
-        else console.warn('[Account] auth delete failed; profile restored for', user.id);
-      }
-      throw authDelErr;
-    }
-
+    await _deleteAccount(user.id);
     console.log('[Account] Deleted account:', user.id); // id only — no email address in logs
     res.json({ ok: true });
   } catch (err) {
-    console.error('[Account] Delete error:', err.message);
-    res.status(500).json({ error: 'Could not delete your account right now. Please try again or contact support.' });
+    console.error('[Account] Delete error:', err.code || '', err.message);
+    res.status(err.code === 'DELETION_NOT_MIGRATED' ? 503 : 500).json({ error: 'Could not delete your account right now. Please try again or contact support.', code: err.code || 'DELETION_FAILED' });
   }
 });
 
@@ -16429,9 +16583,8 @@ if (String(process.env.UNVERIFIED_ACCOUNT_CLEANUP || '').trim().toLowerCase() ==
     console.log(`[Cron] Deleting ${deletable.length} unverified account(s)...`);
     for (const row of deletable) {
       try {
-        const { error: delErr } = await supabaseAdmin.auth.admin.deleteUser(row.id);
-        if (delErr) console.error('[Cron] Delete failed for', row.id, ':', delErr.message);
-        else        console.log('[Cron] Deleted:', row.id); // id only — no email address in logs
+        await _deleteAccount(row.id);
+        console.log('[Cron] Deleted:', row.id); // id only — no email address in logs
       } catch (e) {
         console.error('[Cron] Exception deleting', row.id, ':', e.message);
       }
@@ -16452,6 +16605,23 @@ _scheduleBackgroundJob('analytics-retention', '30 3 * * *', async () => {
   const cutoff = new Date(Date.now() - 395 * 864e5).toISOString();
   const { error } = await supabaseAdmin.from('site_pageviews').delete().lt('created_at', cutoff);
   if (error && !/site_pageviews|PGRST205|42P01/.test((error.code || '') + (error.message || ''))) console.warn('[Analytics] retention cleanup failed:', error.message);
+});
+
+// Access periods: grant due monthly credit instalments of longer plans, and
+// end access (credits expire with it) when a period is over. Both are
+// atomic, idempotent Postgres functions (docs/migrations/2026-10-access-
+// purchases.sql), safe to run on several instances; spending already
+// refuses an expired account even between runs.
+_scheduleBackgroundJob('access-instalments', '*/10 * * * *', async () => {
+  try { const n = await purchases.grantDueInstalments(); if (n) console.log('[Access] granted', n, 'credit instalment(s)'); }
+  catch (err) { console.error('[Access] instalments failed:', err.message); }
+});
+_scheduleBackgroundJob('access-expiry', '*/10 * * * *', async () => {
+  // Legacy entitlements first: an account they protect is never ended.
+  try { const r = await purchases.refreshLegacyEntitlements(); if (r) console.log('[Access] legacy entitlements refreshed:', r); }
+  catch (err) { console.error('[Access] legacy entitlement refresh failed (expiry skipped this run):', err.message); return; }
+  try { const n = await purchases.expireAccess(); if (n) console.log('[Access] ended access for', n, 'account(s)'); }
+  catch (err) { console.error('[Access] expiry failed:', err.message); }
 });
 
 _scheduleBackgroundJob('credit-cycle-safety-net', '0 3 * * *', async () => {
@@ -16486,6 +16656,9 @@ _scheduleBackgroundJob('credit-cycle-safety-net', '0 3 * * *', async () => {
           credits_cycle_start: oldEnd.toISOString(),
           credits_cycle_end: nextEnd.toISOString(),
           credits_last_reset_source: 'fallback_cron',
+          // a manual legacy grant keeps its access with each renewal, as before
+          access_expires_at: new Date(nextEnd.getTime() + pricing.LEGACY_GRACE_DAYS * 86400000).toISOString(),
+          access_plan: row.subscription_status,
         }).eq('id', row.id);
       }
     } else {
@@ -16726,7 +16899,15 @@ async function _archiveStaleLearnings() {
 // this only assembles the structured shape and asks the AI to narrate the
 // reasoning, never invent the numbers.
 // â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+// Uncharged background AI (recommendation narration, the daily brief) runs
+// only for accounts with active access.
+async function _userHasAccess(userId) {
+  try { const { data } = await supabaseAdmin.from('profiles').select('subscription_status, access_expires_at').eq('id', userId).maybeSingle(); return pricing.hasAccess(data); }
+  catch (_) { return false; }
+}
+
 async function _generateRecommendation({ userId, sourceEventId, platform, campaignName, type, problem, confidence, evidence, riskLevel, toolName, toolParams }) {
+  if (!(await _userHasAccess(userId))) return null;
   try {
     // Dedup: don't re-suggest the same unresolved issue every monitoring
     // cycle â€” one open recommendation per user+campaign+type at a time.
@@ -17179,8 +17360,8 @@ async function _getOrRefreshAnalysis(user, platform, range, opts) {
   // Narrative policy (see _narrativeMaxAgeMs above).
   let aiAllowed = true;
   try {
-    const { data: prof } = await supabaseAdmin.from('profiles').select('subscription_status').eq('id', user.id).maybeSingle();
-    aiAllowed = PAID_PLANS.includes(prof && prof.subscription_status);
+    const { data: prof } = await supabaseAdmin.from('profiles').select('subscription_status, access_expires_at').eq('id', user.id).maybeSingle();
+    aiAllowed = pricing.hasAccess(prof); // no access, no AI narrative (it's uncharged background AI)
   } catch (_) { /* unknown plan: allow, as before */ }
   // narrativeAt is set only when a real AI narrative was generated (null for
   // deterministic-only analyses). Rows written before this field existed are
@@ -17453,6 +17634,7 @@ async function getOrGenerateDailyBriefing(user, browserTimezone) {
     .select('content').eq('user_id', user.id).eq('local_date', localDate).maybeSingle();
   if (cached) return cached.content;
 
+  if (!(await _userHasAccess(user.id))) return null;
   const learnings = await _fetchActiveLearnings(user.id, { limit: 30 });
   if (!learnings.length) return null;
   const learningLines = learnings.slice(0, 10).map(l => `${l.entity_type} "${l.entity_name}": ${l.pattern} (${l.confidence}%)`).join('\n');

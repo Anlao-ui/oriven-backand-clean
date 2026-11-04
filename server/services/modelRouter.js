@@ -103,6 +103,20 @@ const TASKS = {
     label:    'Oriven Chat',
   },
 
+  // ── Onboarding (services/onboardingFlow.js; fast model, no credits) ──
+  'onboarding-website': {
+    provider: 'aiml',
+    type:     'text',
+    model:    MODELS.aiml.text,
+    label:    'Onboarding Website Reading',
+  },
+  'onboarding-plan': {
+    provider: 'aiml',
+    type:     'text',
+    model:    MODELS.aiml.text,
+    label:    'Onboarding Marketing Plan',
+  },
+
   // ── Web / Code ────────────────────────────────────────────────
   'web': {
     provider: 'aiml',
@@ -396,6 +410,8 @@ const TASKS = {
 const FAST_TASKS = [
   'visuals-copy', 'logo-copy', 'product-shoots-copy', 'motion-graphics-copy', 'video-ads-copy', 'email',
   'home-briefing', 'forecast', 'business-insights', 'business-reflection', 'autopilot-recommendation', 'autopilot-brief',
+  // Onboarding runs before payment and costs the user no credits: always cheap.
+  'onboarding-website', 'onboarding-plan',
 ];
 MODELS.aiml.fast = process.env.AI_FAST_MODEL || 'claude-haiku-4-5';
 function _fastEnabled() { return process.env.AI_FAST_MODEL_DISABLED !== 'true'; }

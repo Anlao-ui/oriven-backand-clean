@@ -14,6 +14,7 @@
 //   • The owner dashboard only ever returns aggregates (counts, rates,
 //     breakdowns). No emails, names or ids leave this module.
 const crypto = require('crypto');
+const pricing = require('./pricing');
 
 let _db = null, _stripe = null;
 function init({ db, stripe }) { _db = db; _stripe = stripe; }
@@ -151,7 +152,7 @@ function adminIds() { return String(process.env.ADMIN_USER_IDS || '').split(',')
 function isAdmin(userId) { return !!userId && adminIds().includes(String(userId).toLowerCase()); }
 
 // ── Dashboard aggregation ───────────────────────────────────────────
-const PAID = ['starter', 'creator', 'professional'];
+const PAID = pricing.PAID_STATUSES; // 'paid' (access periods) + legacy subscriptions
 const isMissing = (e) => !!e && /PGRST20[45]|42P01|42703|does not exist|column/i.test((e.code || '') + ' ' + (e.message || ''));
 
 async function _pageAll(build, max) {

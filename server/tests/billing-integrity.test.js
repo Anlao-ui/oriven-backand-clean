@@ -13,6 +13,10 @@
 
 const Module = require('module');
 const path = require('path');
+const PRICING = require('../services/pricing');
+// Test Price IDs for the five plans (this process only) and the matching
+// Stripe prices checkout verifies before it opens (tests/helpers/pgPayments.js).
+const TEST_PRICES = require('./helpers/pgPayments').installTestPrices(PRICING);
 const SERVER_DIR = path.resolve(__dirname, '..');
 const RealStripe = require(path.join(SERVER_DIR, 'node_modules/stripe'));
 const PORT = 5596;
@@ -42,7 +46,8 @@ globalThis.fetch = (url, opts) => {
 // ── Stateful Supabase mock ──
 const TABLES = {};
 const UNIQUE = { stripe_webhook_events: [{ cols: ['id'] }], credit_actions: [{ cols: ['id'] }, { cols: ['user_id', 'idempotency_key'] }] };
-const rows = (t) => (TABLES[t] = TABLES[t] || []);
+const legacyAccess = require('./helpers/legacyAccess'); // mirrors the 2026-10 access migration
+function rows(t) { return (TABLES[t] = TABLES[t] || []); }
 const rpcCalls = [];
 function violates(t, cand, ignore) {
   return (UNIQUE[t] || []).some((u) => rows(t).some((r) => r !== ignore && u.cols.every((c) => r[c] === cand[c])));
@@ -73,6 +78,7 @@ class Q {
   then(a, b) { return this.run().then(a, b); }
   async run() {
     await null;
+    if (this.t === 'profiles') legacyAccess.backfill(rows('profiles'));
     const all = rows(this.t);
     const match = () => all.filter((r) => this.f.every((fn) => fn(r)));
     if (this.op === 'insert' || this.op === 'upsert') {
@@ -94,7 +100,9 @@ const supabaseMock = {
   from: (t) => new Q(t),
   rpc: async (name, args) => {
     rpcCalls.push(name);
+    legacyAccess.backfill(rows('profiles'));
     const p = rows('profiles').find((r) => r.id === (args && args.p_user_id));
+    if (name === 'spend_credits' && p && !legacyAccess.spendAllowed(p)) return { data: [{ ok: false, balance: 0 }], error: null };
     if (name === 'spend_credits' && p) { if (p.credits_balance >= args.p_amount) { p.credits_balance -= args.p_amount; return { data: [{ ok: true, balance: p.credits_balance }], error: null }; } return { data: [{ ok: false, balance: p.credits_balance }], error: null }; }
     if (name === 'refund_credits' && p) { p.credits_balance += args.p_amount; return { data: [{ ok: true, balance: p.credits_balance }], error: null }; }
     return { data: null, error: null };
@@ -121,6 +129,7 @@ class StripeMock {
       create: async (p) => { S.calls.push(['checkout.create', p]); maybeFail('checkout'); return { id: 'cs_' + S.calls.length, url: 'https://checkout.stripe.test/cs' }; },
       retrieve: async (id) => { S.calls.push(['checkout.retrieve', id]); if (!S.sessions[id]) throw stripeErr('No such checkout session', { statusCode: 404 }); return clone(S.sessions[id]); },
     } };
+    this.prices = { retrieve: async (id) => { S.calls.push(['price.retrieve', id]); if (!TEST_PRICES[id]) throw stripeErr('No such price', { statusCode: 404, code: 'resource_missing' }); return clone(TEST_PRICES[id]); } };
     this.billingPortal = { sessions: { create: async (p) => { S.calls.push(['portal.create', p]); return { url: 'https://billing.stripe.test/' + p.customer }; } } };
     this.subscriptions = {
       retrieve: async (id) => { S.calls.push(['sub.retrieve', id]); maybeFail('retrieve'); if (!S.subs[id]) throw stripeErr('No such subscription', { statusCode: 404, code: 'resource_missing' }); return clone(S.subs[id]); },
@@ -204,18 +213,27 @@ const invoice = (sub, reason, extra) => Object.assign({ id: 'in_' + Math.random(
 
   out('\nA/B. Checkout identity');
   reset();
-  r = await call('POST', '/api/create-checkout-session', 'tok_uA', { plan: 'starter', userId: 'uB', userEmail: 'uB@example.invalid' });
+  r = await call('POST', '/api/create-checkout-session', 'tok_uA', { plan: 'monthly', userId: 'uB', userEmail: 'uB@example.invalid' });
   check('A sends userId of B → 403 IDENTITY_MISMATCH, no Checkout created', r.status === 403 && r.body.code === 'IDENTITY_MISMATCH' && stripeCalls('checkout.create').length === 0, r);
-  r = await call('POST', '/api/create-checkout-session', 'tok_uA', { plan: 'starter', userEmail: 'attacker@example.invalid' });
+  r = await call('POST', '/api/create-checkout-session', 'tok_uA', { plan: 'monthly', userEmail: 'attacker@example.invalid' });
   let cp = (stripeCalls('checkout.create')[0] || [])[1] || {};
-  check('A without body userId → session bound to A (client_reference_id, metadata, subscription metadata)', r.status === 200 && cp.client_reference_id === 'uA' && cp.metadata.userId === 'uA' && cp.subscription_data.metadata.userId === 'uA', cp);
+  const purchaseA = rows('purchases').find((x) => x.user_id === 'uA');
+  check('A without body userId → one-time payment bound to A (client_reference_id, metadata, payment metadata)', r.status === 200 && cp.mode === 'payment' && cp.client_reference_id === 'uA' && cp.metadata.userId === 'uA' && cp.payment_intent_data.metadata.userId === 'uA' && !cp.subscription_data, cp);
+  check('…a pending purchase row with the plan terms from services/pricing.js, linked to the session', purchaseA && purchaseA.status === 'pending' && purchaseA.plan_id === 'monthly' && purchaseA.price_incl_vat_cents === PRICING.priceInclVatCents(PRICING.PLANS.monthly) && purchaseA.credits_total === PRICING.PLANS.monthly.credits && purchaseA.stripe_checkout_session_id && cp.metadata.purchaseId === purchaseA.id, purchaseA);
+  const monthlyPrice = TEST_PRICES[PRICING.PLANS.monthly.stripePriceId];
+  check('…charged with Monthly’s own Stripe Price, verified first: €29 incl. VAT (tax_behavior inclusive), EUR, one-time', cp.line_items[0].price === PRICING.PLANS.monthly.stripePriceId && !cp.line_items[0].price_data && monthlyPrice.unit_amount === 2900 && monthlyPrice.currency === 'eur' && monthlyPrice.tax_behavior === 'inclusive' && monthlyPrice.type === 'one_time' && stripeCalls('price.retrieve').length >= 1);
   check('client-supplied email is ignored (verified account email used)', cp.customer_email === 'uA@example.invalid' && !JSON.stringify(cp).includes('attacker'), cp.customer_email);
-  check('Stripe Tax settings unchanged on the session', cp.automatic_tax && cp.automatic_tax.enabled === true && cp.billing_address_collection === 'required' && cp.tax_id_collection.enabled === true && cp.line_items[0].price === PRICE.starter);
+  check('Stripe Tax settings kept on the session (automatic tax, billing address, tax id)', cp.automatic_tax && cp.automatic_tax.enabled === true && cp.billing_address_collection === 'required' && cp.tax_id_collection.enabled === true);
   S.calls.length = 0;
-  r = await call('POST', '/api/create-checkout-session', 'tok_uB', { plan: 'creator' });
-  check('B already has a live subscription → 409 ALREADY_SUBSCRIBED (no second subscription)', r.status === 409 && r.body.code === 'ALREADY_SUBSCRIBED' && stripeCalls('checkout.create').length === 0, r);
-  S.subs.sub_B.status = 'canceled'; S.calls.length = 0;
-  r = await call('POST', '/api/create-checkout-session', 'tok_uB', { plan: 'creator' });
+  r = await call('POST', '/api/create-checkout-session', 'tok_uA', { plan: 'starter' });
+  check('a retired monthly plan → 410 PLAN_RETIRED, no Checkout', r.status === 410 && r.body.code === 'PLAN_RETIRED' && !stripeCalls('checkout.create').length, r);
+  r = await call('POST', '/api/create-checkout-session', 'tok_uA', { plan: 'lifetime' });
+  check('an unknown plan → 400 UNKNOWN_PLAN, no Checkout', r.status === 400 && r.body.code === 'UNKNOWN_PLAN' && !stripeCalls('checkout.create').length, r);
+  S.calls.length = 0;
+  r = await call('POST', '/api/create-checkout-session', 'tok_uB', { plan: 'quarterly' });
+  check('B still has a running monthly subscription → 409 LEGACY_SUBSCRIPTION_ACTIVE (it would renew next to the new access)', r.status === 409 && r.body.code === 'LEGACY_SUBSCRIPTION_ACTIVE' && stripeCalls('checkout.create').length === 0, r);
+  prof('uB').access_expires_at = new Date(Date.now() - DAY).toISOString(); S.calls.length = 0;
+  r = await call('POST', '/api/create-checkout-session', 'tok_uB', { plan: 'quarterly' });
   cp = (stripeCalls('checkout.create')[0] || [])[1] || {};
   check('returning customer (old sub canceled) → reuses THEIR Stripe customer, with customer_update for tax', r.status === 200 && cp.customer === 'cus_B' && cp.customer_update && cp.customer_update.address === 'auto' && !('customer_email' in cp), cp);
 
@@ -247,9 +265,8 @@ const invoice = (sub, reason, extra) => Object.assign({ id: 'in_' + Math.random(
   out('\nE. Plan change: Stripe first, plan + credits only when Stripe establishes them');
   reset();
   r = await call('POST', '/api/schedule-plan-change', 'tok_uB', { plan: 'creator', subscriptionId: 'sub_OTHER', customerId: 'cus_OTHER', userId: 'uA' });
-  const upd = stripeCalls('sched.update')[0];
-  check('B schedules Starter → Creator: Stripe schedule on B\'s own subscription; body ids ignored', r.status === 200 && upd && S.schedules[upd[1]].subscription === 'sub_B' && upd[2].phases[1].items[0].price === PRICE.creator && !JSON.stringify(S.calls).includes('sub_OTHER'), r.body);
-  check('…DB records only a pending change; plan and credits unchanged until period end', prof('uB').subscription_status === 'starter' && prof('uB').pending_plan === 'creator' && prof('uB').credits_balance === 1000, prof('uB'));
+  check('B asks Starter → Creator → 410 PLAN_RETIRED: no Stripe call, plan and credits unchanged', r.status === 410 && r.body.code === 'PLAN_RETIRED' && !S.calls.length && prof('uB').subscription_status === 'starter' && prof('uB').pending_plan === null && prof('uB').credits_balance === 1000, r.body);
+  check('…a period plan can’t be “cancelled” into losing its paid access (nothing renews)', await (async () => { const old = Object.assign({}, prof('uA')); Object.assign(prof('uA'), { subscription_status: 'paid', access_plan: 'monthly', access_expires_at: new Date(Date.now() + 20 * DAY).toISOString() }); const x = await call('POST', '/api/schedule-plan-change', 'tok_uA', { plan: 'free' }); const ok = x.status === 409 && x.body.code === 'NOTHING_TO_CANCEL' && prof('uA').subscription_status === 'paid'; Object.assign(prof('uA'), old); return ok; })());
   // Period end: Stripe moves the subscription to the Creator price and invoices the new period.
   Object.assign(S.subs.sub_B, mkSub('sub_B', 'cus_B', 'creator', 'active', P2, {}));
   prof('uB').credits_balance = 150; // leftover Starter credits at period end
@@ -270,13 +287,12 @@ const invoice = (sub, reason, extra) => Object.assign({ id: 'in_' + Math.random(
   check('out-of-order: invoice paid first → plan Creator + 2500 credits from Stripe state', prof('uB').subscription_status === 'creator' && prof('uB').credits_balance === 2500);
 
   out('\nD. Stripe failures leave OrivenAI state unchanged');
-  for (const [label, op] of [['schedule create', 'sched.create'], ['schedule update', 'sched.update'], ['subscription retrieve', 'retrieve']]) {
+  for (const [label, op] of [['subscription retrieve', 'retrieve']]) {
     reset();
     S.fail[op] = stripeErr('Stripe is down');
-    r = await call('POST', '/api/schedule-plan-change', 'tok_uB', { plan: 'professional' });
+    r = await call('POST', '/api/schedule-plan-change', 'tok_uB', { plan: 'free' });
     const p = prof('uB');
-    check(`Stripe ${label} fails → 502, plan/pending/credits unchanged`, r.status === 502 && p.subscription_status === 'starter' && p.pending_plan === null && p.credits_balance === 1000 && p.credits_cycle_end === iso(P1.end), { status: r.status, p });
-    if (op === 'sched.update') check('…and the schedule it had just created was released again', stripeCalls('sched.release').length === 1);
+    check(`cancel: Stripe ${label} fails → 502, plan/pending/credits unchanged`, r.status === 502 && p.subscription_status === 'starter' && p.pending_plan === null && p.credits_balance === 1000 && p.credits_cycle_end === iso(P1.end), { status: r.status, p });
   }
   reset();
   S.fail.update = stripeErr('Stripe is down');
@@ -284,14 +300,14 @@ const invoice = (sub, reason, extra) => Object.assign({ id: 'in_' + Math.random(
   check('cancel-to-free when Stripe fails → 502, still Starter, nothing pending', r.status === 502 && prof('uB').subscription_status === 'starter' && prof('uB').pending_plan === null);
   reset();
   r = await call('POST', '/api/schedule-plan-change', 'tok_uM', { plan: 'professional' });
-  check('manually granted plan (no Stripe sub) asking for another paid plan → requiresCheckout; no DB change, no credits', r.status === 200 && r.body.requiresCheckout === true && prof('uM').subscription_status === 'creator' && prof('uM').credits_balance === 2500, r.body);
+  check('manually granted plan (no Stripe sub) asking for another monthly plan → 410 PLAN_RETIRED; no DB change, no credits', r.status === 410 && prof('uM').subscription_status === 'creator' && prof('uM').credits_balance === 2500, r.body);
 
   out('\nC/I. Ownership of Stripe objects');
   reset();
   prof('uB').stripe_customer_id = 'cus_B';
   S.subs.sub_B.customer = 'cus_SOMEONE_ELSE';
-  r = await call('POST', '/api/schedule-plan-change', 'tok_uB', { plan: 'creator' });
-  check('profile\'s subscription belongs to another customer → 409 SUBSCRIPTION_MISMATCH, no schedule', r.status === 409 && r.body.code === 'SUBSCRIPTION_MISMATCH' && !stripeCalls('sched.create').length, r);
+  r = await call('POST', '/api/schedule-plan-change', 'tok_uB', { plan: 'free' });
+  check('cancel: profile\'s subscription belongs to another customer → 409 SUBSCRIPTION_MISMATCH, Stripe untouched', r.status === 409 && r.body.code === 'SUBSCRIPTION_MISMATCH' && !stripeCalls('sub.update').length, r);
   r = await call('POST', '/api/cancel-plan-change', 'tok_uB', {});
   check('cancel-plan-change on a mismatched subscription → 409, Stripe untouched', r.status === 409 && !stripeCalls('sub.update').length, r);
   reset();
@@ -402,16 +418,31 @@ const invoice = (sub, reason, extra) => Object.assign({ id: 'in_' + Math.random(
   S.sessions.cs_live_UNPAID00000001 = checkoutSession('uM', S.subs.sub_U, { id: 'cs_live_UNPAID00000001', payment_status: 'unpaid' });
   r = await call('POST', '/api/billing/sync-checkout', 'tok_uM', { session_id: 'cs_live_UNPAID00000001' });
   check('unpaid session → nothing granted (skipped)', r.status === 200 && r.body.skipped === 'payment_unpaid' && prof('uM').subscription_status === 'creator');
-  r = await call('POST', '/api/create-checkout-session', 'tok_uA', { plan: 'starter' });
+  r = await call('POST', '/api/create-checkout-session', 'tok_uA', { plan: 'flex' });
   check('success URL carries the session id placeholder for the sync', stripeCalls('checkout.create').length === 0 || /session_id=\{CHECKOUT_SESSION_ID\}/.test(stripeCalls('checkout.create').slice(-1)[0][1].success_url));
   reset();
-  r = await call('POST', '/api/create-checkout-session', 'tok_uA', { plan: 'creator' });
-  check('checkout started → server-side checkout_started {plan: creator}', r.status === 200 && ev('checkout_started', 'uA').length === 1 && ev('checkout_started', 'uA')[0].props.plan === 'creator' && /session_id=\{CHECKOUT_SESSION_ID\}/.test(stripeCalls('checkout.create')[0][1].success_url), [r.status, rows('events')]);
+  r = await call('POST', '/api/create-checkout-session', 'tok_uA', { plan: 'annual' });
+  check('checkout started → server-side checkout_started {plan: annual}', r.status === 200 && ev('checkout_started', 'uA').length === 1 && ev('checkout_started', 'uA')[0].props.plan === 'annual' && /session_id=\{CHECKOUT_SESSION_ID\}/.test(stripeCalls('checkout.create')[0][1].success_url), [r.status, rows('events')]);
+
+  out('\nPeriod plans: public prices and the account view');
+  r = await call('GET', '/api/pricing');
+  check('GET /api/pricing (no sign-in needed): the five plans and action costs from services/pricing.js, manual renewal', r.status === 200 && r.body.plans.map((p) => p.id).join() === PRICING.PLAN_ORDER.join() && JSON.stringify(r.body.featureCosts) === JSON.stringify(PRICING.FEATURE_COSTS) && r.body.renewal === 'manual' && r.body.vatRate === 0.21, r.body);
+  reset();
+  const until = new Date(Date.now() + 40 * DAY).toISOString();
+  Object.assign(prof('uA'), { subscription_status: 'paid', access_plan: 'quarterly', access_expires_at: until, credits_balance: 1600 });
+  rows('purchases').push({ id: 'pur_1', user_id: 'uA', plan_id: 'quarterly', status: 'paid', price_incl_vat_cents: 7800, currency: 'eur', credits_total: 4800, instalments: 3, access_start: new Date().toISOString(), access_end: until, created_at: new Date().toISOString(), paid_at: new Date().toISOString() });
+  r = await call('GET', '/api/get-subscription', 'tok_uA');
+  check('get-subscription (period plan): has_access, access end, plan, billed by purchase, history — no Stripe ids', r.status === 200 && r.body.has_access === true && r.body.access_expires_at === until && r.body.access_plan === 'quarterly' && r.body.billing === 'purchase' && Array.isArray(r.body.purchases) && r.body.purchases.length === 1 && !JSON.stringify(r.body).includes('cus_') && !/pi_|cs_/.test(JSON.stringify(r.body)), r.body);
+  prof('uA').access_expires_at = new Date(Date.now() - DAY).toISOString();
+  r = await call('GET', '/api/get-subscription', 'tok_uA');
+  check('get-subscription after the end date: has_access false (even before the expiry job ran)', r.status === 200 && r.body.has_access === false, r.body);
+  r = await call('POST', '/api/select-free-plan', 'tok_uA', {});
+  check('POST /api/select-free-plan → 410 FREE_PLAN_RETIRED', r.status === 410 && r.body.code === 'FREE_PLAN_RETIRED');
 
   out('\nPreserved behaviour');
   const cm = require(path.join(SERVER_DIR, 'services/creditManager.js'));
-  check('credit prices: unchanged except Automations = 50 credits once per new automation (was 25 per execution)', JSON.stringify(cm.FEATURE_COSTS) === JSON.stringify({ ai_chat: 5, ai_analysis: 25, campaign_improvement: 10, audience_generation: 10, product_analysis: 10, competitor_analysis: 15, brand_voice: 20, campaign_generation: 25, website_analysis: 30, image_generation: 75, video_generation: 200, automation: 50 }));
-  check('plan allowances unchanged', JSON.stringify(cm.PLAN_ALLOWANCES) === JSON.stringify({ free: 10, starter: 1000, creator: 2500, professional: 4000 }));
+  check('credit prices: creditManager charges exactly services/pricing.js FEATURE_COSTS', JSON.stringify(cm.FEATURE_COSTS) === JSON.stringify(PRICING.FEATURE_COSTS), cm.FEATURE_COSTS);
+  check('no free allowance; legacy allowances kept for running subscriptions', !cm.PLAN_ALLOWANCES.free && JSON.stringify(cm.PLAN_ALLOWANCES) === JSON.stringify(PRICING.LEGACY_ALLOWANCES), cm.PLAN_ALLOWANCES);
   check('no unexpected Stripe API calls', !S.calls.some((c) => c[0] === 'UNEXPECTED'), S.calls.filter((c) => c[0] === 'UNEXPECTED'));
   check('no outbound network requests', blocked.length === 0, blocked);
 

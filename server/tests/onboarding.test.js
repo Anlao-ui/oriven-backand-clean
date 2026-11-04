@@ -20,6 +20,9 @@ for (const k of Object.keys(process.env)) if (/STRIPE|SUPABASE|AIML|OPENAI|ANTHR
 Object.assign(process.env, {
   PORT: String(PORT), STRIPE_SECRET_KEY: 'sk_test_mock_only', STRIPE_WEBHOOK_SECRET: 'whsec_mock_only',
   SUPABASE_URL: 'http://127.0.0.1:1', SUPABASE_SERVICE_ROLE_KEY: 'mock', AIML_API_KEY: 'mock-not-a-key', FRONTEND_URL: 'http://localhost:8899',
+  // The welcome tour tested here is the mode with the guided onboarding switched
+  // off (its documented switch); the guided flow and its gate: onboarding-activation.test.js.
+  ONBOARDING_FLOW_DISABLED: 'true',
 });
 
 const realFetch = globalThis.fetch;

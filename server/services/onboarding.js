@@ -65,6 +65,8 @@ function eligibility(profile, now) {
 
 // Pure: where an eligible account is in the welcome flow, from server data
 // only (never from the browser). freeFirstAd: services/firstAd.js status().
+// Since the paid-only model (2026-10-30) the server always passes
+// { available: false, reason: 'retired' }, so this returns 'welcome' or 'done'.
 //   'done'        — not eligible (completed, or an existing account)
 //   'first_ad'    — chose "Create Your First Ad", the free image is still
 //                   available: the app opens Create, no plan step yet

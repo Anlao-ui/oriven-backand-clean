@@ -60,6 +60,7 @@ const UNIQUE = {
   ],
 };
 const db = { missing: new Set(), rpcCalls: [] };
+const legacyAccess = require('./helpers/legacyAccess'); // mirrors the 2026-10 access migration
 function rows(t) { return (TABLES[t] = TABLES[t] || []); }
 function violates(t, cand, ignore) {
   for (const u of UNIQUE[t] || []) {
@@ -92,6 +93,7 @@ class Q {
   async run() {
     await null;
     if (db.missing.has(this.t)) return { data: null, error: { code: 'PGRST205', message: `Could not find the table 'public.${this.t}' in the schema cache` } };
+    if (this.t === 'profiles') legacyAccess.backfill(rows('profiles'));
     const all = rows(this.t);
     const match = () => all.filter((r) => this.f.every((fn) => fn(r)));
     if (this.op === 'insert' || this.op === 'upsert') {
@@ -119,7 +121,9 @@ const supabaseMock = {
   from: (t) => new Q(t),
   rpc: async (name, args) => {
     db.rpcCalls.push({ name, args });
+    legacyAccess.backfill(rows('profiles'));
     const p = rows('profiles').find((r) => r.id === (args && args.p_user_id));
+    if (name === 'spend_credits' && p && !legacyAccess.spendAllowed(p)) return { data: [{ ok: false, balance: 0 }], error: null };
     if (name === 'spend_credits') {
       if (!p) return { data: [{ ok: false, balance: null }], error: null };
       if (p.credits_balance >= args.p_amount) { p.credits_balance -= args.p_amount; return { data: [{ ok: true, balance: p.credits_balance }], error: null }; }
@@ -206,7 +210,8 @@ const CURRENT_KLING = ['klingai/v2.5-turbo/pro/text-to-video', 'klingai/v2.5-tur
 const RETIRED = ['kling-video/v1.6/pro/text-to-video', 'kling-video/v1/standard/text-to-video'];
 let paidActions, videoJobs, aiml, router;
 const prof = (id) => rows('profiles').find((p) => p.id === id);
-const COST = 200;
+const PRICING = require('../services/pricing');
+const COST = PRICING.FEATURE_COSTS.video_generation; // one 5-second video (a 10-second one is video_generation_10s)
 async function post(tok, body, key) {
   const r = await realFetch(BASE + '/api/generate-ugc-video', { method: 'POST', headers: Object.assign({ 'Content-Type': 'application/json', 'X-Idempotency-Key': key || ('k-' + Math.random().toString(36).slice(2)) }, tok ? { Authorization: 'Bearer ' + tok } : {}), body: JSON.stringify(body) });
   const t = await r.text(); let j = t; try { j = JSON.parse(t); } catch (_) {}
@@ -270,7 +275,7 @@ const status = (id, tok) => call('GET', '/api/ugc-video-status/' + id, tok || 't
   check('stored as video/mp4 with the full bytes', file && file.type === 'video/mp4' && file.size === VIDEO_BYTES.length, file);
   x = await status(id1);
   check('polling again returns the same link without downloading again', x.body.videoUrl === stored && CDN.downloads === 1 && STORE.uploads === 1, { url: x.body.videoUrl, downloads: CDN.downloads });
-  check('success keeps the charge (no refund)', prof('alice').credits_balance === b0 - COST - COST - COST && !x.body.creditsRefunded, prof('alice').credits_balance);
+  check('success keeps the charge (no refund); the 10-second Video Ad cost video_generation_10s', prof('alice').credits_balance === b0 - COST - PRICING.FEATURE_COSTS.video_generation_10s - COST && !x.body.creditsRefunded, prof('alice').credits_balance);
   x = await status(id1, 'tok_bob');
   check('another account: 404, nothing revealed', x.status === 404 && !JSON.stringify(x.body).includes('cdn.example'), x);
 

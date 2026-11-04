@@ -48,28 +48,35 @@ const P = (id, created, extra) => Object.assign({ id, email: id + '@example.inva
   }
   const w = T.render('welcome', { firstName: '<script>x</script>' }, { appUrl: 'https://orivenai.com/app' });
   check('names are HTML-escaped', !/<script>x/.test(w.html) && /&lt;script&gt;/.test(w.html));
-  check('free first ad mentioned only when available', /free/.test(T.render('first_ad_reminder', { freeFirstAd: true }, { appUrl: 'a' }).subject) && !/free/i.test(T.render('first_ad_reminder', { freeFirstAd: false }, { appUrl: 'a' }).html.replace(/Free plan/g, '')));
+  check('no free first ad offered (retired with the free plan)', ['free', 'paid'].every((plan) => { const r = T.render('first_ad_reminder', { plan, freeFirstAd: true }, { appUrl: 'a' }); return !/free/i.test(r.subject + r.html + r.text); }));
 
-  // Plan-aware copy: a paid account never reads Free-plan text.
+  // Plan-aware copy: an account with access reads its own plan's credits.
   const CTX = { appUrl: 'https://orivenai.com/app', unsubscribeUrl: 'https://x/u' };
   for (const plan of ['starter', 'creator', 'professional']) {
-    const r = T.render('first_ad_reminder', { plan, freeFirstAd: true }, CTX);
+    const r = T.render('first_ad_reminder', { plan, hasAccess: true, freeFirstAd: true }, CTX);
     check(`first-ad reminder (${plan}): no Free-plan or free-ad text, shows its own credits`, !/free/i.test(r.html + r.text + r.subject) && r.html.includes(T.PLAN_INTRO[plan].name + ' plan includes') && r.text.includes(T.PLAN_INTRO[plan].credits.toLocaleString('en-US') + ' credits'), r.text);
   }
+  const rq = T.render('first_ad_reminder', { plan: 'paid', period: 'quarterly', hasAccess: true }, CTX);
+  check('first-ad reminder (Quarterly): its credits and period', /Quarterly plan includes 4,800 credits for 3 months/.test(rq.text));
   const rf = T.render('first_ad_reminder', { plan: 'free' }, CTX);
-  check('first-ad reminder (free): one campaign every 24 hours (matches the server gate)', /one campaign every 24 hours/.test(rf.html) && /one campaign every 24 hours/.test(rf.text));
+  check('first-ad reminder (no access): where plans start, no free promise', /Plans start at €17 for 14 days/.test(rf.html) && /Plans start at €17 for 14 days/.test(rf.text) && !/free/i.test(rf.html + rf.text));
+  const rx = T.render('first_ad_reminder', { plan: 'paid', period: 'monthly', hasAccess: false }, CTX);
+  check('first-ad reminder (expired access): no plan credits promised', !/plan includes/.test(rx.text) && /Plans start at/.test(rx.text));
 
   // Plan facts match billing and entitlements.
   const CM = require(H.SERVER_DIR + '/services/creditManager.js');
   const ENT = require(H.SERVER_DIR + '/services/planEntitlements.js').PLAN_ENTITLEMENTS;
-  check('credits match creditManager.PLAN_ALLOWANCES', ['starter', 'creator', 'professional'].every((k) => T.PLAN_INTRO[k].credits === CM.PLAN_ALLOWANCES[k]) && /10 credits a day/.test(T.render('upgrade_education', { action: 'research' }, CTX).html) && CM.PLAN_ALLOWANCES.free === 10);
-  check('prices: Starter €9.95, Creator €19.95, Professional €34.95 (the live pricing in plans.js)', T.PLAN_INTRO.starter.price === '9.95' && T.PLAN_INTRO.creator.price === '19.95' && T.PLAN_INTRO.professional.price === '34.95');
+  const PRICING = require(H.SERVER_DIR + '/services/pricing.js');
+  check('credits match services/pricing.js (periods) and the legacy allowances', ['starter', 'creator', 'professional'].every((k) => T.PLAN_INTRO[k].credits === CM.PLAN_ALLOWANCES[k] && T.PLAN_INTRO[k].credits === PRICING.LEGACY_ALLOWANCES[k]) && PRICING.PLAN_ORDER.every((id) => T.PLAN_INTRO[id].credits === PRICING.PLANS[id].credits) && !CM.PLAN_ALLOWANCES.free);
+  check('prices come from services/pricing.js (€17, €29, €78, €143, €245)', PRICING.PLAN_ORDER.map((id) => T.PLAN_INTRO[id].price).join() === '€17,€29,€78,€143,€245' && ['starter', 'creator', 'professional'].every((k) => !T.PLAN_INTRO[k].price));
   const po = (k) => T.render('paid_onboarding', { plan: k }, CTX).html;
-  check('Oriven Chat only promised where the plan has it', ['starter', 'creator', 'professional'].every((k) => /Oriven Chat/.test(po(k)) === ENT[k].orivenChat));
-  check('Priority Support only promised on Professional', ['starter', 'creator', 'professional'].every((k) => /Priority Support/.test(po(k)) === ENT[k].prioritySupport));
+  check('same features on every paid plan: Oriven Chat promised on all, and every paid plan has it', ['paid', 'starter', 'creator', 'professional'].every((k) => /Oriven Chat/.test(po(k)) && ENT[k].orivenChat));
+  check('Priority Support promised exactly where the entitlement exists', ['paid', 'starter', 'creator', 'professional'].every((k) => /Priority Support/.test(po(k)) === ENT[k].prioritySupport));
   check('Automations (formerly Autopilot) named, no leftover Autopilot copy, no AI or platform promises', ['starter', 'creator', 'professional'].every((k) => /Automations/.test(po(k)) && !/Autopilot/.test(po(k)) && !/AI[^<]*Automations|Automations[^<]*AI/.test(po(k))));
-  const ue = T.render('upgrade_education', { action: 'research', plan: 'starter' }, CTX);
-  check('upgrade email: €9.95/month and 1,000 credits, English number format', /€9\.95/.test(ue.html) && /1,000 credits/.test(ue.html) && !/1\.000/.test(ue.html + ue.text));
+  const ue = T.render('upgrade_education', { action: 'research' }, CTX);
+  check('plans email: all five plans, prices incl. VAT, English number format, no auto-renewal', ['Flex: €17 for 14 days, 1,050 credits', 'Annual: €245 for 12 months, 15,000 credits'].every((t) => ue.html.includes(t)) && /include VAT/.test(ue.html) && /Nothing renews automatically/.test(ue.html) && !/1\.000|Starter|Free/.test(ue.html + ue.text));
+  const pq = T.render('paid_onboarding', { plan: 'paid', period: 'semiannual', accessExpiresAt: '2027-04-30T10:00:00Z' }, CTX);
+  check('paid onboarding (Semi-Annual): credits, access end, no auto-renewal, no "cancel" wording', /Welcome to Semi-Annual/.test(pq.html) && /8,850 credits for 6 months/.test(pq.text) && /until 30 April 2027/.test(pq.text) && /doesn’t renew automatically/.test(pq.text) && !/cancel/i.test(pq.text));
   const all = Object.keys(T.TEMPLATES).map((k) => T.render(k, { firstName: 'Sam', plan: 'starter', kind: 'create', action: 'research', verifyUrl: 'https://orivenai.com/app?verify_token=abc' }, Object.assign({ postalAddress: 'OrivenAI B.V. · Street 1, Town' }, CTX)));
   check('every email: mobile layout, preheader, postal address in HTML and text', all.every((o) => /max-width:620px/.test(o.html) && /display:none;max-height:0/.test(o.html) && o.html.includes('Street 1, Town') && o.text.includes('Street 1, Town')));
   check('marketing plain-text versions carry the unsubscribe link too', all.filter((o) => o.category === 'marketing').every((o) => o.text.includes('Unsubscribe: https://x/u')));
@@ -87,7 +94,8 @@ const P = (id, created, extra) => Object.assign({ id, email: id + '@example.inva
     P(uid(5), ago(10), { marketing_opt_in: true, first_value_at: ago(1), first_value_kind: 'research' }), // first success
     P(uid(6), ago(40), { marketing_opt_in: true, first_value_at: ago(35) }),          // inactive
     P(uid(7), ago(20), { marketing_opt_in: true, first_value_at: ago(15) }),          // upgrade education
-    P(uid(8), ago(20), { subscription_status: 'creator' }),                           // paid onboarding (service, no consent needed)
+    P(uid(8), ago(20), { subscription_status: 'creator', access_expires_at: ago(-10) }), // paid onboarding (service, no consent needed)
+    P(uid(11), ago(20), { subscription_status: 'creator', access_expires_at: ago(1) }),   // legacy access ended → no onboarding
     P(uid(9), '2026-05-01T00:00:00Z', { marketing_opt_in: true }),                    // historical → nothing
     P(uid(10), ago(3), { marketing_opt_in: true, email: null }),                      // missing address
   );
@@ -106,6 +114,7 @@ const P = (id, created, extra) => Object.assign({ id, email: id + '@example.inva
   check('upgrade education → 3 Research paywalls in 14 days', byUser[uid(7)] === 'upgrade_education');
   check('paid onboarding → Creator (service, sent without marketing consent)', byUser[uid(8)] === 'paid_onboarding');
   check('historical account → nothing', !byUser[uid(9)]);
+  check('access ended → no paid onboarding', !byUser[uid(11)]);
   check('missing email address → nothing', !byUser[uid(10)]);
   check('six emails, each to its own account, live subjects (no [TEST])', resend.sent.length === 6 && resend.sent.every((m) => /@example\.invalid$/.test(m.to) && !/^\[TEST\]/.test(m.subject)), resend.sent.map((m) => m.to));
   check('live idempotency keys carry the live scope', resend.sent.every((m) => /^oriven:live:/.test(m.key)));

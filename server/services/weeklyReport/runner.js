@@ -31,6 +31,7 @@ const period = require('./period');
 const metrics = require('./metrics');
 const insights = require('./insights');
 const planEntitlements = require('../planEntitlements');
+const pricing = require('../pricing');
 
 const MAX_ATTEMPTS = 3;
 const RETRY_AFTER_MS = 10 * 60e3;
@@ -67,7 +68,8 @@ function createRunner({ db, sender, templates, lifecycle, collect, aiCall, appUr
   }
 
   async function candidates(limit) {
-    let q = db.from('profiles').select('id, email, first_name, subscription_status, timezone, preferences').eq('subscription_status', 'professional');
+    // Every paying customer with current access (one product, same features).
+    let q = db.from('profiles').select('id, email, first_name, subscription_status, access_expires_at, timezone, preferences').in('subscription_status', pricing.PAID_STATUSES);
     if (sender.mode() === 'test') {
       const allow = Array.from(sender.testAllowlist());
       if (!allow.length) return [];
@@ -75,7 +77,7 @@ function createRunner({ db, sender, templates, lifecycle, collect, aiCall, appUr
     }
     const { data, error } = await q.order('id', { ascending: true }).limit(limit);
     if (error) throw error;
-    return (data || []).filter((u) => planEntitlements.hasEntitlement(u.subscription_status, 'weeklyReport'));
+    return (data || []).filter((u) => pricing.hasAccess(u) && planEntitlements.hasEntitlement(u.subscription_status, 'weeklyReport'));
   }
 
   const langOf = (u) => { const l = u.preferences && u.preferences.language; return LANGS.includes(l) ? l : 'en'; };

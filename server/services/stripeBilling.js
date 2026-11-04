@@ -29,11 +29,15 @@
 //    (stripe_webhook_events, migration 2026-10-stripe-webhook-events.sql).
 
 let _stripe = null, _db = null, _cm = null, _planByPrice = {};
+const LEGACY_PLANS_SET = new Set(['starter', 'creator', 'professional']);
 function init({ stripe, db, creditManager, planByPriceId }) {
   _stripe = stripe; _db = db; _cm = creditManager; _planByPrice = planByPriceId || {};
 }
 
 const ACTIVE = ['active', 'trialing'];
+// Legacy monthly subscriptions only (existing subscribers). New customers buy
+// access periods (services/purchases.js); no new subscriptions are created.
+// An ended subscription also ends access (expire_access then clears credits).
 const PAID = ['starter', 'creator', 'professional'];
 const REVOKE = ['unpaid', 'canceled', 'incomplete_expired'];
 // Statuses during which a user must not open a second subscription.
@@ -115,6 +119,22 @@ async function linkFromMetadata(sub, userIdHint) {
 
 // ── Reconciliation ────────────────────────────────────────────────
 // Applies Stripe's subscription state to the owning profile.
+// ── Legacy entitlements (docs/migrations/2026-10-access-purchases.sql) ──
+// A legacy subscriber's access is kept by an explicit entitlement until
+// Stripe confirms what happened: a confirmed payment verifies it, a
+// subscription Stripe ended ends it, a subscription Stripe doesn't know
+// keeps it for a person to review. Missing function (not migrated yet):
+// nothing to update.
+async function legacyEntitlement(userId, status, reason) {
+  const { data, error } = await _db.rpc('update_legacy_entitlement', { p_user_id: userId, p_status: status, p_ends_at: null, p_reason: reason });
+  if (error) {
+    if (/update_legacy_entitlement|PGRST202|42883/.test((error.code || '') + ' ' + (error.message || ''))) return { skipped: 'not_migrated' };
+    alert('legacy_entitlement_update_failed', { userId, status, error: error.message });
+    return { skipped: 'error' };
+  }
+  return data || {};
+}
+
 // opts.paymentConfirmed: Stripe confirmed a payment for this period →
 // credits may be provisioned for it.
 async function applySubscription(sub, profile, opts) {
@@ -134,11 +154,12 @@ async function applySubscription(sub, profile, opts) {
 
   if (REVOKE.includes(status)) {
     if (before !== 'free') {
-      const { error } = await _db.from('profiles').update({ subscription_status: 'free', pending_plan: null, pending_plan_date: null })
+      const { error } = await _db.from('profiles').update({ subscription_status: 'free', pending_plan: null, pending_plan_date: null, access_expires_at: new Date().toISOString() })
         .eq('id', profile.id).eq('stripe_subscription_id', sub.id);
       if (error) throw error;
       out.plan = 'free'; out.changed = true;
     }
+    if (LEGACY_PLANS_SET.has(before)) out.legacy = await legacyEntitlement(profile.id, 'ended', 'Stripe subscription ' + sub.id + ' is ' + status);
     return out;
   }
   if (!ACTIVE.includes(status)) return out; // past_due keeps the current plan; incomplete grants nothing
@@ -155,6 +176,7 @@ async function applySubscription(sub, profile, opts) {
     const period = periodOf(sub);
     if (!period) { alert('no_period_for_credit_grant', { sub: sub.id }); return out; }
     out.credits = await _cm.provisionCreditsForCycle(profile.id, plan, period.startISO, period.endISO, opts.source || 'stripe', { previousPlan: before });
+    if (LEGACY_PLANS_SET.has(plan)) out.legacy = await legacyEntitlement(profile.id, 'active', 'verified with Stripe: subscription ' + sub.id + ' ' + status + ', payment confirmed (' + (opts.source || 'stripe') + ')');
   }
   return out;
 }
@@ -240,10 +262,11 @@ async function onSubscriptionUpdated(subEvt) {
 async function onSubscriptionDeleted(subEvt) {
   const profile = await profileBySubscription(subEvt.id);
   if (!profile) return { skipped: 'unlinked_subscription' }; // e.g. an old, already-replaced subscription
-  const { error } = await _db.from('profiles').update({ subscription_status: 'free', pending_plan: null, pending_plan_date: null })
+  const { error } = await _db.from('profiles').update({ subscription_status: 'free', pending_plan: null, pending_plan_date: null, access_expires_at: new Date().toISOString() })
     .eq('id', profile.id).eq('stripe_subscription_id', subEvt.id);
   if (error) throw error;
-  return { userId: profile.id, before: profile.subscription_status || 'free', plan: 'free', changed: profile.subscription_status !== 'free' };
+  const legacy = LEGACY_PLANS_SET.has(profile.subscription_status) ? await legacyEntitlement(profile.id, 'ended', 'Stripe subscription ' + subEvt.id + ' deleted') : undefined;
+  return { userId: profile.id, before: profile.subscription_status || 'free', plan: 'free', changed: profile.subscription_status !== 'free', legacy };
 }
 
 // invoice.payment_failed: no entitlement change (Stripe retries and then
@@ -284,7 +307,17 @@ function scheduledCancelIso(sub) {
 // cycle has ended: only refill when Stripe says the subscription is active
 // and has moved into a later, paid period. Never refills past_due/unpaid.
 async function reconcileOverdue(profile) {
-  const sub = await _stripe.subscriptions.retrieve(profile.stripe_subscription_id, { expand: ['latest_invoice'] });
+  let sub;
+  try { sub = await _stripe.subscriptions.retrieve(profile.stripe_subscription_id, { expand: ['latest_invoice'] }); }
+  catch (err) {
+    // Stripe doesn't know this subscription: not proof the customer stopped
+    // paying — keep access, flag it for a person (never revoke on this alone).
+    if (err && (err.code === 'resource_missing' || err.statusCode === 404)) {
+      alert('legacy_subscription_not_found', { userId: profile.id });
+      return { skipped: 'subscription_not_found', legacy: await legacyEntitlement(profile.id, 'needs_review', 'Stripe has no subscription ' + profile.stripe_subscription_id + '; check by hand') };
+    }
+    throw err;
+  }
   if (profile.stripe_customer_id && sub.customer !== profile.stripe_customer_id) {
     alert('reconcile_customer_mismatch', { userId: profile.id });
     return { skipped: 'customer_mismatch' };
@@ -301,7 +334,7 @@ async function reconcileOverdue(profile) {
 
 module.exports = {
   init, ACTIVE, LIVE, REVOKE, planOf, periodOf, priceIdOf, scheduledCancelIso,
-  profileBySubscription, applySubscription, claimEvent, finishEvent,
+  profileBySubscription, applySubscription, claimEvent, finishEvent, legacyEntitlement,
   onCheckoutCompleted, onSubscriptionUpdated, onSubscriptionDeleted, onInvoicePaid, onInvoicePaymentFailed, reconcileOverdue,
   _resetForTests: () => { _eventsTable = 'unknown'; },
 };

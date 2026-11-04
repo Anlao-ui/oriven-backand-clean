@@ -47,7 +47,8 @@ globalThis.fetch = (url, opts) => {
 
 // ── Stateful Supabase mock ──
 const TABLES = {};
-const rows = (t) => (TABLES[t] = TABLES[t] || []);
+const legacyAccess = require('./helpers/legacyAccess'); // mirrors the 2026-10 access migration
+function rows(t) { return (TABLES[t] = TABLES[t] || []); }
 const UNIQUE = { credit_actions: [['id'], ['user_id', 'idempotency_key']], platform_analysis_cache: [['user_id', 'platform', 'date_range']] };
 class Q {
   constructor(t) { this.t = t; this.op = 'select'; this.f = []; this.wantRows = false; this.lim = null; this.p = null; this.onConflict = null; }
@@ -69,6 +70,7 @@ class Q {
   then(a, b) { return this.run().then(a, b); }
   async run() {
     await null;
+    if (this.t === 'profiles') legacyAccess.backfill(rows('profiles'));
     const all = rows(this.t);
     const match = () => all.filter((r) => this.f.every((fn) => fn(r)));
     if (this.op === 'insert' || this.op === 'upsert') {
@@ -94,7 +96,9 @@ const supabaseMock = {
   from: (t) => new Q(t),
   rpc: async (name, args) => {
     rpcCalls.push(name);
+    legacyAccess.backfill(rows('profiles'));
     const p = rows('profiles').find((r) => r.id === (args && args.p_user_id));
+    if (name === 'spend_credits' && p && !legacyAccess.spendAllowed(p)) return { data: [{ ok: false, balance: 0 }], error: null };
     if (name === 'spend_credits' && p) { if (p.credits_balance >= args.p_amount) { p.credits_balance -= args.p_amount; return { data: [{ ok: true, balance: p.credits_balance }], error: null }; } return { data: [{ ok: false, balance: p.credits_balance }], error: null }; }
     if (name === 'refund_credits' && p) { p.credits_balance += args.p_amount; return { data: [{ ok: true, balance: p.credits_balance }], error: null }; }
     return { data: null, error: null };
@@ -181,7 +185,7 @@ async function waitIdle() { let n = -1; for (let i = 0; i < 60; i++) { await sle
   seed();
   r = await call('POST', '/api/generate-ad', 'tok_uP', { prompt: 'Autumn bouquet subscription ad' });
   const models = prov.calls.filter((c) => c.kind === 'text').map((c) => c.model).sort();
-  check('normal run: ad copy on Opus, image prompt on the cheap model, 1 image, charged once', r.status === 200 && JSON.stringify(models) === JSON.stringify([HAIKU, OPUS].sort()) && prov.calls.filter((c) => c.kind === 'image').length === 1 && rows('profiles')[0].credits_balance === 4000 - 75, { models, status: r.status });
+  check('normal run: ad copy on Opus, image prompt on the cheap model, 1 image, charged once', r.status === 200 && JSON.stringify(models) === JSON.stringify([HAIKU, OPUS].sort()) && prov.calls.filter((c) => c.kind === 'image').length === 1 && rows('profiles')[0].credits_balance === 4000 - require('../services/pricing').FEATURE_COSTS.image_generation, { models, status: r.status, bal: rows('profiles')[0].credits_balance });
   seed();
   prov.handler = (c) => { if (c.model === HAIKU) throw err('AIML API error (404): model claude-haiku-4-5 not found', { status: 404 }); return defaultHandler(c); };
   var r = await call('POST', '/api/generate-ad', 'tok_uP', { prompt: 'Autumn bouquet subscription ad' });

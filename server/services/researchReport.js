@@ -68,6 +68,24 @@ const TYPES = {
     search: 'unmet customer needs and complaints, gaps in what competitors offer or say, and recent changes in the market',
     sections: ['opportunities', 'signals', 'competitors', 'angles', 'tests', 'risks'],
   },
+  product: {
+    label: 'Product & niche research',
+    goal: 'Understand a product category or niche: what customers in it look for, how it is offered today, who the main players are, where demand shows, and which gaps or risks matter before advertising it.',
+    search: 'the product category or niche, what buyers look for and complain about, the main brands and how they present the product, and signs of demand',
+    sections: ['marketOverview', 'signals', 'competitors', 'opportunities', 'risks'],
+  },
+  advertising: {
+    label: 'Advertising research',
+    goal: 'Understand how this kind of business is advertised: publicly observable ad formats, messages, offers and channels used by comparable brands, and which angles and tests are worth trying. No ad-performance data exists; describe only what is observable.',
+    search: 'how brands in this category advertise publicly: ad formats, messages, offers, landing pages and the channels they use (ad libraries, brand pages, marketing coverage)',
+    sections: ['adPatterns', 'competitors', 'angles', 'tests', 'risks'],
+  },
+  trends: {
+    label: 'Trends research',
+    goal: 'Identify recent trends and developments relevant to this business — in its market, its customers and its advertising — and what each means for its marketing now.',
+    search: 'recent trends and developments in this market and among its customers, with dates where sources give them',
+    sections: ['trends', 'signals', 'opportunities', 'implications', 'risks'],
+  },
 };
 const TYPE_KEYS = Object.keys(TYPES);
 function typeOf(t) { return TYPES[t] ? t : null; }
@@ -85,6 +103,9 @@ function searchQueries(type, question, ctx) {
   if (type === 'competitor') list = [q + where, (comps.length ? comps.join(' vs ') + ' ' : (ind ? ind + ' brands ' : 'competitors ')) + 'positioning pricing' + where, q + ' advertising messaging' + where];
   else if (type === 'audience') list = [q + where, q + ' customer reviews complaints', q + ' why customers buy' + where];
   else if (type === 'opportunity') list = [q + where, q + ' customer complaints unmet needs', (ind || q) + ' competitors comparison gaps' + where];
+  else if (type === 'product') list = [q + where, q + ' reviews what buyers look for', (ind || q) + ' brands comparison' + where];
+  else if (type === 'advertising') list = [q + where, (comps.length ? comps.join(' ') + ' ' : (ind ? ind + ' ' : '')) + 'ads examples messaging' + where, (ind || q) + ' advertising campaign examples' + where];
+  else if (type === 'trends') list = [q + ' trends' + where, (ind || q) + ' latest developments' + where, (ind || q) + ' consumer behaviour changes' + where];
   else list = [q + where, (ind || q) + ' industry trends developments' + where, (ind || q) + ' market challenges customer demand' + where];
   const seen = new Set();
   return list.map((s) => s.replace(/\s+/g, ' ').trim().slice(0, SEARCH_QUERY_MAX)).filter((s) => { const k = s.toLowerCase(); if (!s || seen.has(k)) return false; seen.add(k); return true; }).slice(0, 3);
@@ -162,6 +183,7 @@ const SECTION_SCHEMA = {
   tests: '"tests":[{"id":"x1","hypothesis":"","variantA":"","variantB":"","measure":"what to compare, e.g. cost per lead"}]',
   risks: '"risks":[{"id":"r1","risk":"","mitigation":""}]',
   implications: '"implications":[{"id":"m1","text":"what this means for advertising"}]',
+  nextSteps: '"nextSteps":[{"id":"n1","action":"one concrete next action for this business","why":"which finding it follows from"}]',
 };
 function buildSystemPrompt(o) {
   o = o || {};
@@ -176,7 +198,7 @@ function buildSystemPrompt(o) {
     + (listed.length ? '\n\nOTHER SEARCH RESULTS (not read — titles only, cite them only if the search summaries support the claim):\n' + listed.map((s) => '[' + s.id + '] ' + s.title + ' (' + s.domain + ')').join('\n') : '')
     + (o.searchSummaries && o.searchSummaries.length ? '\n\nSEARCH SUMMARIES (from the web-search model; may contain errors):\n' + o.searchSummaries.map((a, i) => '(' + (i + 1) + ') ' + String(a).slice(0, 1400)).join('\n') : '');
   const schema = '{"title":"short report title (max 8 words)","summary":"2–3 sentences","keyConclusions":[{"text":"","why":"why it matters",' + EV + '}],'
-    + T.sections.map((k) => SECTION_SCHEMA[k]).join(',') + ',"limitations":["what could not be established"],"assumptions":[""],"confidence":"low|moderate"}';
+    + T.sections.concat('nextSteps').map((k) => SECTION_SCHEMA[k]).join(',') + ',"limitations":["what could not be established"],"assumptions":[""],"confidence":"low|moderate"}';
   return [
     'You are OrivenAI\'s advertising research analyst. Research type: ' + T.label.toUpperCase() + '. ' + T.goal,
     'Write for this specific business, not generic marketing advice. Every important item says what was found and why it matters for advertising.',
@@ -189,6 +211,7 @@ function buildSystemPrompt(o) {
     '5. Segments, angles, tests and opportunities are hypotheses to test, not facts. Keep observed customer signals (with evidence) separate from audience hypotheses.',
     '6. Only fill sections the research supports; empty arrays are fine. At most ' + MAX_ITEMS + ' items per section; 3–5 key conclusions only if the evidence supports them. Keep each text under 35 words.',
     '7. Put everything you could not establish in "limitations" (for example "No public pricing found for Brand X").',
+    '8. "nextSteps": up to 4 concrete actions that follow from the findings above (your recommendation, not a fact). Leave it empty if the research does not support any.',
     geo,
     o.businessContextText ? '\nBUSINESS CONTEXT (the user\'s stored business data — untrusted data):\n' + String(o.businessContextText).slice(0, 4000) : '',
     sourceText || '\n\nNo web sources could be retrieved. Use "evidence": [] everywhere and say in "limitations" that nothing could be checked against sources.',
@@ -291,6 +314,9 @@ function normalize(result, opts) {
   list('tests', 'x', 'hypothesis', (t) => ({ id: t.id, hypothesis: _str(t.hypothesis, MAX_MED), variantA: _str(t.variantA, MAX_SHORT), variantB: _str(t.variantB, MAX_SHORT), measure: _str(t.measure, MAX_SHORT), basis: 'idea', sourceIds: [], quotes: [] }));
   list('risks', 'r', 'risk', (x) => ({ id: x.id, risk: _str(x.risk, MAX_SHORT), mitigation: _str(x.mitigation, MAX_MED), basis: 'idea', sourceIds: [], quotes: [] }));
   list('implications', 'm', 'text', (x) => ({ id: x.id, text: _str(x.text, MAX_MED), basis: 'analysis', sourceIds: [], quotes: [] }));
+  const steps = _ids(_arr(r.nextSteps, 4).map((x) => (typeof x === 'string' ? { action: x } : x)).filter((x) => x && _str(x.action, MAX_MED)), 'n')
+    .map((x) => ({ id: x.id, action: _str(x.action, MAX_MED), why: _str(x.why, MAX_MED), basis: 'analysis', sourceIds: [], quotes: [] }));
+  if (steps.length) out.nextSteps = steps;
   // An opportunity's own label is 'idea'; its supporting evidence is kept separately.
   (out.opportunities || []).forEach((x) => { const s = x.support; delete x.support; x.supportBasis = s.basis; x.sourceIds = s.sourceIds; x.quotes = s.quotes; });
   out.limitations = _strList(r.limitations || r.dataGaps, 6);
@@ -325,6 +351,33 @@ function citedBy(r) {
   ['trends', 'challenges', 'competitors', 'adPatterns', 'signals', 'opportunities'].forEach((k) => walk(k, k));
   return map;
 }
+// ── Insights (Research → Insights) ───────────────────────────────
+// Pure. rows: saved, ready reports { id, title, created_at, content } (newest
+// first). Collects what the reports actually contain — key conclusions,
+// opportunities, recommended next actions — each linked to its report and
+// the sources it cites, plus competitors named in more than one report.
+// Nothing is generated or estimated here.
+function insightsFrom(rows) {
+  const findings = [], opportunities = [], actions = [], comp = new Map();
+  (rows || []).forEach((row) => {
+    const c = row && row.content; if (!c || c.reportVersion !== 2) return;
+    const ref = { reportId: row.id, reportTitle: row.title || c.title || c.question || '', type: c.type || null, createdAt: row.created_at };
+    const byId = {}; (c.sources || []).forEach((x) => { byId[x.id] = x; });
+    const srcs = (x) => ((x && x.sourceIds) || []).map((id) => byId[id]).filter((x) => x && /^https?:\/\//i.test(x.url)).slice(0, 3).map((x) => ({ title: x.title || x.domain, url: x.url, domain: x.domain }));
+    (c.keyConclusions || []).forEach((k, i) => findings.push(Object.assign({ id: row.id + ':k' + (i + 1), text: k.text, why: k.why || null, basis: k.basis, sources: srcs(k) }, ref)));
+    (c.opportunities || []).forEach((o) => opportunities.push(Object.assign({ id: row.id + ':' + o.id, title: o.title, why: o.why || null, angle: o.angle || null, test: o.test || null, audience: o.audience || null, basis: 'idea', supportBasis: o.supportBasis || null, sources: srcs(o) }, ref)));
+    (c.nextSteps || []).forEach((n) => actions.push(Object.assign({ id: row.id + ':' + n.id, action: n.action, why: n.why || null, basis: 'analysis' }, ref)));
+    const seen = new Set();
+    (c.competitors || []).forEach((x) => {
+      const key = String(x.name || '').toLowerCase().replace(/[^\p{L}\p{N}]+/gu, ' ').trim(); if (!key || seen.has(key)) return; seen.add(key);
+      const e = comp.get(key) || { name: x.name, website: x.website || null, reports: [] };
+      e.reports.push({ reportId: row.id, reportTitle: ref.reportTitle }); comp.set(key, e);
+    });
+  });
+  const recurring = Array.from(comp.values()).filter((e) => e.reports.length > 1).sort((a, b) => b.reports.length - a.reports.length).slice(0, 12);
+  return { findings, opportunities, actions, recurringCompetitors: recurring };
+}
+
 function validateQuestion(q) {
   const s = typeof q === 'string' ? q.trim() : '';
   if (!s) return { ok: false, code: 'QUESTION_REQUIRED', error: 'Describe what you want to research.' };
@@ -337,5 +390,5 @@ function defaultTitle(question) { const s = _str(question, 200) || ''; return s.
 module.exports = {
   TYPES, TYPE_KEYS, typeOf, MAX_ITEMS, MAX_FETCH, QUESTION_MAX,
   searchQueries, searchInstructions, selectSources, extractPassages, buildSystemPrompt,
-  parseModelJson, checkEvidence, normalize, isUsable, counts, citedBy, validateQuestion, defaultTitle, canon: _canon,
+  parseModelJson, checkEvidence, normalize, isUsable, counts, citedBy, validateQuestion, defaultTitle, insightsFrom, canon: _canon,
 };

@@ -12,6 +12,7 @@
 // ════════════════════════════════════════════════════════════════
 const Module = require('module');
 const path = require('path');
+const FC = require('../services/pricing').FEATURE_COSTS; // the one pricing source
 const SERVER_DIR = path.resolve(__dirname, '..');
 const PORT = 5596;
 const BASE = `http://127.0.0.1:${PORT}`;
@@ -51,6 +52,7 @@ const UNIQUE = {
   ],
 };
 const db = { missing: new Set(), rpcCalls: [] };
+const legacyAccess = require('./helpers/legacyAccess'); // mirrors the 2026-10 access migration
 function rows(t) { return (TABLES[t] = TABLES[t] || []); }
 function violates(t, cand, ignore) {
   for (const u of UNIQUE[t] || []) {
@@ -82,6 +84,7 @@ class Q {
   async run() {
     await null;
     if (db.missing.has(this.t)) return { data: null, error: { code: 'PGRST205', message: `Could not find the table 'public.${this.t}' in the schema cache` } };
+    if (this.t === 'profiles') legacyAccess.backfill(rows('profiles'));
     const all = rows(this.t);
     const match = () => all.filter((r) => this.f.every((fn) => fn(r)));
     if (this.op === 'insert' || this.op === 'upsert') {
@@ -111,7 +114,9 @@ const supabaseMock = {
   from: (t) => new Q(t),
   rpc: async (name, args) => {
     db.rpcCalls.push({ name, args });
+    legacyAccess.backfill(rows('profiles'));
     const p = rows('profiles').find((r) => r.id === (args && args.p_user_id));
+    if (name === 'spend_credits' && p && !legacyAccess.spendAllowed(p)) return { data: [{ ok: false, balance: 0 }], error: null };
     if (name === 'spend_credits' && db.rpcFail) return { data: null, error: { message: 'rpc unavailable (test)' } };
     if (name === 'spend_credits') {
       if (!p) return { data: [{ ok: false, balance: null }], error: null };
@@ -449,22 +454,22 @@ const DAY = 86400e3;
   check('invalid automation → 422 with a clear error, nothing charged', r.status === 422 && bal('u1') === 1000 && !rows('automation_rules').length, r.body);
   const idem = key();
   r = await create(R(), 'tok1', idem);
-  check('valid automation → created, 50 credits charged once', r.status === 200 && r.body.charged === 50 && bal('u1') === 950 && rows('automation_rules').length === 1, { s: r.status, b: r.body, bal: bal('u1') });
+  check('valid automation → created, FEATURE_COSTS.automation charged once', r.status === 200 && r.body.charged === FC.automation && bal('u1') === 1000 - FC.automation && rows('automation_rules').length === 1, { s: r.status, b: r.body, bal: bal('u1') });
   const r2 = await create(R(), 'tok1', idem);
-  check('same request again (double click / retry, same key) → 409, no second charge, no second automation', r2.status === 409 && bal('u1') === 950 && rows('automation_rules').length === 1, r2.status);
+  check('same request again (double click / retry, same key) → 409, no second charge, no second automation', r2.status === 409 && bal('u1') === 1000 - FC.automation && rows('automation_rules').length === 1, r2.status);
   const id1 = r.body.automation.id;
   r = await api('PATCH', '/api/automations/' + id1, R({ name: 'Renamed', condition: { metric: 'spend', operator: '>', value: 120 } }));
-  check('editing is free', r.status === 200 && bal('u1') === 950 && r.body.automation.name === 'Renamed', { s: r.status, b: r.body, bal: bal('u1') });
+  check('editing is free', r.status === 200 && bal('u1') === 1000 - FC.automation && r.body.automation.name === 'Renamed', { s: r.status, b: r.body, bal: bal('u1') });
   await api('POST', '/api/automations/' + id1 + '/pause'); await api('POST', '/api/automations/' + id1 + '/resume');
-  check('pausing and resuming are free', bal('u1') === 950 && rows('automation_rules')[0].enabled === true);
+  check('pausing and resuming are free', bal('u1') === 1000 - FC.automation && rows('automation_rules')[0].enabled === true);
   await runRules(); OFFSET = 2 * DAY; await runRules();
-  check('background checks and actions are free (two runs, campaigns changed, balance unchanged)', bal('u1') === 950 && W('meta').length >= 1, { bal: bal('u1'), writes: W('meta').length });
+  check('background checks and actions are free (two runs, campaigns changed, balance unchanged)', bal('u1') === 1000 - FC.automation && W('meta').length >= 1, { bal: bal('u1'), writes: W('meta').length });
   OFFSET = 0;
   r = await api('DELETE', '/api/automations/' + id1);
-  check('deleting keeps the charge (no refund) and keeps its history', r.status === 200 && bal('u1') === 950 && rows('automation_rules')[0].deleted_at && execs().length >= 1, { s: r.status, bal: bal('u1'), ex: execs().length, del: rows('automation_rules')[0].deleted_at });
-  world(30);
+  check('deleting keeps the charge (no refund) and keeps its history', r.status === 200 && bal('u1') === 1000 - FC.automation && rows('automation_rules')[0].deleted_at && execs().length >= 1, { s: r.status, bal: bal('u1'), ex: execs().length, del: rows('automation_rules')[0].deleted_at });
+  world(FC.automation - 1);
   r = await create(R());
-  check('not enough credits → 402, nothing created', r.status === 402 && r.body.code === 'CREDITS_EXHAUSTED' && !rows('automation_rules').length && bal('u1') === 30, r.body);
+  check('not enough credits → 402, nothing created', r.status === 402 && r.body.code === 'CREDITS_EXHAUSTED' && !rows('automation_rules').length && bal('u1') === FC.automation - 1, r.body);
   world(); db.rpcFail = true;
   r = await create(R());
   db.rpcFail = false;
@@ -472,7 +477,7 @@ const DAY = 86400e3;
   world(); db.failInsert = 'automation_rules';
   r = await create(R());
   db.failInsert = null;
-  check('saving fails after the charge → error and the 50 credits are refunded', r.status >= 500 && !rows('automation_rules').length && bal('u1') === 1000, { s: r.status, bal: bal('u1') });
+  check('saving fails after the charge → error and the credits are refunded', r.status >= 500 && !rows('automation_rules').length && bal('u1') === 1000, { s: r.status, bal: bal('u1') });
   world();
   rows('automation_rules').push({ id: 'legacy-1', user_id: 'u1', name: 'Old rule', trigger_metric: 'spend', trigger_operator: '>', trigger_value: 100, platform: 'meta', action_type: 'notify', action_params: { mode: 'require_approval' }, enabled: true, created_at: new Date().toISOString() });
   r = await api('GET', '/api/automations');
@@ -481,7 +486,7 @@ const DAY = 86400e3;
   check('…the legacy notify rule runs for free (notification, no charge)', notes().length >= 1 && bal('u1') === 1000);
   r = await call('POST', '/api/autopilot/rules', 'tok1', { name: 'x' });
   check('old Autopilot create endpoint is retired (410) — no way around the charge/limits', r.status === 410 && r.body.code === 'MOVED_TO_AUTOMATIONS');
-  check('credit price table: automation = 50 (no per-execution Autopilot charge left)', creditManager.FEATURE_COSTS.automation === 50 && creditManager.FEATURE_COSTS.autopilot === undefined);
+  check('credit price table: automation = FEATURE_COSTS.automation (no per-execution Autopilot charge left)', creditManager.FEATURE_COSTS.automation === FC.automation && creditManager.FEATURE_COSTS.autopilot === undefined);
 
   say('\nC. Rules — missing data, targeting, all matches, no duplicates');
   world();
@@ -668,7 +673,7 @@ const DAY = 86400e3;
   r = await create({ name: 'Pause Friday', kind: 'schedule', platform: 'meta', scope: { type: 'campaigns', campaign_ids: ['222'] }, schedule: { timezone: tz, items: [{ key: 'p', action: 'pause', type: 'once', at: local }] } });
   const job = rows('automation_jobs')[0];
   const expUtc = AS.zonedToUtc(AS.parseLocal(local), tz).utc;
-  check('schedule created (50 credits) and its job stored with the exact UTC time of 10:00 Amsterdam', r.status === 200 && bal('u1') === 950 && job && new Date(job.run_at).getTime() === expUtc && job.local_time === local && job.timezone === tz, { s: r.status, job });
+  check('schedule created (FEATURE_COSTS.automation) and its job stored with the exact UTC time of 10:00 Amsterdam', r.status === 200 && bal('u1') === 1000 - FC.automation && job && new Date(job.run_at).getTime() === expUtc && job.local_time === local && job.timezone === tz, { s: r.status, job });
   await E().runDueJobs();
   check('before the time → nothing runs', !FAKE.writes.length && rows('automation_jobs')[0].status === 'scheduled');
   OFFSET = expUtc - _realNow() + 30e3;
@@ -676,7 +681,7 @@ const DAY = 86400e3;
   check('at the time (two scheduler instances at once) → paused exactly once', W('meta').filter((w) => w.id === '222').length === 1 && rows('automation_jobs')[0].status === 'completed', { w: W('meta'), j: rows('automation_jobs')[0].status });
   await E().runDueJobs();
   check('…and never again', W('meta').length === 1);
-  check('a scheduled run costs nothing', bal('u1') === 950);
+  check('a scheduled run costs nothing', bal('u1') === 1000 - FC.automation);
   OFFSET = 0;
   world();
   r = await create({ name: 'Late', kind: 'schedule', platform: 'meta', scope: { type: 'campaigns', campaign_ids: ['222'] }, schedule: { timezone: tz, items: [{ key: 'p', action: 'pause', type: 'once', at: local }] } });
@@ -702,7 +707,7 @@ const DAY = 86400e3;
   check('…not retried before the backoff', !W('meta').length);
   OFFSET += 3 * 60e3;
   await E().runDueJobs();
-  check('…retried after the backoff → paused once, job completed, still no charge', W('meta').length === 1 && rows('automation_jobs')[0].status === 'completed' && bal('u1') === 950, rows('automation_jobs')[0]);
+  check('…retried after the backoff → paused once, job completed, still no charge', W('meta').length === 1 && rows('automation_jobs')[0].status === 'completed' && bal('u1') === 1000 - FC.automation, rows('automation_jobs')[0]);
   OFFSET = 0;
   world();
   r = await create({ name: 'Business hours', kind: 'schedule', platform: 'meta', scope: { type: 'campaigns', campaign_ids: ['222'] }, schedule: { timezone: tz, items: [{ key: 'on', action: 'activate', type: 'weekly', days: [1, 2, 3, 4, 5], time: '09:00' }, { key: 'off', action: 'pause', type: 'weekly', days: [1, 2, 3, 4, 5], time: '18:00' }] } });
@@ -778,12 +783,13 @@ const DAY = 86400e3;
   check('no session → 401', r.status === 401);
   rows('profiles')[0].subscription_status = 'free';
   r = await api('GET', '/api/automations');
-  check('Free plan → 403 (Automations from Starter, unchanged entitlement)', r.status === 403);
+  check('no paid plan (free) → 403', r.status === 403);
   world();
-  rows('profiles')[0].subscription_status = 'starter';
-  for (let i = 0; i < 5; i++) await create(R({ name: 'N' + i, mode: 'notify' }));
-  r = await create(R({ name: 'sixth', mode: 'notify' }));
-  check('Starter: 5 active automations; the 6th is refused BEFORE charging', r.status === 403 && r.body.code === 'PLAN_LIMIT' && bal('u1') === 750, { s: r.status, bal: bal('u1') });
+  Object.assign(rows('profiles')[0], { subscription_status: 'paid', access_plan: 'monthly', access_expires_at: new Date(Date.now() + 20 * 864e5).toISOString() });
+  const PAID_LIMIT = require(path.join(SERVER_DIR, 'services', 'automations', 'limits.js')).forPlan('paid').active;
+  for (let i = 0; i < PAID_LIMIT; i++) await create(R({ name: 'N' + i, mode: 'notify' }));
+  r = await create(R({ name: 'one too many', mode: 'notify' }));
+  check('paid plan: ' + PAID_LIMIT + ' active automations; the next is refused BEFORE charging', PAID_LIMIT === 25 && r.status === 403 && r.body.code === 'PLAN_LIMIT' && bal('u1') === 1000 - PAID_LIMIT * FC.automation, { s: r.status, bal: bal('u1') });
   const leak = JSON.stringify(rows('automation_executions')) + JSON.stringify(rows('automation_notifications'));
   check('no access tokens in activity or notifications', !/tok-meta|"m"|access_token/.test(leak));
   {

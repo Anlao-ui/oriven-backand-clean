@@ -5,6 +5,7 @@
 const Module = require('module');
 const path = require('path');
 const SERVER_DIR = path.resolve(__dirname, '..', '..');
+const legacyAccess = require('./legacyAccess');
 
 function boot({ port, env }) {
   for (const k of Object.keys(process.env)) if (/STRIPE|SUPABASE|AIML|OPENAI|ANTHROPIC|SMTP|GOOGLE|META|TIKTOK|PINTEREST|RENDER|ENABLE_BACKGROUND|ONBOARDING|EMAIL|RESEND|FREE_FIRST_AD|SIGNUP_LIMIT|UNVERIFIED/.test(k)) delete process.env[k];
@@ -24,8 +25,12 @@ function boot({ port, env }) {
   };
 
   // ── stateful Supabase ──
-  const TABLES = {}, MISSING = {}, UNIQUE = { email_sends: [['user_id', 'dedupe_key']], email_suppressions: [['email_hash']], free_first_ad_claims: [['user_id']], weekly_reports: [['user_id', 'week_start', 'scope']] };
+  const TABLES = {}, MISSING = {}, UNIQUE = { email_sends: [['user_id', 'dedupe_key']], email_suppressions: [['email_hash']], free_first_ad_claims: [['user_id']], weekly_reports: [['user_id', 'week_start', 'scope']], onboarding_sessions: [['user_id']], stripe_webhook_events: [['id']] };
   const rows = (t) => (TABLES[t] = TABLES[t] || []);
+  // Behaves like production after the 2026-10 access migration (legacy
+  // backfill + spend_credits needs current paid access): helpers/legacyAccess.js.
+  const backfill = () => legacyAccess.backfill(TABLES.profiles);
+  const hasAccess = legacyAccess.spendAllowed;
   const writes = [];
   const parseOr = (expr) => {
     const parts = expr.split(',').map((p) => { const [c, op, ...v] = p.split('.'); return { c, op, v: v.join('.') }; });
@@ -60,6 +65,7 @@ function boot({ port, env }) {
     }
     async run() {
       await null;
+      if (this.t === 'profiles') backfill();
       const all = rows(this.t);
       const sel = this.cols ? this.cols.split(',').map((s) => s.trim()) : [];
       const wk = this.p ? Object.keys(Array.isArray(this.p) ? this.p[0] : this.p) : [];
@@ -95,9 +101,41 @@ function boot({ port, env }) {
     rpc: async (name, args) => {
       rpcCalls.push(name);
       if (RPC.fail && RPC.fail(name, args)) return { data: null, error: { message: 'rpc unavailable (test)' } };
+      backfill();
       const p = rows('profiles').find((r) => r.id === (args && args.p_user_id));
+      // spend_credits: like the SQL, nothing is spent without current paid access.
+      if (name === 'spend_credits' && p && !hasAccess(p)) return { data: [{ ok: false, balance: 0 }], error: null };
       if (name === 'spend_credits' && p) { if ((p.credits_balance || 0) >= args.p_amount) { p.credits_balance -= args.p_amount; return { data: [{ ok: true, balance: p.credits_balance }], error: null }; } return { data: [{ ok: false, balance: p.credits_balance || 0 }], error: null }; }
+      // delete_account_data (docs/migrations/2026-11-account-deletion.sql), reduced
+      // to what it guarantees: personal data gone, the profile kept as an
+      // anonymised tombstone (the Stripe customer id stays for the kept
+      // purchases; the subscription id goes, so later subscription webhooks
+      // never match it), no credits, no access; a repeat changes nothing.
+      if (name === 'delete_account_data') {
+        if (!p) return { data: { ok: true, profile: 'none' }, error: null };
+        if (p.deleted_at) return { data: { ok: true, already: true }, error: null };
+        const keep = { id: p.id, created_at: p.created_at, stripe_customer_id: p.stripe_customer_id };
+        Object.keys(p).forEach((k) => { delete p[k]; });
+        Object.assign(p, keep, { subscription_status: 'deleted', credits_balance: 0, access_expires_at: null, deleted_at: new Date().toISOString() });
+        return { data: { ok: true, deleted: {} }, error: null };
+      }
       if (name === 'refund_credits' && p) { p.credits_balance += args.p_amount; return { data: [{ ok: true, balance: p.credits_balance }], error: null }; }
+      // fulfill_purchase (docs/migrations/2026-10-access-purchases.sql), reduced
+      // to what it guarantees: one paid purchase → access + the first credit
+      // grant, exactly once; a repeat answers already=true and changes nothing.
+      if (name === 'fulfill_purchase') {
+        const pu = rows('purchases').find((r) => r.id === args.p_purchase_id);
+        if (!pu) return { data: { ok: false, reason: 'unknown_purchase' }, error: null };
+        if (pu.status === 'paid') return { data: { ok: true, already: true, access_end: pu.access_end }, error: null };
+        if (pu.status !== 'pending') return { data: { ok: false, reason: 'status_' + pu.status }, error: null };
+        if (args.p_amount_total !== pu.price_incl_vat_cents) return { data: { ok: false, reason: 'amount_mismatch' }, error: null };
+        const owner = rows('profiles').find((r) => r.id === pu.user_id);
+        const end = new Date(Date.now() + ((pu.duration_days || 0) + (pu.duration_months || 0) * 30) * 864e5).toISOString();
+        const grant = Math.floor(pu.credits_total / (pu.instalments || 1));
+        Object.assign(pu, { status: 'paid', paid_at: new Date().toISOString(), stripe_checkout_session_id: args.p_session_id, stripe_payment_intent_id: args.p_payment_intent, access_end: end });
+        if (owner) Object.assign(owner, { subscription_status: 'paid', access_plan: pu.plan_id, access_expires_at: end, credits_balance: (owner.credits_balance || 0) + grant });
+        return { data: { ok: true, fulfilled: true, access_end: end, credits_granted: grant }, error: null };
+      }
       return { data: null, error: null };
     },
     auth: {
@@ -110,13 +148,20 @@ function boot({ port, env }) {
           AUTH.users.push(user); TOKENS['tok_' + user.id] = user;
           return { data: { user }, error: null };
         },
-        deleteUser: async (id) => { if (AUTH.deleteFail) { const m = AUTH.deleteFail; AUTH.deleteFail = null; return { error: { message: m } }; } AUTH.deleted.push(id); return { error: null }; },
+        deleteUser: async (id, soft) => { if (AUTH.deleteFail) { const m = AUTH.deleteFail; AUTH.deleteFail = null; return { error: { message: m } }; } AUTH.deleted.push(id); if (soft) (AUTH.softDeleted = AUTH.softDeleted || []).push(id); return { error: null }; },
         listUsers: async () => ({ data: { users: AUTH.users }, error: null }),
       },
     },
   };
   const mail = [];
-  class StripeMock { constructor() { return new Proxy({}, { get: (_, p) => new Proxy({}, { get: (__, m) => async () => { throw new Error('unexpected stripe call ' + String(p) + '.' + String(m)); } }) }); } }
+  // Stripe: every call fails ("unexpected stripe call …") unless a test
+  // installs a handler, e.g. STRIPE['checkout.sessions.retrieve'] = async (id) => ({…}).
+  const STRIPE = {};
+  const stripeProxy = (pathArr) => new Proxy(function () {}, {
+    get: (_, k) => (k === 'then' ? undefined : stripeProxy(pathArr.concat(String(k)))),
+    apply: (_, __, args) => { const key = pathArr.join('.'); return STRIPE[key] ? STRIPE[key](...args) : Promise.reject(new Error('unexpected stripe call ' + key)); },
+  });
+  class StripeMock { constructor() { return stripeProxy([]); } }
   const cronJobs = [];
   const _load = Module._load;
   Module._load = function (req) {
@@ -140,7 +185,7 @@ function boot({ port, env }) {
     for (let i = 0; i < 50; i++) { try { await realFetch(BASE + '/api/onboarding/state'); break; } catch (_) { await new Promise((r) => setTimeout(r, 100)); } }
     return quiet;
   }
-  return { SERVER_DIR, TABLES, MISSING, rows, writes, TOKENS, AUTH, rpcCalls, RPC, mail, cronJobs, net, call, start, realFetch, BASE };
+  return { SERVER_DIR, TABLES, MISSING, rows, writes, TOKENS, AUTH, rpcCalls, RPC, STRIPE, mail, cronJobs, net, call, start, realFetch, BASE };
 }
 
 function reporter() {
@@ -148,7 +193,10 @@ function reporter() {
   let pass = 0, fail = 0;
   const log = (s) => out(s + '\n');
   const check = (name, ok, info) => { ok ? pass++ : fail++; log((ok ? '  PASS — ' : '  FAIL — ') + name + (ok || info === undefined ? '' : ' :: ' + JSON.stringify(info).slice(0, 400))); };
-  const done = () => { log(`\n${pass + fail} checks run, ${pass} passed, ${fail} failed.`); process.exit(fail ? 1 : 0); };
+  // Exit on a later turn, not mid-callback: on Windows, process.exit() while a
+  // fetch socket is still closing aborts Node (libuv UV_HANDLE_CLOSING
+  // assertion), which turned passing runs into crashes.
+  const done = () => { log(`\n${pass + fail} checks run, ${pass} passed, ${fail} failed.`); process.exitCode = fail ? 1 : 0; setTimeout(() => process.exit(process.exitCode), 50); };
   return { check, log, done };
 }
 

@@ -1,5 +1,5 @@
 // ════════════════════════════════════════════════════════════════
-// Marketing campaign "Free → Starter" — audience (Free + explicit consent
+// Marketing campaign "no plan → plans" — audience (Free + explicit consent
 // only), exclusions, test mode, approval gates, duplicate prevention,
 // unsubscribe, rendering and the admin API. Resend is mocked; nothing is
 // delivered; Supabase is in-memory.
@@ -13,7 +13,7 @@ const H = boot({ port: 5630, env: {
   EMAIL_POSTAL_ADDRESS: 'OrivenAI · Test Street 1 · Amsterdam',
 } });
 const { check, log, done } = reporter();
-const CID = 'starter-upgrade-2026-10';
+const CID = 'access-plans-2026-11';
 const resend = [];
 H.net.handler = async (url, opts) => {
   if (url !== 'https://api.resend.com/emails') return null;
@@ -41,25 +41,27 @@ H.net.handler = async (url, opts) => {
   );
   await L.suppress('u11@example.invalid', 'hard_bounce');
   H.rows('email_sends').push({ id: 'm12', user_id: uid(12), template: 'inactive', dedupe_key: 'inactive:1', category: 'marketing', status: 'sent', sent_at: new Date(Date.now() - 864e5).toISOString() });
-  H.rows('email_sends').push({ id: 'm13', user_id: uid(13), template: 'campaign_starter_upgrade', dedupe_key: 'campaign:' + CID, category: 'marketing', status: 'sent', sent_at: new Date().toISOString() });
+  H.rows('email_sends').push({ id: 'm13', user_id: uid(13), template: 'campaign_access_plans', dedupe_key: 'campaign:' + CID, category: 'marketing', status: 'sent', sent_at: new Date().toISOString() });
   H.TOKENS.tok_admin = { id: ADMIN, email: 'owner@example.invalid' };
   H.TOKENS.tok_user = { id: uid(1), email: 'u1@example.invalid' };
   const A = (m, p, body) => H.call(m, '/api/admin/campaigns' + p, 'tok_admin', body);
 
   // ── A. The email ───────────────────────────────────────────────
   log('\nA. Email content and rendering');
-  const e = T.render('campaign_starter_upgrade', {}, { appUrl: 'https://orivenai.com/app', unsubscribeUrl: 'https://x/unsub', postalAddress: 'OrivenAI · Street' });
+  const e = T.render('campaign_access_plans', {}, { appUrl: 'https://orivenai.com/app', unsubscribeUrl: 'https://x/unsub', postalAddress: 'OrivenAI · Street' });
   check('subject', e.subject === 'Ready to do more with OrivenAI?');
-  check('preview text', e.html.includes('Unlock the full advertising workflow with Starter.'));
+  check('preview text', e.html.includes('The full advertising workflow, from €17 for 14 days.'));
   check('marketing category (needs consent + unsubscribe)', e.category === 'marketing');
   check('footer names where consent came from (Settings)', e.html.includes('because you turned on marketing emails in your OrivenAI settings'));
-  check('price and credits from the plan facts (€9.95/month, 1,000 credits)', e.html.includes('€9.95/month') && e.html.includes('1,000 credits every month') && T.PLAN_INTRO.starter.price === '9.95' && T.PLAN_INTRO.starter.credits === 1000);
-  check('benefits: full workflow, Research, Create, Launch, Campaigns, Automations', ['full advertising workflow', 'Research, Create, Launch, Campaigns and Automations'].every((s) => e.html.includes(s)));
-  check('the requested copy, in order', ['Hi there,', 'You’ve already taken the first step by joining OrivenAI.', 'With your Free account', 'OrivenAI Starter gives you access to the full advertising workflow.', 'Research your market, create advertising content', 'No complicated setup. Just more possibilities.', 'The OrivenAI Team'].every((s, i, a) => e.html.indexOf(s) > -1 && (i === 0 || e.html.indexOf(s) > e.html.indexOf(a[i - 1]))));
-  check('CTA "Explore Starter" → https://orivenai.com/app?plans=1 (opens the in-app plans)', /href="https:\/\/orivenai\.com\/app\?plans=1"[^>]*>Explore Starter/.test(e.html));
+  check('every plan with price, period and credits from services/pricing.js', ['Flex · €17 · 14 days · 1,050 credits', 'Monthly · €29 · 1 month · 1,750 credits', 'Quarterly · €78 · 3 months · 4,800 credits', 'Semi-Annual · €143 · 6 months · 8,850 credits', 'Annual · €245 · 12 months · 15,000 credits'].every((t) => e.html.includes(t)) && T.PLAN_INTRO.monthly.price === '€29' && T.PLAN_INTRO.monthly.credits === 1750);
+  check('says prices include VAT and nothing renews automatically', e.html.includes('prices include VAT') && e.html.includes('nothing renews automatically'));
+  check('no retired plan names or Free wording', !/Starter|Free account|€9\.95/.test(e.html + e.text));
+  check('benefits: full workflow, research, create, launch, Automations', ['full advertising workflow', 'research your market, create advertising content, launch campaigns and manage them with Automations'].every((s) => e.html.includes(s)));
+  check('the copy, in order', ['Hi there,', 'You’ve already taken the first step by joining OrivenAI.', 'OrivenAI gives you the full advertising workflow', 'Every plan includes every feature.', 'The OrivenAI Team'].every((t, i, a) => e.html.indexOf(t) >= 0 && (i === 0 || e.html.indexOf(t) > e.html.indexOf(a[i - 1]))));
+  check('CTA "See the plans" → https://orivenai.com/app?plans=1 (opens the in-app plans)', /href="https:\/\/orivenai\.com\/app\?plans=1"[^>]*>See the plans/.test(e.html));
   check('dark design with lime accent; mobile rules; table layout', e.html.includes('background:#0A0A0A') && e.html.includes('#B7FF2A') && /max-width:620px/.test(e.html) && /role="presentation"/.test(e.html) && /color-scheme" content="dark"/.test(e.html));
   check('unsubscribe link + "account and billing emails still reach you" + postal address', e.html.includes('https://x/unsub') && e.html.includes('Account and billing emails will still reach you') && e.html.includes('OrivenAI · Street'));
-  check('plain-text version with CTA and unsubscribe', e.text.includes('Explore Starter: https://orivenai.com/app?plans=1') && e.text.includes('Unsubscribe: https://x/unsub'));
+  check('plain-text version with CTA and unsubscribe', e.text.includes('See the plans: https://orivenai.com/app?plans=1') && e.text.includes('Unsubscribe: https://x/unsub'));
   check('not aggressive: no urgency words', !/hurry|last chance|limited time|act now|expires/i.test(e.html));
 
   // ── B. Admin API is admin-only ─────────────────────────────────
@@ -71,7 +73,7 @@ H.net.handler = async (url, opts) => {
   check('admin: campaign listed, not approved, mode off', r.status === 200 && r.body.campaigns[0].id === CID && r.body.campaigns[0].approved === false && r.body.mode === 'off');
   check('unknown campaign → 404', (await A('GET', '/nope/audience')).status === 404);
   r = await A('GET', '/' + CID + '/preview');
-  check('preview returns the rendered email', r.status === 200 && r.body.subject === 'Ready to do more with OrivenAI?' && /Explore Starter/.test(r.body.html) && r.body.ctaUrl === 'https://orivenai.com/app?plans=1');
+  check('preview returns the rendered email', r.status === 200 && r.body.subject === 'Ready to do more with OrivenAI?' && /See the plans/.test(r.body.html) && r.body.ctaUrl === 'https://orivenai.com/app?plans=1');
 
   // ── C. Audience ────────────────────────────────────────────────
   log('\nC. Audience: Free + explicit consent only');
@@ -133,7 +135,7 @@ H.net.handler = async (url, opts) => {
   check('no paid, unconsented, unsubscribed, suppressed or recently-mailed account received anything', !resend.some((m) => /u(3|4|5|7|8|9|10|11|12|13|14|15)@/.test(m.to)));
   check('real subject (no test marker) + List-Unsubscribe one-click', live.every((m) => m.subject === 'Ready to do more with OrivenAI?' && /\/api\/email\/unsubscribe\?u=/.test(m.headers['List-Unsubscribe']) && m.headers['List-Unsubscribe-Post'] === 'List-Unsubscribe=One-Click'));
   check('each email has its own signed unsubscribe link', live.every((m) => m.html.includes('/api/email/unsubscribe?u=' + (m.to === 'u1@example.invalid' ? uid(1) : uid(2)))));
-  check('idempotency key per account and campaign', live.every((m) => /^oriven:live:[0-9a-f-]{36}:campaign:starter-upgrade-2026-10$/.test(m.key)));
+  check('idempotency key per account and campaign', live.every((m) => /^oriven:live:[0-9a-f-]{36}:campaign:access-plans-2026-11$/.test(m.key)));
   r = await A('POST', '/' + CID + '/send', { confirm: 'SEND ' + CID, expectedEligible: 0 });
   check('running it again sends nothing', r.status === 200 && r.body.sent === 0 && resend.length === n0 + 2);
   r = await A('GET', '/' + CID + '/results');

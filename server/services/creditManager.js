@@ -65,104 +65,23 @@ function init(sharedSupabaseAdmin) {
   supabaseAdmin = sharedSupabaseAdmin;
 }
 
-// ── Feature costs — "suggested values" from the pricing brief, reflecting
-// user value delivered, not raw token cost. Change a price here, nowhere else.
-// image_generation/video_generation double as "Image Ad"/"Video Ad" in the
-// pricing brief's terms — the app doesn't distinguish "ad image" from
-// "logo image" at the cost-table level, so these two buckets are shared by
-// every image/video generation route (logo, product shoots, UGC video,
-// motion graphics, video ads, generic image/video).
-const FEATURE_COSTS = {
-  ai_chat:              5,   // "AI Chat" — 5 credits / message
-  ai_analysis:          25,  // "Intelligence" — 25 credits / analysis
-  campaign_improvement: 10,
-  audience_generation:  10,   // registered — no dedicated AI endpoint yet, see server.js wiring notes
-  product_analysis:     10,   // registered — no dedicated AI endpoint yet, see server.js wiring notes
-  competitor_analysis:  15,
-  brand_voice:          20,
-  campaign_generation:  25,
-  website_analysis:     30,
-  image_generation:     75,   // "Image Ad" — 75 credits
-  video_generation:    200,   // "Video Ad" — 200 credits
-  // "Automations" — 50 credits ONCE, when a new automation (rule or
-  // schedule) is created (routes/automationRoutes.js). Checks, notifications,
-  // pauses, resumes, budget changes, edits and re-enabling are free.
-  // (Replaces the old per-execution "autopilot" charge of 25.)
-  automation:           50,
-};
+// ── Feature costs and plans: services/pricing.js is the one source (credit
+// cost of every paid action, the five access periods and their credits).
+// Change a price there, nowhere else.
+const pricing = require('./pricing');
+const FEATURE_COSTS = pricing.FEATURE_COSTS;
 
-// ── Plan allowances / seats — the other half of the pricing brief's config.
-// free: 10 credits, resetting every 24h (not a monthly cycle like the paid
-// plans) — see ensure_free_daily_cycle in docs/migrations/2026-08-free-plan.sql
-// and FREE_PLAN_CYCLE_DAYS below. Free is an in-app exploration/trial state
-// (not a public pricing tier, see plans.js) meant to let a new user explore
-// the product and accumulate enough credits for an occasional full
-// generation, not to sustain daily full-campaign generation — campaign_
-// generation (25cr) and image_generation (75cr) both individually exceed
-// this 10-credit allowance, so it is deliberately NOT meant to cover a full
-// generation on its own; it covers smaller metered actions (chat, copy
-// rewrites, audience/competitor analysis) between generations, which build
-// up toward one over a few days. The one-time onboarding-generation bypass
-// (requireSubOrOnboardingGen, server.js) still separately covers the very
-// first campaign, right after onboarding.
-const PLAN_ALLOWANCES = { free: 10, starter: 1000, creator: 2500, professional: 4000 };
-const FREE_PLAN_CYCLE_DAYS = 1;
-const PLAN_TEAM_SEATS  = { starter: 1,   creator: 1,    professional: 10   };
-
-// ── Intelligence monthly analysis allowance — separate cap layered on top
-// of the existing FEATURE_COSTS.ai_analysis (25cr) credit charge, not a
-// replacement for it. Applies specifically to the explicit "Analyze with
-// AI" action (server.js POST /api/meta/analyze, /api/ads/analyze) — the
-// only two routes that actually charge ai_analysis credits; the read-only
-// /api/intelligence/* dashboard routes (home/briefing/opportunities/etc.)
-// are a different, already-unmetered concept (Live Feed/summary views) and
-// are not affected by this cap.
-// free: 1 analysis/MONTH — deliberately its own, independent cycle, not
-// tied to the daily AI-credit cycle (a daily Intelligence allowance would
-// be far more generous than Free's exploration positioning intends). The
-// profiles table already tracks Intelligence's reset boundary in its own
-// column (intelligence_cycle_reset_at, entirely separate from credits_
-// cycle_end), so no schema change was needed to make this monthly while
-// credits stay daily — see checkAndIncrementIntelligenceUsage below, which
-// hands the RPC a rolling ~30-day boundary for the 'free' plan specifically
-// instead of reusing ensure_free_daily_cycle's daily cycle_end. Reuses the
-// exact same increment_intelligence_usage RPC as the paid plans — no
-// second counter.
-const PLAN_INTELLIGENCE_LIMITS = { free: 1, starter: 40, creator: 100, professional: Infinity };
-
-// ── Autopilot monthly execution allowance — separate from, and in addition
-// to, AI Credits. Autopilot executions now DO consume AI Credits
-// (FEATURE_COSTS.autopilot, reserved in server.js _evaluateAutomationRules
-// right before a rule is allowed to fire) — this cap is a second, harder
-// ceiling on top of the credit economy, not a replacement for it, because
-// an unlimited rule count could otherwise burn through a user's whole
-// credit balance via unattended background firings with no per-click
-// confirmation. Starter has no Autopilot at all (existing autopilotEligible
-// gate). Creator: capped, not unlimited -- 10/mo, revised down from an
-// earlier 200/mo per explicit product decision to keep Creator's plan-card
-// number small and legible (10 executions is plenty for the "1-2 active
-// rules" realistic Creator usage pattern, still comfortably inside the "at
-// most once/day/rule" ceiling in server.js _evaluateAutomationRules).
-// Professional: Infinity -- no separate monthly execution-count cap, per
-// the plan's "Unlimited" positioning, but Professional's shared credit
-// balance still gates real spend (FEATURE_COSTS.autopilot still applies).
-// free: 0 -- Autopilot is not included at all, same as Starter. Written
-// explicitly (rather than relying on the `|| 0` fallback in
-// checkAndIncrementAutopilotUsage/requireAutopilotAccess) so it's documented
-// alongside every other plan's real number, not implied by an absence.
-// Marketing/Pricing Redesign — final plan positioning: "Professional =
-// Creator + Autopilot" (spec, repeated and explicit — Autopilot is a
-// Professional-only differentiator, Creator gets Business+Research
-// instead). Creator's limit changed from 10 -> 0 to match; Professional's
-// real Infinity (no separate monthly cap beyond the credit economy) is
-// unchanged. This is a real, deliberate product-access change, not a
-// copy-only update — see the final report for the full disclosure.
-// Plan entitlements (V10): Autopilot is part of the full workflow from
-// Starter up (services/planEntitlements.js). Starter and Creator therefore
-// get the same treatment Professional already had -- no separate monthly
-// execution cap; every execution still costs FEATURE_COSTS.autopilot credits
-// (unchanged). Free stays 0 (not included).
-const PLAN_AUTOPILOT_LIMITS = { free: 0, starter: Infinity, creator: Infinity, professional: Infinity };
+// Legacy monthly subscriptions (starter/creator/professional) keep their
+// per-invoice allowance until they end; new customers buy access periods
+// (purchases, see docs/migrations/2026-10-access-purchases.sql). There is
+// no free plan and no free daily credit grant any more.
+const PLAN_ALLOWANCES = Object.assign({}, pricing.LEGACY_ALLOWANCES);
+// Every paying customer gets the same functionality; these per-plan maps keep
+// the legacy keys for existing subscribers and give 'paid' the same values.
+const PLAN_TEAM_SEATS = { paid: 1, starter: 1, creator: 1, professional: 10 };
+// Monthly cap on the explicit "Analyze with AI" action (on top of its credit cost).
+const PLAN_INTELLIGENCE_LIMITS = { free: 0, paid: Infinity, starter: Infinity, creator: Infinity, professional: Infinity };
+const PLAN_AUTOPILOT_LIMITS = { free: 0, paid: Infinity, starter: Infinity, creator: Infinity, professional: Infinity };
 
 class InsufficientCreditsError extends Error {
   constructor(cost, balance) {
@@ -205,16 +124,12 @@ async function reserveCredits(user, featureKey, opts) {
     throw new Error('[creditManager] reserveCredits requires an authenticated user when charge=true');
   }
 
-  // p_free_allowance/p_free_cycle_days are only ever acted on by the RPC
-  // when this user's own subscription_status is 'free' (see
-  // ensure_free_daily_cycle) -- passed on every call, harmless no-op for
-  // paid plans, so PLAN_ALLOWANCES.free stays the single source of truth
-  // instead of duplicating "20" as a SQL-side default nobody updates.
+  // One atomic conditional update in Postgres: never below zero, never
+  // twice for concurrent requests, and never without active access
+  // (spend_credits, docs/migrations/2026-10-access-purchases.sql).
   const { data, error } = await supabaseAdmin.rpc('spend_credits', {
     p_user_id: user.id,
     p_amount: cost,
-    p_free_allowance: PLAN_ALLOWANCES.free,
-    p_free_cycle_days: FREE_PLAN_CYCLE_DAYS,
   });
   if (error) throw error;
   const row = Array.isArray(data) ? data[0] : data;
@@ -333,7 +248,7 @@ async function provisionCreditsForCycle(userId, plan, cycleStartISO, cycleEndISO
   if (allowance == null) return { provisioned: false, reason: 'no allowance for plan ' + plan };
 
   const { data: profile, error: readErr } = await supabaseAdmin
-    .from('profiles').select('credits_cycle_end, credits_provisioned_plan').eq('id', userId).maybeSingle();
+    .from('profiles').select('credits_cycle_end, credits_provisioned_plan, credits_balance').eq('id', userId).maybeSingle();
   if (readErr) throw readErr;
 
   // planUnchanged checks BOTH the caller-supplied opts.previousPlan (set by
@@ -356,14 +271,25 @@ async function provisionCreditsForCycle(userId, plan, cycleStartISO, cycleEndISO
     return { provisioned: false, reason: 'already provisioned for this cycle' };
   }
 
-  const { error } = await supabaseAdmin.from('profiles').update({
+  const patch = {
     credits_balance: allowance,
     credits_cycle_start: cycleStartISO,
     credits_cycle_end: cycleEndISO,
     credits_last_reset_source: source,
     credits_provisioned_plan: plan,
-  }).eq('id', userId);
+  };
+  // A legacy subscription's paid period is its access (plus a short grace,
+  // so a renewal that lands a little late doesn't cut the customer off).
+  // Only confirmed payments set it; the page-load repair below never does.
+  if (opts.setAccess !== false && cycleEndISO) {
+    patch.access_expires_at = new Date(new Date(cycleEndISO).getTime() + pricing.LEGACY_GRACE_DAYS * 86400000).toISOString();
+    patch.access_plan = plan;
+  }
+  const { error } = await supabaseAdmin.from('profiles').update(patch).eq('id', userId);
   if (error) throw error;
+  const before = profile && Number.isFinite(profile.credits_balance) ? profile.credits_balance : 0;
+  supabaseAdmin.from('credit_ledger').insert({ user_id: userId, kind: 'legacy_cycle', delta: allowance - before, balance_after: allowance, note: plan + ' ' + source })
+    .then((r) => { if (r && r.error) console.warn('[creditManager] ledger insert failed:', r.error.message); }, () => {});
   console.log(`[creditManager] Provisioned ${allowance} credits for user ${userId} (plan: ${plan}, source: ${source})`);
   return { provisioned: true, allowance };
 }
@@ -382,42 +308,24 @@ async function getCreditStatus(userId) {
   _assertInitialized();
   const { data, error } = await supabaseAdmin
     .from('profiles')
-    .select('credits_balance, credits_cycle_end, subscription_status, credits_provisioned_plan, campaigns_generated, stripe_subscription_id')
+    .select('credits_balance, credits_cycle_end, subscription_status, credits_provisioned_plan, campaigns_generated, stripe_subscription_id, access_expires_at, access_plan')
     .eq('id', userId)
     .maybeSingle();
   if (error) throw error;
   let plan = (data && data.subscription_status) || 'free';
-  let allowance = PLAN_ALLOWANCES[plan] || 0;
-  let balance = data ? data.credits_balance : 0;
+  const hasAccess = pricing.hasAccess(data);
+  const accessPlan = pricing.planById(data && data.access_plan);
+  // 'paid' (access periods): the allowance shown is one instalment.
+  let allowance = plan === 'paid' ? (accessPlan ? pricing.creditsPerInstalment(accessPlan) : 0) : (PLAN_ALLOWANCES[plan] || 0);
+  let balance = data ? (hasAccess ? data.credits_balance : 0) : 0;
   let resetDate = data ? data.credits_cycle_end : null;
-
-  // Free plan: reset atomically in Postgres (ensure_free_daily_cycle, see
-  // docs/migrations/2026-08-free-plan.sql), not the paid-plan self-heal
-  // block below -- that block calls provisionCreditsForCycle, a non-atomic
-  // Node read-then-write with a 30-day placeholder cycle, wrong on both
-  // counts for a plan that resets daily and must stay concurrency-safe.
-  // Calling this here (not just inside spend_credits) means a returning
-  // Free user sees their fresh 20 credits the moment the dashboard loads,
-  // not only after their next spend. Falls through to the same
-  // lifetimeUsed/savedAssets computation every other plan gets below --
-  // Free users get the same real status payload, just a different balance
-  // source.
-  if (plan === 'free') {
+  let nextGrant = null;
+  if (plan === 'paid' && hasAccess) {
+    resetDate = data.access_expires_at;
     try {
-      const { data: freshRows, error: freshErr } = await supabaseAdmin.rpc('ensure_free_daily_cycle', {
-        p_user_id: userId,
-        p_allowance: PLAN_ALLOWANCES.free,
-        p_cycle_days: FREE_PLAN_CYCLE_DAYS,
-      });
-      if (freshErr) throw freshErr;
-      const freshRow = Array.isArray(freshRows) ? freshRows[0] : freshRows;
-      if (freshRow) {
-        balance = freshRow.balance;
-        resetDate = freshRow.cycle_end;
-      }
-    } catch (err) {
-      console.warn('[creditManager] ensure_free_daily_cycle failed for', userId, ':', err.message);
-    }
+      const { data: g } = await supabaseAdmin.from('credit_grants').select('grant_at, credits').eq('user_id', userId).eq('status', 'scheduled').order('grant_at', { ascending: true }).limit(1);
+      if (g && g[0]) nextGrant = { at: g[0].grant_at, credits: g[0].credits };
+    } catch (_) { /* table not migrated yet: no schedule shown */ }
   }
 
   // Self-heal: reprovision when either (a) there's no cycle_end at all
@@ -442,10 +350,10 @@ async function getCreditStatus(userId) {
   const stripeBilled = !!(data && data.stripe_subscription_id);
   const neverProvisioned = data && !data.credits_cycle_end;
   const provisionedForWrongPlan = data && data.credits_cycle_end && data.credits_provisioned_plan && data.credits_provisioned_plan !== plan;
-  if (plan !== 'free' && !stripeBilled && (neverProvisioned || provisionedForWrongPlan) && allowance > 0) {
+  if (pricing.LEGACY_PLANS.includes(plan) && hasAccess && !stripeBilled && (neverProvisioned || provisionedForWrongPlan) && allowance > 0) {
     try {
       const cyc = _placeholderCycle();
-      const result = await provisionCreditsForCycle(userId, plan, cyc.startISO, cyc.endISO, 'repair', { previousPlan: data.credits_provisioned_plan });
+      const result = await provisionCreditsForCycle(userId, plan, cyc.startISO, cyc.endISO, 'repair', { previousPlan: data.credits_provisioned_plan, setAccess: false });
       if (result.provisioned) {
         balance = result.allowance;
         resetDate = cyc.endISO;
@@ -523,6 +431,10 @@ async function getCreditStatus(userId) {
 
   return {
     balance,
+    hasAccess,
+    accessExpiresAt: data ? data.access_expires_at || null : null,
+    accessPlan: accessPlan ? accessPlan.id : null,
+    nextGrant,
     monthlyAllowance: allowance,
     usedThisMonth: Math.max(0, allowance - balance),
     resetDate,
@@ -696,7 +608,6 @@ module.exports = {
   init,
   FEATURE_COSTS,
   PLAN_ALLOWANCES,
-  FREE_PLAN_CYCLE_DAYS,
   PLAN_TEAM_SEATS,
   PLAN_AUTOPILOT_LIMITS,
   PLAN_INTELLIGENCE_LIMITS,

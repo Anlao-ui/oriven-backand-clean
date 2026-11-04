@@ -209,3 +209,12 @@ WHERE table_schema = 'public'
   AND table_name IN ('publish_operations','automation_settings','automation_jobs','automation_executions','automation_approvals','automation_notifications')
 GROUP BY table_name, grantee
 ORDER BY table_name, grantee;
+
+-- ── 5. browser write lockdown (2026-11-browser-write-lockdown.sql) ─────
+-- Expected after the migration: one SELECT row per table for authenticated. Any INSERT,
+-- UPDATE or DELETE row means browsers can still write that table directly.
+SELECT table_name, grantee, privilege_type
+FROM information_schema.role_table_grants
+WHERE table_schema = 'public' AND grantee IN ('anon','authenticated')
+  AND table_name IN ('automation_rules','campaigns','autopilot_recommendations','autopilot_tasks','autopilot_workflows')
+ORDER BY table_name, grantee, privilege_type;

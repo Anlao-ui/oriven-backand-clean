@@ -58,6 +58,7 @@ const UNIQUE = {
   ],
 };
 const db = { missing: new Set(), rpcCalls: [] };
+const legacyAccess = require('./helpers/legacyAccess'); // mirrors the 2026-10 access migration
 function rows(t) { return (TABLES[t] = TABLES[t] || []); }
 function violates(t, cand, ignore) {
   for (const u of UNIQUE[t] || []) {
@@ -89,6 +90,7 @@ class Q {
   async run() {
     await null;
     if (db.missing.has(this.t)) return { data: null, error: { code: 'PGRST205', message: `Could not find the table 'public.${this.t}' in the schema cache` } };
+    if (this.t === 'profiles') legacyAccess.backfill(rows('profiles'));
     const all = rows(this.t);
     const match = () => all.filter((r) => this.f.every((fn) => fn(r)));
     if (this.op === 'insert' || this.op === 'upsert') {
@@ -116,7 +118,9 @@ const supabaseMock = {
   from: (t) => new Q(t),
   rpc: async (name, args) => {
     db.rpcCalls.push({ name, args });
+    legacyAccess.backfill(rows('profiles'));
     const p = rows('profiles').find((r) => r.id === (args && args.p_user_id));
+    if (name === 'spend_credits' && p && !legacyAccess.spendAllowed(p)) return { data: [{ ok: false, balance: 0 }], error: null };
     if (name === 'spend_credits') {
       if (!p) return { data: [{ ok: false, balance: null }], error: null };
       if (p.credits_balance >= args.p_amount) { p.credits_balance -= args.p_amount; return { data: [{ ok: true, balance: p.credits_balance }], error: null }; }
@@ -217,26 +221,25 @@ let paidActions, spendGuard, aiUsage, aiml;
   }
   check('…and still no provider call', prov.calls.length === 0, prov.calls.length);
 
-  say('\nB. Free accounts keep what they had');
+  say('\nB. Accounts without access (paid-only since 2026-10-30): no free generation');
   reset();
   let r = await call('POST', '/api/ai/create-ad', 'tok_free', AD, { 'X-Idempotency-Key': key() });
   await sleep(100);
-  check('Free user, daily free generation available: Create works (200), reaches the provider, no credits charged', r.status === 200 && prov.calls.length > 0 && prof('free').credits_balance === 20, { status: r.status, calls: prov.calls.length, bal: prof('free').credits_balance });
-  check('…and the daily free generation is used up server-side', !!prof('free').free_campaign_used_at, prof('free'));
+  check('no access: Create → 403 SUBSCRIPTION_REQUIRED, no provider call, balance and free-generation marker untouched', r.status === 403 && r.body.code === 'SUBSCRIPTION_REQUIRED' && prov.calls.length === 0 && prof('free').credits_balance === 20 && !prof('free').free_campaign_used_at, { status: r.status, calls: prov.calls.length, bal: prof('free').credits_balance });
   prov.calls.length = 0;
   r = await call('POST', '/api/ai/create-ad', 'tok_free', AD, { 'X-Idempotency-Key': key() });
-  check('the same Free user again within 24h: 403 SUBSCRIPTION_REQUIRED, no provider call', r.status === 403 && r.body.code === 'SUBSCRIPTION_REQUIRED' && prov.calls.length === 0, { status: r.status, body: r.body, calls: prov.calls.length });
+  check('the same account again: 403 SUBSCRIPTION_REQUIRED, no provider call', r.status === 403 && r.body.code === 'SUBSCRIPTION_REQUIRED' && prov.calls.length === 0, { status: r.status, body: r.body, calls: prov.calls.length });
   reset();
   r = await call('POST', '/api/ai/create-ad', 'tok_freeUsed', AD, { 'X-Idempotency-Key': key() });
-  check('Free user who already used today’s generation: 403, no provider call', r.status === 403 && prov.calls.length === 0, { status: r.status, calls: prov.calls.length });
+  check('account that used the old daily generation: 403, no provider call', r.status === 403 && prov.calls.length === 0, { status: r.status, calls: prov.calls.length });
   for (const p of ['/api/generate-text', '/api/generate-ad', '/api/ai/chat', '/api/video-ads/generate']) {
     reset();
     r = await call('POST', p, 'tok_free', RICH, { 'X-Idempotency-Key': key() });
-    check(`Free user on paid-only ${p}: 403 as before, no provider call`, r.status === 403 && prov.calls.length === 0, { status: r.status, calls: prov.calls.length });
+    check(`no access on ${p}: 403, no provider call`, r.status === 403 && prov.calls.length === 0, { status: r.status, calls: prov.calls.length });
   }
   reset();
   r = await call('POST', '/api/generate-ugc-video', 'tok_freeUsed', RICH, { 'X-Idempotency-Key': key() });
-  check('Free user on a Free-allowed route (UGC video) is still let through to its credit check (not 401/403)', r.status !== 401 && r.status !== 403, { status: r.status, body: r.body });
+  check('no access on UGC video (formerly Free-allowed): 403 SUBSCRIPTION_REQUIRED, no provider call', r.status === 403 && r.body.code === 'SUBSCRIPTION_REQUIRED' && prov.calls.length === 0, { status: r.status, body: r.body });
 
   say('\nC. Paid accounts: charge and refund unchanged');
   reset();

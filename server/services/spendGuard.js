@@ -10,6 +10,10 @@
 //   AI_DAILY_COST_ALERT_USD   (default 10)  log an ALERT once per UTC day
 //   AI_DAILY_COST_CAP_USD     (default 30)  refuse all new provider calls
 //   AI_USER_DAILY_CALL_CAP    (default 200) refuse one user's calls
+//   AI_USER_DAILY_COST_CAP_USD (default 15) refuse one user's calls once the
+//                                            estimated cost of their day reaches
+//                                            this (credits already bound normal
+//                                            use; this stops a bug or loop)
 //   AI_USER_BURST_CALLS       (default 25)  ALERT when one user makes this
 //                                            many calls in 5 minutes
 //
@@ -43,6 +47,7 @@ const limits = () => ({
   alertUsd: _num('AI_DAILY_COST_ALERT_USD', 10),
   capUsd: _num('AI_DAILY_COST_CAP_USD', 30),
   userDailyCalls: _num('AI_USER_DAILY_CALL_CAP', 200),
+  userDailyCostUsd: _num('AI_USER_DAILY_COST_CAP_USD', 15),
   userBurstCalls: _num('AI_USER_BURST_CALLS', 25),
 });
 
@@ -99,6 +104,10 @@ function preflight(userId) {
     if (u.calls >= L.userDailyCalls) {
       _alert({ event: 'user_daily_call_cap_reached', userId: String(userId).slice(0, 64), calls: u.calls, cap: L.userDailyCalls });
       throw new AiSpendLimitError('user_daily_call_cap');
+    }
+    if (u.costUsd >= L.userDailyCostUsd) {
+      _alert({ event: 'user_daily_cost_cap_reached', userId: String(userId).slice(0, 64), estCostUsd: +u.costUsd.toFixed(2), capUsd: L.userDailyCostUsd });
+      throw new AiSpendLimitError('user_daily_cost_cap');
     }
   }
 }

@@ -58,6 +58,7 @@ const UNIQUE = {
   ],
 };
 const db = { missing: new Set(), rpcCalls: [] };
+const legacyAccess = require('./helpers/legacyAccess'); // mirrors the 2026-10 access migration
 function rows(t) { return (TABLES[t] = TABLES[t] || []); }
 function violates(t, cand, ignore) {
   for (const u of UNIQUE[t] || []) {
@@ -93,6 +94,7 @@ class Q {
   async run() {
     await null;
     if (db.missing.has(this.t)) return { data: null, error: { code: 'PGRST205', message: `Could not find the table 'public.${this.t}' in the schema cache` } };
+    if (this.t === 'profiles') legacyAccess.backfill(rows('profiles'));
     const all = rows(this.t);
     const match = () => all.filter((r) => this.f.every((fn) => fn(r)));
     if (this.op === 'insert' || this.op === 'upsert') {
@@ -122,7 +124,9 @@ const supabaseMock = {
   from: (t) => new Q(t),
   rpc: async (name, args) => {
     db.rpcCalls.push({ name, args });
+    legacyAccess.backfill(rows('profiles'));
     const p = rows('profiles').find((r) => r.id === (args && args.p_user_id));
+    if (name === 'spend_credits' && p && !legacyAccess.spendAllowed(p)) return { data: [{ ok: false, balance: 0 }], error: null };
     if (name === 'spend_credits' && db.rpcFail) return { data: null, error: { message: 'rpc unavailable (test)' } };
     if (name === 'spend_credits') {
       if (!p) return { data: [{ ok: false, balance: null }], error: null };
@@ -275,7 +279,7 @@ async function run(tok, body, key) {
   await sleep(30); // settlement runs right after the final write
   return { start: s, done, report: done.body && done.body.report, summary: done.body && done.body.summary };
 }
-const COST = 25;
+const COST = require('../services/pricing').FEATURE_COSTS.research_report;
 
 (async () => {
   const quiet = { log: console.log };
@@ -296,7 +300,7 @@ const COST = 25;
   const say = (...a) => quiet.log(...a);
   prov.handler = fakeAiml;
   rows('profiles').push(
-    { id: 'ann', subscription_status: 'creator', credits_balance: 1000, onboarding_completed: true },
+    { id: 'ann', subscription_status: 'creator', credits_balance: 10000, onboarding_completed: true }, // room for ~100 research runs at research_report cost
     { id: 'ben', subscription_status: 'creator', credits_balance: 1000, onboarding_completed: true },
     { id: 'fre', subscription_status: 'free', credits_balance: 1000, onboarding_completed: true },
     { id: 'low', subscription_status: 'creator', credits_balance: 10, onboarding_completed: true },
@@ -309,11 +313,11 @@ const COST = 25;
   say('\nA. Research types — distinct searches, prompts and schemas');
   const ctx = { industry: 'Apparel', countryName: 'Netherlands', competitors: ['Linnen Huis', 'Vlas & Co'] };
   const Q = {}; RR.TYPE_KEYS.forEach((t) => { Q[t] = RR.searchQueries(t, 'Linen shirts for men', ctx); });
-  check('four types', JSON.stringify(RR.TYPE_KEYS) === '["market","competitor","audience","opportunity"]');
+  check('seven research directions (the four originals plus product & niche, advertising, trends)', JSON.stringify(RR.TYPE_KEYS) === '["market","competitor","audience","opportunity","product","advertising","trends"]');
   check('each type: 2–3 deduplicated queries', RR.TYPE_KEYS.every((t) => Q[t].length >= 2 && Q[t].length <= 3 && new Set(Q[t]).size === Q[t].length), Q);
-  check('query sets differ per type', new Set(RR.TYPE_KEYS.map((t) => Q[t].join('|'))).size === 4, Q);
+  check('query sets differ per type', new Set(RR.TYPE_KEYS.map((t) => Q[t].join('|'))).size === RR.TYPE_KEYS.length, Q);
   check('competitor queries use known competitors; country added, never assumed', /Linnen Huis vs Vlas & Co/.test(Q.competitor.join(' ')) && Q.market[0].endsWith('Netherlands') && !/United States/.test(RR.searchQueries('market', 'x y z', {}).join(' ')));
-  check('search instructions differ per type', new Set(RR.TYPE_KEYS.map((t) => RR.searchInstructions(t, {}))).size === 4);
+  check('search instructions differ per type', new Set(RR.TYPE_KEYS.map((t) => RR.searchInstructions(t, {}))).size === RR.TYPE_KEYS.length);
   const P = {}; RR.TYPE_KEYS.forEach((t) => { P[t] = RR.buildSystemPrompt({ type: t, sources: [] }); });
   check('prompt schema is type-specific', /"valueProposition"/.test(P.competitor) && !/"segments"/.test(P.competitor) && /"segments"/.test(P.audience) && !/"marketOverview"/.test(P.audience) && /"tests"/.test(P.opportunity) && /"marketOverview"/.test(P.market) && !/"tests"/.test(P.market));
   check('prompt: no invented numbers, no ad-performance claims, word-for-word quotes', /Never invent numbers/.test(P.market) && /"performs", "works"/.test(P.market) && /WORD FOR WORD/.test(P.market));
@@ -362,7 +366,7 @@ const COST = 25;
   check('ideas labelled idea (angles, opportunities)', rep.angles.every((g) => g.basis === 'idea') && rep.opportunities.every((o) => o.basis === 'idea'));
   check('sources list: fetched flag, read count, cited-by', rep.sources.some((s) => s.fetched && s.citedBy.includes('competitors')) && rep.sources.some((s) => !s.fetched) && rep.retrieval.read >= 3 && rep.retrieval.searches === 3, rep.retrieval);
   check('counts per evidence label', rep.counts.source_checked >= 3 && rep.counts.source_cited >= 2 && rep.counts.idea >= 2, rep.counts);
-  check('25 credits charged once, kept on success', prof('ann').credits_balance === b0 - COST, b0 - prof('ann').credits_balance);
+  check('research_report credits charged once, kept on success', prof('ann').credits_balance === b0 - COST, b0 - prof('ann').credits_balance);
   const row = rows('creative_assets').find((x) => x.id === R.start.body.reportId);
   check('saved server-side: status ready, title = report title, type stored', row && row.status === 'ready' && row.title === 'Linen shirt competitors in the Netherlands' && row.content.type === 'competitor' && row.user_id === 'ann');
   check('no API key in the report', !JSON.stringify(rep).includes('aiml-test-key'));

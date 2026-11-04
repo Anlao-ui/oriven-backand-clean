@@ -29,10 +29,11 @@ const { check, log, done } = reporter();
 
   // ── A. Plans ─────────────────────────────────────────────────────
   log('\nA. Plan entitlements');
-  check('weeklyReport: Professional only', ['free', 'starter', 'creator'].every((p) => !ENT.hasEntitlement(p, 'weeklyReport')) && ENT.hasEntitlement('professional', 'weeklyReport'));
-  check('notifications (in-app center): Creator and Professional', !ENT.hasEntitlement('free', 'notifications') && !ENT.hasEntitlement('starter', 'notifications') && ENT.hasEntitlement('creator', 'notifications') && ENT.hasEntitlement('professional', 'notifications'));
-  check('prioritySupport: Professional only; orivenChat: Creator and Professional', ENT.minPlanFor('prioritySupport') === 'professional' && ENT.minPlanFor('orivenChat') === 'creator');
-  check('Automations (and their emails) unchanged: from Starter', ENT.minPlanFor('autopilot') === 'starter');
+  const PAYING = ['paid', 'starter', 'creator', 'professional'];
+  check('weeklyReport: every paying status (one product), never free', PAYING.every((p) => ENT.hasEntitlement(p, 'weeklyReport')) && !ENT.hasEntitlement('free', 'weeklyReport'));
+  check('notifications (in-app center): every paying status, never free', PAYING.every((p) => ENT.hasEntitlement(p, 'notifications')) && !ENT.hasEntitlement('free', 'notifications'));
+  check('prioritySupport and orivenChat: from the paid plan', ENT.minPlanFor('prioritySupport') === 'paid' && ENT.minPlanFor('orivenChat') === 'paid');
+  check('Automations: from the paid plan', ENT.minPlanFor('autopilot') === 'paid');
 
   // ── B. Reporting periods ─────────────────────────────────────────
   log('\nB. Reporting periods and timezones');
@@ -156,8 +157,10 @@ const { check, log, done } = reporter();
   const collect = async (user) => { collectCalls++; if (collectFail) throw Object.assign(new Error('x'), { code: 'X' }); return [metaRes, gRes, { platform: 'tiktok', status: 'not_connected' }, { platform: 'pinterest', status: 'reconnect' }]; };
   const aiCall = async () => { aiCalls++; return JSON.stringify(good); };
   const R = runnerMod.createRunner({ db, sender: fakeSender, templates: T, lifecycle, collect, aiCall, appUrl: 'https://orivenai.com/app', apiUrl: 'https://api.test', log: () => {} });
-  const prof = (n, plan, extra) => Object.assign({ id: uid(n), email: 'u' + n + '@example.invalid', subscription_status: plan, timezone: 'Europe/Amsterdam', preferences: { language: 'en' } }, extra || {});
-  H.rows('profiles').push(prof(1, 'professional'), prof(2, 'creator'), prof(3, 'starter'), prof(4, 'free'), prof(5, 'professional', { preferences: { weeklyReportEmail: false } }), prof(6, 'professional', { timezone: 'Asia/Tokyo', preferences: { language: 'nl' } }));
+  const FUTURE = '2099-01-01T00:00:00Z', PAST = '2026-10-01T00:00:00Z';
+  const prof = (n, plan, extra) => Object.assign({ id: uid(n), email: 'u' + n + '@example.invalid', subscription_status: plan, access_expires_at: FUTURE, timezone: 'Europe/Amsterdam', preferences: { language: 'en' } }, extra || {});
+  // 1 legacy with access, 6 a period plan; 2 and 3 paid but their access ended; 4 never bought; 5 opted out.
+  H.rows('profiles').push(prof(1, 'professional'), prof(2, 'creator', { access_expires_at: PAST }), prof(3, 'paid', { access_expires_at: PAST }), prof(4, 'free', { access_expires_at: null }), prof(5, 'paid', { preferences: { weeklyReportEmail: false } }), prof(6, 'paid', { timezone: 'Asia/Tokyo', preferences: { language: 'nl' } }));
 
   H.MISSING.weekly_reports = 'table';
   let s = await R.runOnce({ now: mon });
@@ -171,7 +174,7 @@ const { check, log, done } = reporter();
 
   s = await R.runOnce({ now: mon });
   const to = sends.map((m) => m.to).sort();
-  check('only Professional accounts that didn’t opt out receive it', JSON.stringify(to) === JSON.stringify(['u1@example.invalid', 'u6@example.invalid']), to);
+  check('only paying accounts with current access that didn’t opt out receive it', JSON.stringify(to) === JSON.stringify(['u1@example.invalid', 'u6@example.invalid']), to);
   check('one AI call per user', aiCalls === 2, aiCalls);
   check('idempotency key per user and week', sends[0].idempotencyKey === `oriven:live:${uid(1)}:weekly_report:2026-10-12`);
   check('List-Unsubscribe header to the weekly-report off link', /weekly-report\/off/.test(sends[0].headers['List-Unsubscribe']));
@@ -233,12 +236,12 @@ const { check, log, done } = reporter();
   await R.runOnce({ now: mon });
   check('suppressed address → skipped', !sends.find((m) => m.to === 'u12@example.invalid'));
 
-  // Downgraded between weeks.
-  H.rows('profiles').find((p) => p.id === uid(1)).subscription_status = 'creator';
+  // Access ended between weeks.
+  H.rows('profiles').find((p) => p.id === uid(1)).access_expires_at = '2026-10-20T00:00:00Z';
   const next = Date.parse('2026-10-26T08:00:00Z');
   const before = sends.length;
   await R.runOnce({ now: next });
-  check('no longer Professional → no report next week', !sends.slice(before).some((m) => m.to === 'u1@example.invalid'));
+  check('access ended → no report next week', !sends.slice(before).some((m) => m.to === 'u1@example.invalid'));
 
   // Test mode: allowlisted only, separate scope.
   const tSends = [];

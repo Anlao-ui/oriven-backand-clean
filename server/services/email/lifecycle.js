@@ -7,11 +7,11 @@
 // up on the next one.
 //
 //   welcome            service    account created (within 48 hours)
-//   paid_onboarding    service    paid plan active (once per plan)
+//   paid_onboarding    service    paid access active (once per plan)
 //   first_ad_reminder  marketing  2–14 days after signup, no first result yet
 //   first_success      marketing  first Create/Research result (within 7 days)
 //   inactive           marketing  active before, nothing for 21 days
-//   upgrade_education  marketing  Free, 3+ refusals of one paid action in 14 days
+//   upgrade_education  marketing  no access, 3+ refusals of one paid action in 14 days
 //
 // Safety:
 //   - only accounts created on/after EMAIL_LIFECYCLE_SINCE (default: the
@@ -37,12 +37,13 @@ const crypto = require('crypto');
 const templates = require('./templates');
 const sender = require('./sender');
 const onboarding = require('../onboarding');
+const pricing = require('../pricing');
 
 const DAY = 864e5;
 const MARKETING_GAP_DAYS = 3;
 const MAX_ATTEMPTS = 3;
 const WELCOME_WINDOW = 2 * DAY;
-const PAID = ['starter', 'creator', 'professional'];
+const PAID = pricing.PAID_STATUSES;
 const PRIORITY = ['paid_onboarding', 'welcome', 'first_success', 'first_ad_reminder', 'upgrade_education', 'inactive'];
 
 let _db = null;
@@ -78,10 +79,10 @@ function checkUnsubToken(userId, token) {
 
 // ── Pure decision ───────────────────────────────────────────────────
 // profile: { id, email, first_name, created_at, subscription_status,
-//            first_value_at, first_value_kind, marketing_opt_in }
+//            access_expires_at, access_plan, first_value_at, first_value_kind,
+//            marketing_opt_in }
 // facts:   { sent: Set(dedupe_key), lastMarketingAt, lastActivityAt,
-//            paywalls: { action: count in last 14 days }, suppressed,
-//            freeFirstAd }
+//            paywalls: { action: count in last 14 days }, suppressed }
 // Returns the ONE email due now, or null.
 function decide(profile, facts, now) {
   now = now || Date.now();
@@ -90,23 +91,25 @@ function decide(profile, facts, now) {
   if (!Number.isFinite(created) || created < since().getTime()) return null;
   const age = now - created;
   const plan = profile.subscription_status || 'free';
+  const access = PAID.includes(plan) && pricing.hasAccess(profile, now);
+  const period = profile.access_plan || null;
   const consent = profile.marketing_opt_in === true;
   const gapOk = !facts.lastMarketingAt || now - Date.parse(facts.lastMarketingAt) >= MARKETING_GAP_DAYS * DAY;
   const firstValue = profile.first_value_at ? Date.parse(profile.first_value_at) : null;
   const cand = [];
 
   if (age <= WELCOME_WINDOW) cand.push({ template: 'welcome', key: 'welcome', data: { firstName: profile.first_name } });
-  if (PAID.includes(plan)) cand.push({ template: 'paid_onboarding', key: 'paid:' + plan, data: { plan } });
+  if (access) cand.push({ template: 'paid_onboarding', key: 'paid:' + (plan === 'paid' ? period || plan : plan), data: { plan, period, accessExpiresAt: profile.access_expires_at } });
   if (consent && gapOk) {
     if (firstValue && now - firstValue <= 7 * DAY) {
-      cand.push({ template: 'first_success', key: 'first_success', data: { kind: profile.first_value_kind, researchIncluded: PAID.includes(plan) } });
+      cand.push({ template: 'first_success', key: 'first_success', data: { kind: profile.first_value_kind, researchIncluded: access } });
     }
     if (!firstValue && age >= 2 * DAY && age <= 14 * DAY) {
-      cand.push({ template: 'first_ad_reminder', key: 'first_ad_reminder', data: { freeFirstAd: !!facts.freeFirstAd, plan } });
+      cand.push({ template: 'first_ad_reminder', key: 'first_ad_reminder', data: { plan, period, hasAccess: access } });
     }
-    if (plan === 'free' && facts.paywalls) {
+    if (!access && facts.paywalls) {
       const top = Object.keys(facts.paywalls).filter((a) => facts.paywalls[a] >= 3).sort((a, b) => facts.paywalls[b] - facts.paywalls[a])[0];
-      if (top) cand.push({ template: 'upgrade_education', key: 'upgrade:' + top + ':' + Math.floor(now / (30 * DAY)), data: { action: top, plan: 'starter' } }); // price + credits come from templates.PLAN_INTRO
+      if (top) cand.push({ template: 'upgrade_education', key: 'upgrade:' + top + ':' + Math.floor(now / (30 * DAY)), data: { action: top } }); // plans, prices and credits come from services/pricing.js
     }
     const last = facts.lastActivityAt ? Date.parse(facts.lastActivityAt) : null;
     if (last && now - last >= 21 * DAY && age >= 21 * DAY) {
@@ -121,7 +124,7 @@ function decide(profile, facts, now) {
 // ── Data access ─────────────────────────────────────────────────────
 async function _loadCandidates(limit) {
   let q = _db.from('profiles')
-    .select('id, email, first_name, created_at, subscription_status, first_value_at, first_value_kind, marketing_opt_in')
+    .select('id, email, first_name, created_at, subscription_status, access_expires_at, access_plan, first_value_at, first_value_kind, marketing_opt_in')
     .gte('created_at', since().toISOString());
   if (sender.mode() === 'test') {
     // Test mode never even reads accounts outside the allowlist.
@@ -137,7 +140,7 @@ async function _loadCandidates(limit) {
 async function _facts(users, now) {
   const ids = users.map((u) => u.id);
   const facts = {};
-  users.forEach((u) => { facts[u.id] = { sent: new Set(), lastMarketingAt: null, lastActivityAt: null, paywalls: {}, suppressed: false, freeFirstAd: false }; });
+  users.forEach((u) => { facts[u.id] = { sent: new Set(), lastMarketingAt: null, lastActivityAt: null, paywalls: {}, suppressed: false }; });
   if (!ids.length) return facts;
   const { data: sends, error: e1 } = await _db.from('email_sends').select('user_id, dedupe_key, category, status, sent_at, created_at').in('user_id', ids);
   if (e1) throw e1;
@@ -203,9 +206,6 @@ async function runOnce({ now, limit, dryRun } = {}) {
   for (const u of users) {
     summary.considered++;
     const f = facts[u.id];
-    if (!dryRun && f && !f.freeFirstAd && u.subscription_status === 'free' && !u.first_value_at) {
-      try { f.freeFirstAd = !!(await require('../firstAd').status(u.id)).available; } catch (_) {}
-    }
     const due = decide(u, f, now);
     if (!due) continue;
     summary.due++;
@@ -231,11 +231,11 @@ async function retryFailed({ summary, now, minAgeMs } = {}) {
     .eq('status', 'failed').lt('attempts', MAX_ATTEMPTS).lte('updated_at', cutoff).limit(50);
   for (const row of data || []) {
     if (!inScope(row.dedupe_key) || !sender.isRetryable(row.error)) continue;
-    const { data: u } = await _db.from('profiles').select('id, email, first_name, created_at, subscription_status, first_value_at, first_value_kind, marketing_opt_in').eq('id', row.user_id).maybeSingle();
+    const { data: u } = await _db.from('profiles').select('id, email, first_name, created_at, subscription_status, access_expires_at, access_plan, first_value_at, first_value_kind, marketing_opt_in').eq('id', row.user_id).maybeSingle();
     if (!u || !u.email) continue;
     const { data: claimed } = await _db.from('email_sends').update({ status: 'sending', attempts: row.attempts + 1 }).eq('id', row.id).eq('status', 'failed').select('id');
     if (!claimed || !claimed.length) continue;
-    const due = { template: row.template, key: bareKey(row.dedupe_key), data: { firstName: u.first_name, plan: u.subscription_status, kind: u.first_value_kind } };
+    const due = { template: row.template, key: bareKey(row.dedupe_key), data: { firstName: u.first_name, plan: u.subscription_status, period: u.access_plan, accessExpiresAt: u.access_expires_at, hasAccess: pricing.hasAccess(u), kind: u.first_value_kind } };
     const out = await _deliver(row.id, u, due);
     if (summary) { if (out === 'sent') summary.sent++; else if (out === 'skipped') summary.skipped++; else summary.failed++; }
   }

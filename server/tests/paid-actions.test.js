@@ -12,6 +12,7 @@
 
 const Module = require('module');
 const path = require('path');
+const PRICING = require('../services/pricing'); const FC = PRICING.FEATURE_COSTS; // the one pricing source
 const SERVER_DIR = path.resolve(__dirname, '..');
 const PORT = 5597;
 const BASE = `http://127.0.0.1:${PORT}`;
@@ -45,6 +46,7 @@ const UNIQUE = {
   ],
 };
 const db = { missing: new Set(), rpcCalls: [] };
+const legacyAccess = require('./helpers/legacyAccess'); // mirrors the 2026-10 access migration
 function rows(t) { return (TABLES[t] = TABLES[t] || []); }
 function violates(t, cand, ignore) {
   for (const u of UNIQUE[t] || []) {
@@ -79,6 +81,7 @@ class Q {
   async run() {
     await null;
     if (db.missing.has(this.t)) return { data: null, error: { code: 'PGRST205', message: `Could not find the table 'public.${this.t}' in the schema cache` } };
+    if (this.t === 'profiles') legacyAccess.backfill(rows('profiles'));
     const all = rows(this.t);
     const match = () => all.filter((r) => this.f.every((fn) => fn(r)));
     if (this.op === 'insert' || this.op === 'upsert') {
@@ -107,7 +110,9 @@ const supabaseMock = {
   from: (t) => new Q(t),
   rpc: async (name, args) => {
     db.rpcCalls.push({ name, args });
+    legacyAccess.backfill(rows('profiles'));
     const p = rows('profiles').find((r) => r.id === (args && args.p_user_id));
+    if (name === 'spend_credits' && p && !legacyAccess.spendAllowed(p)) return { data: [{ ok: false, balance: 0 }], error: null };
     if (name === 'spend_credits') {
       if (!p) return { data: [{ ok: false, balance: null }], error: null };
       if (p.credits_balance >= args.p_amount) { p.credits_balance -= args.p_amount; return { data: [{ ok: true, balance: p.credits_balance }], error: null }; }
@@ -230,9 +235,9 @@ const AD = { product: 'Organic coffee subscription', goal: 'Sales', platform: 'g
   };
   reset();
   let r = await researchDone(await call('POST', '/api/research/query', 'tok1', RS, { 'X-Idempotency-Key': key() }));
-  check('success: exactly one charge of 25', r.status === 202 && r.final && r.final.status === 'ready' && bal('u1') === 975 && spendRpcs() === 1 && refundRpcs() === 0, { status: r.status, bal: bal('u1') });
+  check('success: exactly one research_report charge', r.status === 202 && r.final && r.final.status === 'ready' && bal('u1') === 1000 - FC.research_report && spendRpcs() === 1 && refundRpcs() === 0, { status: r.status, bal: bal('u1') });
   check('success: 1 Opus synthesis + 2–3 web searches, nothing else', textCalls(OPUS) === 1 && textCalls('perplexity/sonar') >= 2 && textCalls('perplexity/sonar') <= 3 && prov.calls.length === 1 + textCalls('perplexity/sonar'), prov.calls.map((c) => c.model));
-  check('success: ledger row carries the action id', rows('credit_transactions').some((t) => t.feature_key === 'ai_analysis' && t.request_id && t.charged), rows('credit_transactions'));
+  check('success: ledger row carries the action id', rows('credit_transactions').some((t) => t.feature_key === 'research_report' && t.request_id && t.charged), rows('credit_transactions'));
 
   const failureCases = [
     ['provider out of balance (403 account error)', () => { throw err('Provider access denied. Check your AIML API plan.', { status: 403, providerAccount: true }); }],
@@ -247,7 +252,7 @@ const AD = { product: 'Organic coffee subscription', goal: 'Sales', platform: 'g
     r = await researchDone(await call('POST', '/api/research/query', 'tok1', RS, { 'X-Idempotency-Key': key() }));
     check(`failure (${label}): net 0 credits, refunded exactly once, report marked failed`,
       r.status === 202 && r.final && r.final.status === 'failed' && !!r.final.error && bal('u1') === 1000 && spendRpcs() === 1 && refundRpcs() === 1 &&
-      rows('credit_transactions').filter((t) => t.feature_key === 'ai_analysis_refund').length === 1, { status: r.status, bal: bal('u1'), refunds: refundRpcs(), body: r.body });
+      rows('credit_transactions').filter((t) => t.feature_key === 'research_report_refund').length === 1, { status: r.status, bal: bal('u1'), refunds: refundRpcs(), body: r.body });
   }
 
   reset(10);
@@ -259,9 +264,9 @@ const AD = { product: 'Organic coffee subscription', goal: 'Sales', platform: 'g
   const r1 = await researchDone(await call('POST', '/api/research/query', 'tok1', RS, { 'X-Idempotency-Key': k1 }));
   const r2 = await call('POST', '/api/research/query', 'tok1', RS, { 'X-Idempotency-Key': k1 });
   check('same action key sent twice: second refused (409 DUPLICATE_ACTION), one charge, one provider workflow',
-    r1.status === 202 && r2.status === 409 && r2.body.code === 'DUPLICATE_ACTION' && bal('u1') === 975 && textCalls(OPUS) === 1, { r2: r2.body, bal: bal('u1'), opus: textCalls(OPUS) });
+    r1.status === 202 && r2.status === 409 && r2.body.code === 'DUPLICATE_ACTION' && bal('u1') === 1000 - FC.research_report && textCalls(OPUS) === 1, { r2: r2.body, bal: bal('u1'), opus: textCalls(OPUS) });
   const r3 = await researchDone(await call('POST', '/api/research/query', 'tok1', RS, { 'X-Idempotency-Key': key() }));
-  check('Retry with a NEW key is a new intentional action (charged once more)', r3.status === 202 && bal('u1') === 950 && textCalls(OPUS) === 2);
+  check('Retry with a NEW key is a new intentional action (charged once more)', r3.status === 202 && bal('u1') === 1000 - 2 * FC.research_report && textCalls(OPUS) === 2);
 
   // ── Create Ad: the 31-request burst ─────────────────────────
   say('\nCreate Ad');
@@ -271,10 +276,10 @@ const AD = { product: 'Organic coffee subscription', goal: 'Sales', platform: 'g
     prov.handler = async (c) => { await sleep(250); return defaultHandler(c); };
     const burst = await Promise.all(Array.from({ length: 31 }, () => call('POST', '/api/ai/create-ad', 'tok1', AD, { 'X-Idempotency-Key': key() })));
     const ok = burst.filter((x) => x.status === 200).length, busy = burst.filter((x) => x.status === 409 && x.body.code === 'ACTION_IN_PROGRESS').length;
-    check(`[${mode}] 31 near-simultaneous create-ad requests → 1 runs, 30 refused, 1 provider call, 25 credits`,
-      ok === 1 && busy === 30 && textCalls(OPUS) === 1 && bal('u1') === 975 && spendRpcs() === 1, { ok, busy, opus: textCalls(OPUS), bal: bal('u1') });
+    check(`[${mode}] 31 near-simultaneous create-ad requests → 1 runs, 30 refused, 1 provider call, one campaign_generation charge`,
+      ok === 1 && busy === 30 && textCalls(OPUS) === 1 && bal('u1') === 1000 - FC.campaign_generation && spendRpcs() === 1, { ok, busy, opus: textCalls(OPUS), bal: bal('u1') });
     const after = await call('POST', '/api/ai/create-ad', 'tok1', AD, { 'X-Idempotency-Key': key() });
-    check(`[${mode}] lane is released after completion (next intentional build runs)`, after.status === 200 && bal('u1') === 950);
+    check(`[${mode}] lane is released after completion (next intentional build runs)`, after.status === 200 && bal('u1') === 1000 - 2 * FC.campaign_generation);
     if (mode === 'db') check('[db] credit_actions rows: 2 succeeded, none left in progress', rows('credit_actions').filter((x) => x.status === 'succeeded').length === 2 && !rows('credit_actions').some((x) => x.status === 'in_progress'), rows('credit_actions').map((x) => x.status));
   }
 
@@ -282,7 +287,7 @@ const AD = { product: 'Organic coffee subscription', goal: 'Sales', platform: 'g
   prov.handler = async (c) => { await sleep(200); return defaultHandler(c); };
   const sameKey = key();
   const dup = await Promise.all([1, 2, 3].map(() => call('POST', '/api/ai/create-ad', 'tok1', AD, { 'X-Idempotency-Key': sameKey })));
-  check('same key fired 3× concurrently: one workflow, one charge', dup.filter((x) => x.status === 200).length === 1 && textCalls(OPUS) === 1 && bal('u1') === 975, dup.map((x) => x.status));
+  check('same key fired 3× concurrently: one workflow, one charge', dup.filter((x) => x.status === 200).length === 1 && textCalls(OPUS) === 1 && bal('u1') === 1000 - FC.campaign_generation, dup.map((x) => x.status));
 
   reset();
   prov.handler = (c) => full('I don\'t have enough detail to build this campaign as JSON.');
@@ -299,11 +304,11 @@ const AD = { product: 'Organic coffee subscription', goal: 'Sales', platform: 'g
   prov.handler = async (c) => { await sleep(250); return defaultHandler(c); };
   const imgs = await Promise.all(Array.from({ length: 8 }, () => call('POST', '/api/generate-image', 'tok1', { prompt: 'a cup of coffee', size: '1:1' }, { 'X-Idempotency-Key': key() })));
   const imgOk = imgs.filter((x) => x.status === 200).length;
-  check('8 parallel images: 6 run (per-user image capacity), 2 refused, only successful ones charged', imgOk === 6 && imgs.filter((x) => x.status === 409).length === 2 && bal('u1') === 1000 - 6 * 75 && prov.calls.filter((c) => c.kind === 'image').length === 6, { imgOk, bal: bal('u1') });
+  check('8 parallel images: 6 run (per-user image capacity), 2 refused, only successful ones charged', imgOk === 6 && imgs.filter((x) => x.status === 409).length === 2 && bal('u1') === 1000 - 6 * FC.image_generation && prov.calls.filter((c) => c.kind === 'image').length === 6, { imgOk, bal: bal('u1') });
   reset();
   prov.handler = (c) => { if (c.kind === 'image') throw err('image backend error', { status: 500 }); return c.kind === 'text' ? full('{"headline":"H","body":"B","cta":"Buy"}') : defaultHandler(c); };
   r = await call('POST', '/api/generate-ad', 'tok1', { prompt: 'coffee ad' }, { 'X-Idempotency-Key': key() });
-  check('generate-ad: copy ok but image failed → the 75-credit image charge is refunded', bal('u1') === 1000 && refundRpcs() === 1, { status: r.status, bal: bal('u1') });
+  check('generate-ad: copy ok but image failed → the image charge is refunded', bal('u1') === 1000 && refundRpcs() === 1, { status: r.status, bal: bal('u1') });
 
   // ── Video (async) ────────────────────────────────────────────
   say('\nVideo');
@@ -314,7 +319,7 @@ const AD = { product: 'Organic coffee subscription', goal: 'Sales', platform: 'g
   reset();
   r = await call('POST', '/api/generate-ugc-video', 'tok1', { script: 'A short energetic ad.' }, { 'X-Idempotency-Key': key() });
   const vid = r.body.videoId;
-  check('video submitted: 200 credits held while rendering', r.status === 200 && bal('u1') === 800 && rows('credit_actions').some((x) => x.status === 'awaiting_async'), { status: r.status, bal: bal('u1') });
+  check('video submitted: video_generation credits held while rendering', r.status === 200 && bal('u1') === 1000 - FC.video_generation && rows('credit_actions').some((x) => x.status === 'awaiting_async'), { status: r.status, bal: bal('u1') });
   prov.videoStatus[vid] = 'failed';
   const s1 = await call('GET', '/api/ugc-video-status/' + vid, 'tok1');
   const s2 = await call('GET', '/api/ugc-video-status/' + vid, 'tok1');
@@ -323,11 +328,11 @@ const AD = { product: 'Organic coffee subscription', goal: 'Sales', platform: 'g
   r = await call('POST', '/api/generate-ugc-video', 'tok1', { script: 'A short energetic ad.' }, { 'X-Idempotency-Key': key() });
   prov.videoStatus[r.body.videoId] = 'completed';
   await call('GET', '/api/ugc-video-status/' + r.body.videoId, 'tok1');
-  check('video job completed: charge kept, action succeeded', bal('u1') === 800 && refundRpcs() === 0 && rows('credit_actions').some((x) => x.status === 'succeeded'));
+  check('video job completed: charge kept, action succeeded', bal('u1') === 1000 - FC.video_generation && refundRpcs() === 0 && rows('credit_actions').some((x) => x.status === 'succeeded'));
   reset();
   prov.handler = async (c) => { await sleep(200); return defaultHandler(c); };
   const vids = await Promise.all([1, 2, 3, 4].map(() => call('POST', '/api/generate-ugc-video', 'tok1', { script: 'ad' }, { 'X-Idempotency-Key': key() })));
-  check('4 concurrent video submits: 1 job, 1 charge', vids.filter((x) => x.status === 200).length === 1 && prov.calls.filter((c) => c.kind === 'video').length === 1 && bal('u1') === 800);
+  check('4 concurrent video submits: 1 job, 1 charge', vids.filter((x) => x.status === 200).length === 1 && prov.calls.filter((c) => c.kind === 'video').length === 1 && bal('u1') === 1000 - FC.video_generation);
 
   // ── Chat / research follow-up ────────────────────────────────
   say('\nChat');
@@ -347,8 +352,8 @@ const AD = { product: 'Organic coffee subscription', goal: 'Sales', platform: 'g
   prov.handler = () => full('{"tool": "test_noop", "params": {}}');
   rows('profiles')[0].subscription_status = 'creator';
   r = await call('POST', '/api/ai/chat', 'tok1', { message: 'do the thing' }, { 'X-Idempotency-Key': key() });
-  check('assistant tool loop is capped: at most 5 model calls for one message', textCalls(OPUS) === 5, { calls: textCalls(OPUS) });
-  check('…and a loop that never produced an answer is refunded', bal('u1') === 1000 && refundRpcs() === 1, { bal: bal('u1') });
+  check('assistant tool loop is capped: at most CHAT_LIMITS.maxModelCalls (3) model calls for one message', textCalls(OPUS) === PRICING.CHAT_LIMITS.maxModelCalls, { calls: textCalls(OPUS) });
+  check('…each model call is paid (ai_chat + ai_chat_step per further call) and a loop that never produced an answer is refunded in full', bal('u1') === 1000 && spendRpcs() === PRICING.CHAT_LIMITS.maxModelCalls && refundRpcs() === PRICING.CHAT_LIMITS.maxModelCalls, { bal: bal('u1'), spends: spendRpcs(), refunds: refundRpcs() });
 
   // ── Cross-cutting ────────────────────────────────────────────
   say('\nCross-cutting');
@@ -357,7 +362,7 @@ const AD = { product: 'Organic coffee subscription', goal: 'Sales', platform: 'g
   rows('profiles')[0].credits_balance = 975; // the crashed request had charged 25
   r = await call('POST', '/api/research/query', 'tok1', RS, { 'X-Idempotency-Key': key() });
   r = await researchDone(r);
-  check('lane held by a crashed request (11 min old): expired + its 25 credits refunded once, new research runs', r.status === 202 && bal('u1') === 975 && refundRpcs() === 1 && rows('credit_actions').find((x) => x.id === 'stale-1').status === 'refunded', { bal: bal('u1'), status: r.status });
+  check('lane held by a crashed request (11 min old): expired + its 25 credits refunded once, new research runs', r.status === 202 && bal('u1') === 1000 - FC.research_report && refundRpcs() === 1 && rows('credit_actions').find((x) => x.id === 'stale-1').status === 'refunded', { bal: bal('u1'), status: r.status });
 
   reset();
   const resv = await creditManager.reserveCredits({ id: 'u1' }, 'ai_analysis');
@@ -373,9 +378,8 @@ const AD = { product: 'Organic coffee subscription', goal: 'Sales', platform: 'g
   check('daily spend cap reached: no provider call is made and the charge is refunded', prov.calls.length === 0 && bal('u1') === 1000 && r.final && r.final.status === 'failed', { calls: prov.calls.length, bal: bal('u1'), status: r.status });
   delete process.env.AI_DAILY_COST_CAP_USD;
 
-  const COSTS = { ai_chat: 5, ai_analysis: 25, campaign_improvement: 10, audience_generation: 10, product_analysis: 10, competitor_analysis: 15, brand_voice: 20, campaign_generation: 25, website_analysis: 30, image_generation: 75, video_generation: 200, automation: 50 };
-  check('credit prices: unchanged except Automations = 50 credits once per new automation (was 25 per execution)', JSON.stringify(creditManager.FEATURE_COSTS) === JSON.stringify(COSTS), creditManager.FEATURE_COSTS);
-  check('plan allowances unchanged (Free 10/day, 1,000 / 2,500 / 4,000)', JSON.stringify(creditManager.PLAN_ALLOWANCES) === JSON.stringify({ free: 10, starter: 1000, creator: 2500, professional: 4000 }));
+  check('credit prices: creditManager charges exactly services/pricing.js FEATURE_COSTS', JSON.stringify(creditManager.FEATURE_COSTS) === JSON.stringify(FC), creditManager.FEATURE_COSTS);
+  check('no free allowance; legacy subscriptions keep 1,000 / 2,500 / 4,000 a month', !creditManager.PLAN_ALLOWANCES.free && JSON.stringify(creditManager.PLAN_ALLOWANCES) === JSON.stringify(PRICING.LEGACY_ALLOWANCES) && PRICING.LEGACY_ALLOWANCES.starter === 1000 && PRICING.LEGACY_ALLOWANCES.creator === 2500 && PRICING.LEGACY_ALLOWANCES.professional === 4000, creditManager.PLAN_ALLOWANCES);
   check('no outbound network requests were attempted', blocked.length === 0, blocked);
 
   say(`\n${pass + fail} checks run, ${pass} passed, ${fail} failed.`);

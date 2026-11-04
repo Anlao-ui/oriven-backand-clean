@@ -17,8 +17,8 @@
 // (the <style> block only adds mobile refinements — nothing depends on it).
 //
 // Copy rules: short and concrete; one primary action per email; plan facts
-// come from PLAN_INTRO below (keep in line with services/planEntitlements.js,
-// services/creditManager.js PLAN_ALLOWANCES and the Stripe prices); no
+// come from PLAN_INTRO below, built from services/pricing.js (the one source
+// for plans, prices and credits); no
 // urgency, no claims the product can't back.
 
 const C = {
@@ -35,17 +35,32 @@ function esc(s) {
 const fmt = (n) => Number(n).toLocaleString('en-US'); // 1000 → "1,000"
 
 // ── Plan facts (single source for every email) ──────────────────────
-const PLAN_INTRO = {
-  starter: { name: 'Starter', price: '9.95', credits: 1000,
-    unlocks: ['Research: investigate your market, competitors and audience', 'Automations: schedule campaigns and set rules that pause, resume or adjust them, or ask you first'] },
-  creator: { name: 'Creator', price: '19.95', credits: 2500,
-    unlocks: ['Everything in Starter: Research and Automations', 'Oriven Chat, your advertising assistant inside the app', 'In-app notifications'] },
-  professional: { name: 'Professional', price: '34.95', credits: 4000,
-    unlocks: ['Everything in Creator: Research, Automations, Oriven Chat and in-app notifications', 'Priority Support', 'Weekly AI Performance Report by email'] },
-};
-const FREE = { name: 'Free', creditsPerDay: 10 };
-const planOf = (k) => PLAN_INTRO[k] || null;
-const creditLine = (plan) => `${fmt(plan.credits)} credits a month for Create, Research and more`;
+const pricing = require('../pricing');
+
+// One product: every paying customer gets the same functionality; plans
+// differ only in period, price and credits (services/pricing.js). The legacy
+// monthly names stay for customers whose old subscription is still running.
+const INCLUDED = [
+  'Research: investigate your market, competitors and audience',
+  'Create, Launch and Campaigns: build, publish and manage your ads',
+  'Automations: schedule campaigns and set rules that pause, resume or adjust them, or ask you first',
+  'Oriven Chat, your advertising assistant inside the app',
+  'Priority Support from the OrivenAI team',
+];
+const PLAN_INTRO = {};
+pricing.PLAN_ORDER.forEach((id) => {
+  const pl = pricing.planById(id);
+  PLAN_INTRO[id] = { name: pl.name, price: pricing.priceLabel(pl), period: pricing.periodLabel(pl), credits: pl.credits, unlocks: INCLUDED };
+});
+PLAN_INTRO.starter = { name: 'Starter', legacy: true, credits: pricing.LEGACY_ALLOWANCES.starter, unlocks: INCLUDED };
+PLAN_INTRO.creator = { name: 'Creator', legacy: true, credits: pricing.LEGACY_ALLOWANCES.creator, unlocks: INCLUDED };
+PLAN_INTRO.professional = { name: 'Professional', legacy: true, credits: pricing.LEGACY_ALLOWANCES.professional, unlocks: INCLUDED };
+// d.plan is the account status ('paid' or a legacy name); d.period the access plan id.
+const planOf = (k, period) => (k === 'paid' ? PLAN_INTRO[period] || null : PLAN_INTRO[k] || null);
+const creditLine = (plan) => plan.legacy
+  ? `${fmt(plan.credits)} credits a month for Create, Research and more`
+  : `${fmt(plan.credits)} credits for ${plan.period}, for Create, Research and more`;
+const fromPrice = () => pricing.priceLabel(pricing.planById(pricing.PLAN_ORDER[0]));
 const planList = (plan) => [creditLine(plan)].concat(plan.unlocks);
 
 // ── Building blocks ─────────────────────────────────────────────────
@@ -86,17 +101,6 @@ function panel(label, inner) {
     `<td bgcolor="${C.panel}" style="background:${C.panel};border:1px solid ${C.line};border-radius:14px;padding:20px 22px 12px">` +
     `<p style="margin:0 0 14px;font-family:${SANS};font-size:12px;font-weight:600;letter-spacing:1.2px;text-transform:uppercase;color:${C.muted}">${label}</p>` +
     inner + `</td></tr></table>`;
-}
-
-// Two plan columns side by side; stacked on phones.
-function compare(left, right) {
-  const col = (c, hi) => `<td class="col" valign="top" width="50%" style="padding:0 ${hi ? '0' : '6px'} 0 ${hi ? '6px' : '0'}">` +
-    `<table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0"><tr><td bgcolor="${hi ? C.dark : C.panel}" style="background:${hi ? C.dark : C.panel};border:1px solid ${hi ? C.dark : C.line};border-radius:14px;padding:18px 18px 8px">` +
-    `<p style="margin:0 0 2px;font-family:${SANS};font-size:12px;font-weight:600;letter-spacing:1.2px;text-transform:uppercase;color:${hi ? C.lime : C.muted}">${c.name}</p>` +
-    `<p style="margin:0 0 14px;font-family:${SERIF};font-size:26px;line-height:1.2;color:${hi ? C.darkInk : C.ink}">${c.price}</p>` +
-    c.items.map((t) => `<p style="margin:0 0 10px;font-family:${SANS};font-size:14px;line-height:1.45;color:${hi ? C.darkInk : C.body}">${t}</p>`).join('') +
-    `</td></tr></table></td>`;
-  return `<table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="margin:8px 0 20px"><tr>${col(left, false)}${col(right, true)}</tr></table>`;
 }
 
 // ctx: { appUrl, unsubscribeUrl?, postalAddress? } — postalAddress is the full
@@ -217,16 +221,13 @@ const TEMPLATES = {
   },
 
   // 2 — First-ad reminder (marketing). The plan line depends on the account:
-  // the free first ad only when the server says the account still has it,
-  // the daily Free build only on Free, the monthly credits on a paid plan.
+  // the credits of the current plan with access, otherwise where plans start.
   first_ad_reminder(d, ctx) {
     const create = ctx.appUrl + '?start=create';
-    const paid = planOf(d.plan);
-    const planLine = d.freeFirstAd && !paid
-      ? 'Your first complete ad, including its image, is on us.'
-      : paid
-        ? `Your ${paid.name} plan includes ${creditLine(paid)}.`
-        : 'On the Free plan you can build one campaign every 24 hours.';
+    const paid = d.hasAccess ? planOf(d.plan, d.period) : null;
+    const planLine = paid
+      ? `Your ${paid.name} plan includes ${creditLine(paid)}.`
+      : `Plans start at ${fromPrice()} for 14 days of full access, renewed only when you choose.`;
     const body =
       p(`You haven’t created your first ad yet. It takes a few minutes, and you stay in control of what gets published.`) +
       steps([
@@ -236,7 +237,7 @@ const TEMPLATES = {
       ]) +
       panel(paid ? 'Your plan' : 'Good to know', p(esc(planLine), 'margin-bottom:8px;font-size:15px')) +
       button('Create my first ad', create);
-    return make({ category: 'marketing', subject: d.freeFirstAd && !paid ? 'Your first ad is ready to make, and it’s free' : 'Your first ad is a few minutes away',
+    return make({ category: 'marketing', subject: 'Your first ad is a few minutes away',
       eyebrow: 'Your first ad', heading: 'Ready for your first ad?', preheader: 'Describe your offer, pick a platform, and review a complete draft.', body, ctx, why: WHY.product,
       text: `Ready for your first ad?\n\nIt takes a few minutes:\n1. Describe your offer: what you sell and who it’s for.\n2. Pick a platform: Google, Meta, TikTok or Pinterest.\n3. Get a complete draft (headlines, ad copy, targeting, visual concepts) to review in Launch.\n\n${planLine}\n\nCreate my first ad: ${create}` });
   },
@@ -262,12 +263,12 @@ const TEMPLATES = {
     const body =
       p(`Your first ad is built. From here you can review it in Launch and publish when you’re ready.`) +
       p(`A good way to make the next one stronger is Research: see who you’re really competing with, what they promise and where there’s room for you.`) +
-      (d.researchIncluded ? '' : panel('Good to know', p('Research is included from the Starter plan.', 'margin-bottom:8px;font-size:15px'))) +
+      (d.researchIncluded ? '' : panel('Good to know', p('Research is included in every plan.', 'margin-bottom:8px;font-size:15px'))) +
       button('Explore Research', researchUrl) +
       p(link('Or review your ad in OrivenAI &rarr;', ctx.appUrl), 'margin-top:8px;font-size:15px');
     return make({ category: 'marketing', subject: 'Your first ad is ready. Here’s a good next step', eyebrow: 'Next step', heading: 'Your first ad is ready',
       preheader: 'Review it in Launch, then sharpen the next one with Research.', body, ctx, why: WHY.product,
-      text: `Your first ad is built. Review it in Launch and publish when you’re ready.\n\nTo make the next one stronger, use Research: see who you’re competing with and where there’s room for you.${d.researchIncluded ? '' : ' Research is included from the Starter plan.'}\n\nExplore Research: ${researchUrl}\nOpen OrivenAI: ${ctx.appUrl}` });
+      text: `Your first ad is built. Review it in Launch and publish when you’re ready.\n\nTo make the next one stronger, use Research: see who you’re competing with and where there’s room for you.${d.researchIncluded ? '' : ' Research is included in every plan.'}\n\nExplore Research: ${researchUrl}\nOpen OrivenAI: ${ctx.appUrl}` });
   },
 
   // 4 — Inactive (marketing).
@@ -285,29 +286,30 @@ const TEMPLATES = {
       text: `Your OrivenAI workspace is still here.\n\n- Research your market and competitors before you spend on ads\n- Create ad copy, targeting and visual concepts for Google, Meta, TikTok and Pinterest\n- Launch your campaigns and follow their results in one place\n\nOpen OrivenAI: ${ctx.appUrl}` });
   },
 
-  // 5 — Upgrade education (marketing). Explains, factually, what the plan
-  // that covers their repeated blocked action includes, next to what Free has.
+  // 5 — Plans overview (marketing). For an account without access that tried a
+  // paid action a few times: the plans, factually, from services/pricing.js.
   upgrade_education(d, ctx) {
-    const plan = planOf(d.plan) || PLAN_INTRO.starter;
     const plans = ctx.appUrl + '?plans=1';
-    const what = d.action === 'research' ? 'Research' : d.action === 'image' ? 'ad images' : 'more campaign builds';
+    const what = d.action === 'research' ? 'Research' : d.action === 'image' ? 'ad images' : 'campaign builds';
+    const rows = pricing.PLAN_ORDER.map((id) => PLAN_INTRO[id]).map((pl) => `${pl.name}: ${pl.price} for ${pl.period}, ${fmt(pl.credits)} credits`);
     const body =
-      p(`You’ve tried to use ${esc(what)} a few times on the Free plan. Here’s how Free and ${plan.name} compare, so you can decide what fits.`) +
-      compare(
-        { name: FREE.name, price: '€0', items: [`${FREE.creditsPerDay} credits a day`, 'One campaign build every 24 hours', 'Create, Launch and Campaigns'] },
-        { name: plan.name, price: `€${plan.price}<span style="font-family:${SANS};font-size:14px;color:${C.darkMuted}"> /month</span>`, items: planList(plan).map(esc) },
-      ) +
-      p(`You can cancel anytime in Settings → Subscription. If Free works for you, there’s nothing you need to do.`, 'font-size:15px') +
+      p(`You’ve tried to use ${esc(what)} a few times. It needs an OrivenAI plan. Every plan includes the same features; they differ only in how long they run and how many credits they include.`) +
+      panel('Plans (prices include VAT)', checks(rows.map(esc))) +
+      panel('Included in every plan', checks(INCLUDED.map(esc))) +
+      p(`You pay once per period. Nothing renews automatically: when the period ends, you choose whether to continue.`, 'font-size:15px') +
       button('Compare plans', plans);
-    return make({ category: 'marketing', subject: `What ${plan.name} adds to OrivenAI`, eyebrow: 'Plans', heading: `What ${plan.name} adds`,
-      preheader: `${plan.name} is €${plan.price}/month: ${fmt(plan.credits)} credits, Research and Automations.`, body, ctx, why: WHY.product,
-      text: `What ${plan.name} adds\n\nYou’ve tried to use ${what} a few times on the Free plan.\n\nFree (€0): ${FREE.creditsPerDay} credits a day, one campaign build every 24 hours.\n${plan.name} (€${plan.price}/month):\n- ${planList(plan).join('\n- ')}\n\nCancel anytime in Settings → Subscription. If Free works for you, there’s nothing you need to do.\n\nCompare plans: ${plans}` });
+    return make({ category: 'marketing', subject: 'OrivenAI plans, side by side', eyebrow: 'Plans', heading: 'Pick the period that fits',
+      preheader: `From ${fromPrice()} for 14 days. Same features in every plan, no automatic renewal.`, body, ctx, why: WHY.product,
+      text: `Pick the period that fits\n\nYou’ve tried to use ${what} a few times. It needs an OrivenAI plan. Every plan includes the same features.\n\nPlans (prices include VAT):\n- ${rows.join('\n- ')}\n\nIncluded in every plan:\n- ${INCLUDED.join('\n- ')}\n\nYou pay once per period. Nothing renews automatically.\n\nCompare plans: ${plans}` });
   },
 
   // 6 — Paid customer onboarding (service). Only what the plan really has.
   paid_onboarding(d, ctx) {
-    const plan = planOf(d.plan) || PLAN_INTRO.starter;
-    const chat = d.plan === 'creator' || d.plan === 'professional';
+    const plan = planOf(d.plan, d.period) || PLAN_INTRO.monthly;
+    const until = d.accessExpiresAt ? new Date(d.accessExpiresAt).toLocaleDateString('en-GB', { day: 'numeric', month: 'long', year: 'numeric', timeZone: 'Europe/Amsterdam' }) : null;
+    const manage = plan.legacy
+      ? 'Manage or cancel your subscription anytime in Settings → Subscription.'
+      : `Your access runs${until ? ' until ' + until : ' for ' + plan.period}. It doesn’t renew automatically; you can extend it anytime in Settings → Subscription.`;
     const body =
       p(`Thanks for choosing ${plan.name}. Your plan is active, and everything below is ready to use now.`) +
       panel(`Your ${plan.name} plan`, checks(planList(plan).map(esc))) +
@@ -317,12 +319,12 @@ const TEMPLATES = {
         ['Turn it into an ad', 'Use your findings in Create as the brief, then review the draft in Launch.'],
         ['Let Automations help', 'Once a campaign is live, schedule when it runs, or add rules that pause, resume or adjust its budget within limits you set, or ask you first.'],
       ]) +
-      (chat ? p(`Stuck at any point? Ask Oriven Chat inside the app; it knows which page you’re on.`, 'font-size:15px') : '') +
+      p(`Stuck at any point? Ask Oriven Chat inside the app; it knows which page you’re on.`, 'font-size:15px') +
       button('Open OrivenAI', ctx.appUrl) +
-      small(`Manage or cancel your subscription anytime in Settings → Subscription.`);
+      small(esc(manage));
     return make({ category: 'service', subject: `Your ${plan.name} plan is active`, eyebrow: 'Plan active', heading: `Welcome to ${plan.name}`,
-      preheader: `${fmt(plan.credits)} credits a month, plus Research and Automations. Here’s a good way to start.`, body, ctx, why: `You’re receiving this because you subscribed to OrivenAI ${plan.name}.`,
-      text: `Welcome to ${plan.name}. Your plan is active.\n\nYour plan includes:\n- ${planList(plan).join('\n- ')}\n\nA good way to start:\n1. Run a Research on your market, competitors and audience.\n2. Use the findings in Create as the brief, then review the draft in Launch.\n3. Once a campaign is live, add an automation in Automations.\n\nOpen OrivenAI: ${ctx.appUrl}\nManage or cancel your subscription anytime in Settings → Subscription.` });
+      preheader: `${creditLine(plan)}, plus Research and Automations. Here’s a good way to start.`, body, ctx, why: plan.legacy ? `You’re receiving this because you subscribed to OrivenAI ${plan.name}.` : `You’re receiving this because you bought OrivenAI ${plan.name}.`,
+      text: `Welcome to ${plan.name}. Your plan is active.\n\nYour plan includes:\n- ${planList(plan).join('\n- ')}\n\nA good way to start:\n1. Run a Research on your market, competitors and audience.\n2. Use the findings in Create as the brief, then review the draft in Launch.\n3. Once a campaign is live, add an automation in Automations.\n\nOpen OrivenAI: ${ctx.appUrl}\n${manage}` });
   },
 
   // Weekly AI Performance Report (service, Professional). Rendered ONLY from
@@ -373,33 +375,28 @@ function darkLayout({ heading, preheader, body, ctx, why }) {
     `</table></td></tr></table></body></html>`;
 }
 
-// Starter upgrade campaign for consenting Free accounts. Plan facts come from
-// PLAN_INTRO (price, credits) — never typed here.
-function campaignStarterUpgrade(d, ctx) {
-  const plan = PLAN_INTRO.starter;
+// Plans campaign for consenting accounts without access. Plan facts come from
+// PLAN_INTRO (services/pricing.js): never typed here.
+function campaignAccessPlans(d, ctx) {
   const url = d.ctaUrl || ctx.appUrl + '?plans=1';
-  const price = `€${plan.price}/month`, credits = `${fmt(plan.credits)} credits`;
-  const includes = [`${credits} every month`, 'The full advertising workflow', 'Research, Create, Launch, Campaigns and Automations'];
+  const rows = pricing.PLAN_ORDER.map((id) => PLAN_INTRO[id]).map((pl) => `${pl.name} · ${pl.price} · ${pl.period} · ${fmt(pl.credits)} credits`);
   const body =
     dp('Hi there,') +
     dp('You’ve already taken the first step by joining OrivenAI.') +
-    dp('With your Free account, you can explore AI-powered advertising and discover what the platform has to offer.') +
-    dp('But if you’re ready to take things further, OrivenAI Starter gives you access to the full advertising workflow.') +
-    dp('Research your market, create advertising content, launch campaigns, and manage your advertising activities in one place.') +
-    dp(`With ${credits} every month for just ${price}, Starter gives you more room to create, experiment, and grow.`) +
+    dp('OrivenAI gives you the full advertising workflow in one place: research your market, create advertising content, launch campaigns and manage them with Automations.') +
+    dp(`Every plan includes every feature. You choose how long you want access, from ${fromPrice()} for 14 days, and you pay once: nothing renews automatically.`) +
     `<table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="margin:6px 0 18px"><tr><td style="border:1px solid ${D.line};border-radius:14px;padding:18px 20px 8px">` +
-    `<p style="margin:0 0 12px;font-family:${SANS};font-size:12px;font-weight:600;letter-spacing:1.2px;text-transform:uppercase;color:${C.lime}">Starter · ${esc(price)}</p>` +
-    includes.map((t) => `<p style="margin:0 0 10px;font-family:${SANS};font-size:15px;line-height:1.45;color:${D.body}"><span style="color:${C.lime};font-weight:700">&#10003;</span>&nbsp;&nbsp;${esc(t)}</p>`).join('') +
+    `<p style="margin:0 0 12px;font-family:${SANS};font-size:12px;font-weight:600;letter-spacing:1.2px;text-transform:uppercase;color:${C.lime}">Plans · prices include VAT</p>` +
+    rows.map((t) => `<p style="margin:0 0 10px;font-family:${SANS};font-size:15px;line-height:1.45;color:${D.body}"><span style="color:${C.lime};font-weight:700">&#10003;</span>&nbsp;&nbsp;${esc(t)}</p>`).join('') +
     `</td></tr></table>` +
-    dp('No complicated setup. Just more possibilities.') +
-    button('Explore Starter', url) +
+    button('See the plans', url) +
     dp('The OrivenAI Team', 'margin-top:20px;color:' + D.ink);
   const why = 'You’re receiving this because you turned on marketing emails in your OrivenAI settings.';
-  const text = `Hi there,\n\nYou’ve already taken the first step by joining OrivenAI.\n\nWith your Free account, you can explore AI-powered advertising and discover what the platform has to offer.\n\nBut if you’re ready to take things further, OrivenAI Starter gives you access to the full advertising workflow.\n\nResearch your market, create advertising content, launch campaigns, and manage your advertising activities in one place.\n\nWith ${credits} every month for just ${price}, Starter gives you more room to create, experiment, and grow.\n\nStarter (${price}):\n- ${includes.join('\n- ')}\n\nNo complicated setup. Just more possibilities.\n\nExplore Starter: ${url}\n\nThe OrivenAI Team` +
+  const text = `Hi there,\n\nYou’ve already taken the first step by joining OrivenAI.\n\nOrivenAI gives you the full advertising workflow in one place: research your market, create advertising content, launch campaigns and manage them with Automations.\n\nEvery plan includes every feature. You choose how long you want access, from ${fromPrice()} for 14 days, and you pay once: nothing renews automatically.\n\nPlans (prices include VAT):\n- ${rows.join('\n- ')}\n\nSee the plans: ${url}\n\nThe OrivenAI Team` +
     `\n\n—\n${why}` + (ctx.unsubscribeUrl ? `\nUnsubscribe: ${ctx.unsubscribeUrl}` : '') + `\n${ctx.postalAddress || 'OrivenAI'} · contact@orivenai.com`;
-  return { category: 'marketing', subject: 'Ready to do more with OrivenAI?', html: darkLayout({ heading: 'Ready to do more with OrivenAI?', preheader: 'Unlock the full advertising workflow with Starter.', body, ctx, why }), text };
+  return { category: 'marketing', subject: 'Ready to do more with OrivenAI?', html: darkLayout({ heading: 'Ready to do more with OrivenAI?', preheader: `The full advertising workflow, from ${fromPrice()} for 14 days.`, body, ctx, why }), text };
 }
-TEMPLATES.campaign_starter_upgrade = campaignStarterUpgrade;
+TEMPLATES.campaign_access_plans = campaignAccessPlans;
 
 // ── Weekly report rendering ──────────────────────────────────────────
 const wrCopy = require('../weeklyReport/copy');
