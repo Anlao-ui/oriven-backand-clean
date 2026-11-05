@@ -61,9 +61,8 @@ function diagnose() {
   }
 
   if (trimmed) {
-    const masked = trimmed.slice(0, 5) + '[...' + trimmed.slice(-4) + ']';
-    console.log('[AIML] key (first 5 / last 4):', masked);
-    console.log('[AIML] auth header            : Authorization: Bearer ' + masked);
+    // Never log any part of the key (not even a masked prefix/suffix).
+    console.log('[AIML] key                    : set');
     console.log('[AIML] video endpoint         :', AIML_BASE + '/v2/video/generations');
     console.log('[AIML] default video model    :', DEFAULT_VID_MODEL);
     console.log('[AIML] configured             : true ✅');

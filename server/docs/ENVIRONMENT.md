@@ -27,6 +27,7 @@ Extracted directly from `process.env.*` references across `server.js`, `provider
 | `GOOGLE_ADS_DEVELOPER_TOKEN` | Required for all Google Ads API calls, separate from OAuth. |
 | `META_APP_ID` / `META_APP_SECRET` / `META_REDIRECT_URI` | Meta OAuth. |
 | `TIKTOK_APP_ID` / `TIKTOK_APP_SECRET` / `TIKTOK_REDIRECT_URI` | TikTok OAuth. |
+| `PINTEREST_APP_ID` / `PINTEREST_APP_SECRET` / `PINTEREST_REDIRECT_URI` | Pinterest OAuth. Without id + secret, `/api/pinterest/auth-url` answers 503. |
 
 ## Billing
 
@@ -34,7 +35,8 @@ Extracted directly from `process.env.*` references across `server.js`, `provider
 |---|---|
 | `STRIPE_SECRET_KEY` | Stripe API key. |
 | `STRIPE_WEBHOOK_SECRET` | Verifies `/api/stripe-webhook` signatures. |
-| `STRIPE_PRICE_STARTER` / `STRIPE_PRICE_CREATOR` / `STRIPE_PRICE_PROFESSIONAL` | Price IDs for the three paid plans. |
+| `STRIPE_PRICE_FLEX_TEST` … `STRIPE_PRICE_ANNUAL_TEST` / `STRIPE_PRICE_FLEX_LIVE` … `STRIPE_PRICE_ANNUAL_LIVE` | One-time EUR Price IDs for the five access plans (FLEX, MONTHLY, QUARTERLY, SEMIANNUAL, ANNUAL), per Stripe mode. The set used follows the secret key's mode (`services/pricing.js`); checkout verifies each price with Stripe before opening. |
+| `STRIPE_PRICE_STARTER` / `STRIPE_PRICE_CREATOR` / `STRIPE_PRICE_PROFESSIONAL` | Legacy monthly subscription prices — only used to recognise existing subscribers. |
 
 ## Analytics (owner dashboard, cookieless statistics)
 

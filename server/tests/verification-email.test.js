@@ -68,6 +68,14 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   check('signup ok; verification delivered by the SMTP fallback; ledger says "smtp:resend_failed"', r.status === 200 && H.mail.length === mailBefore + 1 && v.length === 1 && v[0].status === 'sent' && v[0].error === 'smtp:resend_failed', { v, mail: H.mail.length - mailBefore });
   check('the failed welcome stays "failed" for the lifecycle job’s normal retry', sends(id).some((x) => x.template === 'welcome' && x.status === 'failed'), sends(id));
 
+  log('\nC2. The SMTP fallback escapes the name typed at signup');
+  resend.fail.push(500, 500, 500, 500, 500, 500);
+  const mailBefore2 = H.mail.length;
+  r = await H.call('POST', '/api/signup', null, { firstName: '<a href="https://evil.example">Click</a>', lastName: 'X', email: 'inject@example.com', password: 'secret123', marketingOptIn: false }, { 'X-Forwarded-For': '198.51.100.' + (++n) });
+  await sleep(50);
+  const injMail = H.mail.slice(mailBefore2).map((m) => String(m.html || '')).join('\n');
+  check('SMTP email sent, name shown as text: no <a href> from the name, escaped instead', r.status === 200 && injMail.length > 0 && !/<a href="https:\/\/evil\.example"/.test(injMail) && /&lt;a href=&quot;https:\/\/evil\.example&quot;&gt;/.test(injMail), injMail.slice(0, 200));
+
   log('\nD. No email provider at all → recorded as skipped');
   setEnv({ EMAIL_MODE: null, SMTP_USER: null, SMTP_PASS: null });
   r = await signup('four@example.com'); await sleep(50);

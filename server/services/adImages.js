@@ -22,7 +22,8 @@ async function fetchImage(src) {
     return Buffer.from(m[1], 'base64');
   }
   if (/^https?:\/\//i.test(s)) {
-    const r = await fetch(s);
+    // The URL comes from the campaign package the browser sends: only public hosts.
+    const r = await require('./safeFetch').safeFetch(s);
     if (!r.ok) throw Object.assign(new Error('Could not download the campaign image (HTTP ' + r.status + '). Generate or upload it again.'), { status: 422 });
     const buf = Buffer.from(await r.arrayBuffer());
     if (buf.length > MAX_BYTES) throw new Error('The campaign image is larger than 20 MB.');

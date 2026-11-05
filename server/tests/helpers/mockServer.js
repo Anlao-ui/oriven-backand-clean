@@ -23,6 +23,9 @@ function boot({ port, env }) {
     net.blocked.push(u);
     throw new Error('network blocked in test: ' + u);
   };
+  // The SSRF guard resolves hosts before fetching; mock hosts never resolve,
+  // so give every name a public test address (requests still hit the stub above).
+  require(path.join(SERVER_DIR, 'services', 'safeFetch'))._setLookup(async () => [{ address: '93.184.216.34', family: 4 }]);
 
   // ── stateful Supabase ──
   const TABLES = {}, MISSING = {}, UNIQUE = { email_sends: [['user_id', 'dedupe_key']], email_suppressions: [['email_hash']], free_first_ad_claims: [['user_id']], weekly_reports: [['user_id', 'week_start', 'scope']], onboarding_sessions: [['user_id']], stripe_webhook_events: [['id']] };

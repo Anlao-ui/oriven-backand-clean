@@ -88,6 +88,16 @@ function isBlockedV6(ip) {
   // IPv4-mapped (::ffff:a.b.c.d) -- validate the embedded IPv4 too.
   const mapped = lower.match(/^::ffff:(\d+\.\d+\.\d+\.\d+)$/);
   if (mapped) return isBlockedV4(mapped[1]);
+  // The same in hex, which is how Node's URL parser writes it
+  // (http://[::ffff:127.0.0.1]/ has hostname [::ffff:7f00:1]).
+  const mappedHex = lower.match(/^::ffff:([0-9a-f]{1,4}):([0-9a-f]{1,4})$/);
+  if (mappedHex) {
+    const hi = parseInt(mappedHex[1], 16), lo = parseInt(mappedHex[2], 16);
+    return isBlockedV4([hi >> 8, hi & 255, lo >> 8, lo & 255].join('.'));
+  }
+  // Anything else starting with '::' (IPv4-compatible ::a.b.c.d, ::ffff:0:…)
+  // is never a public host; NAT64 (64:ff9b::/96) can reach IPv4 internals.
+  if (lower.startsWith('::') || lower.startsWith('64:ff9b:')) return true;
   return false;
 }
 function isBlockedIP(ip) {

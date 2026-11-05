@@ -30,6 +30,9 @@ console.log(
 );
 
 const app = express();
+// No framework banner; responses are never MIME-sniffed or framed.
+app.disable('x-powered-by');
+app.use((req, res, next) => { res.setHeader('X-Content-Type-Options', 'nosniff'); res.setHeader('X-Frame-Options', 'DENY'); next(); });
 const PORT = parseInt(process.env.PORT || '5500', 10);
 
 const toolRouter = require('./services/toolRouter');
@@ -211,7 +214,7 @@ paidActions.init({ db: supabaseAdmin, creditManager, getUser: getUserFromToken }
   // â”€â”€ AI keys â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   const _ck = (val, label) => {
     if (!val || val === 'missing') { console.error('âŒ [ENV] ' + label + ' is not set'); }
-    else { console.log('âœ… [ENV] ' + label + ' = ' + val.slice(0, 10) + '...'); }
+    else { console.log('âœ… [ENV] ' + label + ' is set'); } // never log any part of a key
   };
   _ck(process.env.AIML_API_KEY, 'AIML_API_KEY');
 
@@ -229,16 +232,17 @@ paidActions.init({ db: supabaseAdmin, creditManager, getUser: getUserFromToken }
   } else {
     console.log('âœ… [ENV] STRIPE_SECRET_KEY =', sk.startsWith('sk_live') ? 'âœ… LIVE key' : 'âš ï¸  TEST key');
   }
-  // Stripe Price IDs â€” set these in Render environment variables.
-  // Create prices in Stripe Dashboard â†’ Products, then copy the price_... ID.
-  // STRIPE_PRICE_STARTER      â†’ Starter plan       â‚¬9.95/month
-  // STRIPE_PRICE_CREATOR      â†’ Creator plan        â‚¬19.95/month
-  // STRIPE_PRICE_PROFESSIONAL â†’ Professional plan   â‚¬34.95/month
-  // Agency is Contact Sales â€” no Stripe price ID required.
-  const _price = (k) => console.log(' ', k, '=', process.env[k] || 'âŒ NOT SET');
+  // Legacy monthly subscription prices (Starter/Creator/Professional): only
+  // used to recognise EXISTING subscribers' Stripe subscriptions. The five
+  // current access plans use STRIPE_PRICE_<PLAN>_<TEST|LIVE>
+  // (services/pricing.js; services/purchases.js reports any missing one).
+  const _price = (k) => console.log(' ', k, '(legacy) =', process.env[k] ? 'set' : 'not set');
   _price('STRIPE_PRICE_STARTER');
   _price('STRIPE_PRICE_CREATOR');
   _price('STRIPE_PRICE_PROFESSIONAL');
+  if (!process.env.PINTEREST_APP_ID || !process.env.PINTEREST_APP_SECRET) console.warn('[ENV] PINTEREST_APP_ID / PINTEREST_APP_SECRET not set: connecting Pinterest answers 503');
+  if (!process.env.META_APP_ID || !process.env.META_APP_SECRET) console.warn('[ENV] META_APP_ID / META_APP_SECRET not set: connecting Meta is unavailable');
+  if (!process.env.TIKTOK_APP_ID || !process.env.TIKTOK_APP_SECRET) console.warn('[ENV] TIKTOK_APP_ID / TIKTOK_APP_SECRET not set: connecting TikTok is unavailable');
 
   // â”€â”€ SMTP â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   if (!process.env.SMTP_USER || !process.env.SMTP_PASS) {
@@ -910,6 +914,9 @@ function _smtpTransporter() {
 
 // â”€â”€ Verification email HTML â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 function _verificationEmailHtml(firstName, verifyUrl) {
+  // The name is whatever was typed at signup: escape it so nobody can put
+  // their own HTML (links, images) into an email sent to another address.
+  firstName = String(firstName == null ? '' : firstName).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
   return `<!DOCTYPE html>
 <html lang="en">
 <head><meta charset="UTF-8"><title>Verify your ORIVEN email</title></head>
@@ -917,7 +924,7 @@ function _verificationEmailHtml(firstName, verifyUrl) {
   <div style="max-width:520px;margin:40px auto;background:#fff;border-radius:16px;overflow:hidden;box-shadow:0 2px 24px rgba(0,0,0,.08)">
     <div style="background:#0A0A0A;padding:32px 40px 28px">
       <div style="font-size:22px;font-weight:700;color:#B7FF2A;letter-spacing:-.5px">ORIVEN</div>
-      <div style="font-size:13px;color:rgba(255,255,255,.5);margin-top:4px">Brand Intelligence Platform</div>
+      <div style="font-size:13px;color:rgba(255,255,255,.5);margin-top:4px">The connected AI marketing workspace</div>
     </div>
     <div style="padding:36px 40px">
       <p style="margin:0 0 8px;font-size:20px;font-weight:600;color:#111">Hi ${firstName},</p>
@@ -1127,7 +1134,7 @@ async function _decodeImageSource(source) {
     return { buffer: Buffer.from(dataUriMatch[2], 'base64'), mimeType: dataUriMatch[1] || 'image/png' };
   }
   if (/^https?:\/\//i.test(source)) {
-    const resp = await fetch(source);
+    const resp = await require('./services/safeFetch').safeFetch(source); // user-supplied URL: public hosts only
     if (!resp.ok) throw new Error(`Could not fetch source image (HTTP ${resp.status}).`);
     const buffer = Buffer.from(await resp.arrayBuffer());
     const mimeType = resp.headers.get('content-type') || 'image/png';
@@ -2197,6 +2204,11 @@ app.get('/api/pricing', (req, res) => {
   res.set('Cache-Control', 'public, max-age=300');
   res.json({ plans: pricing.publicPlans(), featureCosts: pricing.FEATURE_COSTS, vatRate: pricing.VAT_RATE, currency: pricing.CURRENCY, renewal: 'manual', creditsExpireWithAccess: true });
 });
+
+// ── GET /api/exchange-rates: ECB euro rates for approximate prices on the
+// pricing page (display only; checkout always charges the EUR price).
+// Cached in memory for 12 hours (services/exchangeRates.js).
+app.get('/api/exchange-rates', require('./services/exchangeRates').handler);
 
 // ── POST /api/create-checkout-session: buy an access period (one-time) ──
 // body: { plan: 'flex' | 'monthly' | 'quarterly' | 'semiannual' | 'annual' }.
@@ -8712,7 +8724,7 @@ app.post('/api/google/campaign/:id/resume', async (req, res) => {
     };
     if (loginCustomerId && loginCustomerId !== customerId) mutateHeaders['login-customer-id'] = loginCustomerId;
     console.log('[Resume DIAG] request URL          :', mutateUrl);
-    console.log('[Resume DIAG] request headers       :', JSON.stringify(Object.assign({}, mutateHeaders, { Authorization: 'Bearer ***redacted***' })));
+    console.log('[Resume DIAG] request headers       :', JSON.stringify(Object.assign({}, mutateHeaders, { Authorization: 'Bearer ***redacted***', 'developer-token': '***redacted***' })));
 
     console.log('[Google Campaign Resume] campaign:', campaignId, '| user:', user.id, '| customer:', customerId);
 
@@ -15519,6 +15531,14 @@ async function _cancelSubscriptionForDeletion(userId) {
 
 async function _deleteAccount(userId) {
   await _cancelSubscriptionForDeletion(userId);
+  // Uploaded and generated files (public bucket URLs) go first: a Storage
+  // error stops the deletion here so a retry can finish it.
+  try {
+    const n = await require('./services/userStorage').removeUserFiles(supabaseAdmin.storage, MANUAL_CREATIVE_BUCKET, userId);
+    if (n) console.log('[Account] Removed', n, 'stored file(s) for', userId);
+  } catch (err) {
+    const e = new Error(err.message); e.code = 'STORAGE_DELETE_FAILED'; throw e;
+  }
   const { data, error } = await supabaseAdmin.rpc('delete_account_data', { p_user_id: userId });
   if (error) {
     const missing = /delete_account_data|PGRST202|42883/.test((error.code || '') + ' ' + (error.message || ''));
@@ -15733,7 +15753,10 @@ async function _fetchWebsiteText(url) {
   const tid = setTimeout(() => ctrl.abort(), 10000);
   let html;
   try {
-    const r = await fetch(url, { signal: ctrl.signal, headers: { 'User-Agent': 'Mozilla/5.0 (compatible; OrivenBot/1.0)' } });
+    // The website address comes from the user: public hosts only (SSRF).
+    const r = await require('./services/safeFetch').safeFetch(url, { signal: ctrl.signal, headers: { 'User-Agent': 'Mozilla/5.0 (compatible; OrivenBot/1.0)' } });
+    if (!r.ok) throw Object.assign(new Error('The website answered HTTP ' + r.status + '.'), { status: 422 });
+    if (Number(r.headers.get('content-length') || 0) > 5 * 1024 * 1024) throw Object.assign(new Error('The website page is too large to read.'), { status: 422 });
     html = await r.text();
   } finally {
     clearTimeout(tid);
@@ -15777,6 +15800,9 @@ app.post('/api/business/website/refresh', async (req, res) => {
     let url = (req.body && req.body.url || '').trim();
     if (!url) return res.status(400).json({ error: 'url is required' });
     if (!/^https?:\/\//i.test(url)) url = 'https://' + url;
+    // Refuse internal/unknown addresses before anything is charged.
+    try { await require('./services/safeFetch').assertPublicUrl(url); }
+    catch (err) { return res.status(422).json({ error: err.message === 'That address is not allowed.' ? 'That website address can’t be used. Enter your public website address.' : err.message, code: err.code || 'unsafe_url' }); }
 
     const { data: existing } = await supabaseAdmin.from('business_website_knowledge').select('*').eq('user_id', user.id).maybeSingle();
 
@@ -15821,6 +15847,9 @@ app.post('/api/business/website/refresh', async (req, res) => {
     res.json({ website: data, changed: false });
   } catch (err) {
     console.error('[business/website/refresh]', err.message);
+    // A page that can't be read (refused redirect, HTTP error, too large): say
+    // so; the credits are refunded either way (paidActions, status ≥ 400).
+    if (err && err.status === 422) return res.status(422).json({ error: 'We couldn’t read that website: ' + err.message, code: err.code || 'website_unreadable' });
     res.status(500).json({ error: 'Could not analyze that website right now.' });
   }
 });

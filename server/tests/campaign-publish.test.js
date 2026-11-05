@@ -38,6 +38,9 @@ const failOn = { match: null, times: 0 };
 let seq = 100;
 let PNG_SQ, PNG_LAND, PNG_LOGO;
 const json = (status, obj) => new Response(JSON.stringify(obj), { status, headers: { 'content-type': 'application/json' } });
+// Image hosts in this suite (cdn.example.invalid) never resolve; the SSRF
+// guard (services/safeFetch.js) resolves them to a public test address.
+require("../services/safeFetch")._setLookup(async () => [{ address: "93.184.216.34", family: 4 }]);
 globalThis.fetch = async (url, opts) => {
   const u = String(url);
   if (u.startsWith(BASE)) return realFetch(url, opts);
