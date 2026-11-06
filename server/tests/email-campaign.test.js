@@ -54,7 +54,7 @@ H.net.handler = async (url, opts) => {
   check('marketing category (needs consent + unsubscribe)', e.category === 'marketing');
   check('footer names where consent came from (Settings)', e.html.includes('because you turned on marketing emails in your OrivenAI settings'));
   check('every plan with price, period and credits from services/pricing.js', ['Flex · €17 · 14 days · 1,050 credits', 'Monthly · €29 · 1 month · 1,750 credits', 'Quarterly · €78 · 3 months · 4,800 credits', 'Semi-Annual · €143 · 6 months · 8,850 credits', 'Annual · €245 · 12 months · 15,000 credits'].every((t) => e.html.includes(t)) && T.PLAN_INTRO.monthly.price === '€29' && T.PLAN_INTRO.monthly.credits === 1750);
-  check('says prices include VAT and nothing renews automatically', e.html.includes('prices include VAT') && e.html.includes('nothing renews automatically'));
+  check('says prices exclude VAT (added at checkout) and nothing renews automatically', e.html.includes('prices excl. VAT, added at checkout') && !/include VAT/i.test(e.html) && e.html.includes('nothing renews automatically'));
   check('no retired plan names or Free wording', !/Starter|Free account|€9\.95/.test(e.html + e.text));
   check('benefits: full workflow, research, create, launch, Automations', ['full advertising workflow', 'research your market, create advertising content, launch campaigns and manage them with Automations'].every((s) => e.html.includes(s)));
   check('the copy, in order', ['Hi there,', 'You’ve already taken the first step by joining OrivenAI.', 'OrivenAI gives you the full advertising workflow', 'Every plan includes every feature.', 'The OrivenAI Team'].every((t, i, a) => e.html.indexOf(t) >= 0 && (i === 0 || e.html.indexOf(t) > e.html.indexOf(a[i - 1]))));

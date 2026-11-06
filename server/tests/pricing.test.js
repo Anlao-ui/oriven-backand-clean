@@ -62,7 +62,8 @@ check('accessEnd: calendar months, month-end clamped like Postgres (31 Jan + 1 m
 check('accessEnd: Flex is 14 days', pricing.accessEnd(PLANS.flex, new Date('2026-11-01T00:00:00Z')).toISOString() === '2026-11-15T00:00:00.000Z');
 check('every paying status gets every entitlement; free gets none', pricing.PAID_STATUSES.every((s) => Object.values(planEntitlements.PLAN_ENTITLEMENTS[s]).every(Boolean)) && Object.values(planEntitlements.PLAN_ENTITLEMENTS.free).every((v) => !v));
 check('legacy allowances unchanged for running subscriptions (1,000 / 2,500 / 4,000)', JSON.stringify(pricing.LEGACY_ALLOWANCES) === JSON.stringify({ starter: 1000, creator: 2500, professional: 4000 }));
-check('public plan list (GET /api/pricing) carries price incl. and excl. VAT, period, credits, instalments', pricing.publicPlans().length === 5 && pricing.publicPlans().every((p) => p.priceInclVat && p.priceExVat && p.credits && p.instalments && p.creditsPerInstalment && (p.months || p.days)));
+check('public plan list (GET /api/pricing) carries the price BEFORE VAT (VAT added at checkout), period, credits, instalments', pricing.publicPlans().length === 5 && pricing.publicPlans().every((p) => p.price === pricing.PLANS[p.id].priceInclVat && p.priceExVat === p.price && p.taxBehavior === 'exclusive' && p.vatAddedAtCheckout === true && !('priceInclVat' in p) && p.credits && p.instalments && p.creditsPerInstalment && (p.months || p.days)));
+check('public prices before VAT: Flex 17, Monthly 29, Quarterly 78, Semi-Annual 143, Annual 245', pricing.publicPlans().map((p) => p.price).join() === '17,29,78,143,245');
 
 console.log('\nE. Frontend copy (oriven-frontend/js/plans.js) matches');
 const FE = path.resolve(__dirname, '..', '..', '..', 'oriven-frontend', 'js', 'plans.js');

@@ -59,7 +59,11 @@ H.net.handler = async (url, opts) => {
   log('\nA. Oriven Chat — server-side entitlement');
   for (const k of ['free', 'expired']) {
     let r = await chat('tok_' + k, { surface: 'oriven-chat', context: { page: 'performance' } });
-    check(`${k}: chat panel payload → 403 SUBSCRIPTION_REQUIRED`, r.status === 403 && r.body.code === 'SUBSCRIPTION_REQUIRED', r.body);
+    // An account whose paid access ended is stopped earlier, by the plan gate
+    // (services/entitlement.js: 403 ONBOARDING_REQUIRED, reason ACCESS_EXPIRED);
+    // a never-paid one by the route's own access check.
+    const want = k === 'expired' ? (r.body.code === 'ONBOARDING_REQUIRED' && r.body.reason === 'ACCESS_EXPIRED') : r.body.code === 'SUBSCRIPTION_REQUIRED';
+    check(`${k}: chat panel payload → 403 ${k === 'expired' ? 'ONBOARDING_REQUIRED (ACCESS_EXPIRED)' : 'SUBSCRIPTION_REQUIRED'}`, r.status === 403 && want, r.body);
     r = await chat('tok_' + k, { context: { page: 'performance' } });
     check(`${k}: same request WITHOUT the surface field → still 403`, r.status === 403);
     r = await chat('tok_' + k, { context: 'Campaign: X' });

@@ -294,13 +294,13 @@ const TEMPLATES = {
     const rows = pricing.PLAN_ORDER.map((id) => PLAN_INTRO[id]).map((pl) => `${pl.name}: ${pl.price} for ${pl.period}, ${fmt(pl.credits)} credits`);
     const body =
       p(`You’ve tried to use ${esc(what)} a few times. It needs an OrivenAI plan. Every plan includes the same features; they differ only in how long they run and how many credits they include.`) +
-      panel('Plans (prices include VAT)', checks(rows.map(esc))) +
+      panel('Plans (prices excl. VAT — the VAT for your location is added at checkout)', checks(rows.map(esc))) +
       panel('Included in every plan', checks(INCLUDED.map(esc))) +
       p(`You pay once per period. Nothing renews automatically: when the period ends, you choose whether to continue.`, 'font-size:15px') +
       button('Compare plans', plans);
     return make({ category: 'marketing', subject: 'OrivenAI plans, side by side', eyebrow: 'Plans', heading: 'Pick the period that fits',
       preheader: `From ${fromPrice()} for 14 days. Same features in every plan, no automatic renewal.`, body, ctx, why: WHY.product,
-      text: `Pick the period that fits\n\nYou’ve tried to use ${what} a few times. It needs an OrivenAI plan. Every plan includes the same features.\n\nPlans (prices include VAT):\n- ${rows.join('\n- ')}\n\nIncluded in every plan:\n- ${INCLUDED.join('\n- ')}\n\nYou pay once per period. Nothing renews automatically.\n\nCompare plans: ${plans}` });
+      text: `Pick the period that fits\n\nYou’ve tried to use ${what} a few times. It needs an OrivenAI plan. Every plan includes the same features.\n\nPlans (prices excl. VAT — the VAT for your location is added at checkout):\n- ${rows.join('\n- ')}\n\nIncluded in every plan:\n- ${INCLUDED.join('\n- ')}\n\nYou pay once per period. Nothing renews automatically.\n\nCompare plans: ${plans}` });
   },
 
   // 6 — Paid customer onboarding (service). Only what the plan really has.
@@ -386,13 +386,13 @@ function campaignAccessPlans(d, ctx) {
     dp('OrivenAI gives you the full advertising workflow in one place: research your market, create advertising content, launch campaigns and manage them with Automations.') +
     dp(`Every plan includes every feature. You choose how long you want access, from ${fromPrice()} for 14 days, and you pay once: nothing renews automatically.`) +
     `<table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="margin:6px 0 18px"><tr><td style="border:1px solid ${D.line};border-radius:14px;padding:18px 20px 8px">` +
-    `<p style="margin:0 0 12px;font-family:${SANS};font-size:12px;font-weight:600;letter-spacing:1.2px;text-transform:uppercase;color:${C.lime}">Plans · prices include VAT</p>` +
+    `<p style="margin:0 0 12px;font-family:${SANS};font-size:12px;font-weight:600;letter-spacing:1.2px;text-transform:uppercase;color:${C.lime}">Plans · prices excl. VAT, added at checkout</p>` +
     rows.map((t) => `<p style="margin:0 0 10px;font-family:${SANS};font-size:15px;line-height:1.45;color:${D.body}"><span style="color:${C.lime};font-weight:700">&#10003;</span>&nbsp;&nbsp;${esc(t)}</p>`).join('') +
     `</td></tr></table>` +
     button('See the plans', url) +
     dp('The OrivenAI Team', 'margin-top:20px;color:' + D.ink);
   const why = 'You’re receiving this because you turned on marketing emails in your OrivenAI settings.';
-  const text = `Hi there,\n\nYou’ve already taken the first step by joining OrivenAI.\n\nOrivenAI gives you the full advertising workflow in one place: research your market, create advertising content, launch campaigns and manage them with Automations.\n\nEvery plan includes every feature. You choose how long you want access, from ${fromPrice()} for 14 days, and you pay once: nothing renews automatically.\n\nPlans (prices include VAT):\n- ${rows.join('\n- ')}\n\nSee the plans: ${url}\n\nThe OrivenAI Team` +
+  const text = `Hi there,\n\nYou’ve already taken the first step by joining OrivenAI.\n\nOrivenAI gives you the full advertising workflow in one place: research your market, create advertising content, launch campaigns and manage them with Automations.\n\nEvery plan includes every feature. You choose how long you want access, from ${fromPrice()} for 14 days, and you pay once: nothing renews automatically.\n\nPlans (prices excl. VAT — the VAT for your location is added at checkout):\n- ${rows.join('\n- ')}\n\nSee the plans: ${url}\n\nThe OrivenAI Team` +
     `\n\n—\n${why}` + (ctx.unsubscribeUrl ? `\nUnsubscribe: ${ctx.unsubscribeUrl}` : '') + `\n${ctx.postalAddress || 'OrivenAI'} · contact@orivenai.com`;
   return { category: 'marketing', subject: 'Ready to do more with OrivenAI?', html: darkLayout({ heading: 'Ready to do more with OrivenAI?', preheader: `The full advertising workflow, from ${fromPrice()} for 14 days.`, body, ctx, why }), text };
 }

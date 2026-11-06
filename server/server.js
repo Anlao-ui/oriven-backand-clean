@@ -47,6 +47,7 @@ const spendGuard = require('./services/spendGuard'); // daily provider-spend saf
 const stripeBilling = require('./services/stripeBilling'); // legacy monthly subscriptions (existing subscribers only)
 const pricing = require('./services/pricing'); // plans, prices, periods, credits and the credit cost of every action (one source)
 const purchases = require('./services/purchases'); // one-time access purchases: checkout, fulfilment, refunds, disputes, instalments, expiry
+const entitlement = require('./services/entitlement'); // what an account may do right now: active / expired / none → app, onboarding or plans
 const onboarding = require('./services/onboarding'); // welcome eligibility, completion, first value, activation events
 const accounts = require('./services/accounts'); // signup validation, profile creation, email verification
 const firstAd = require('./services/firstAd'); // free first-ad image for new Free accounts (off unless FREE_FIRST_AD_ENABLED)
@@ -324,39 +325,55 @@ if (!process.env.RENDER && process.env.NODE_ENV !== 'production') {
 }
 app.use(express.static(LOCAL_FRONTEND_DIR));
 
-// ── Mandatory onboarding: no app access before the first payment ─────
-// A new account (services/onboarding.js eligibility: created since the
-// rollout, onboarding not completed) without confirmed paid access
-// (pricing.hasAccess) may only use what the onboarding and the payment need:
-// every other API route answers 403 ONBOARDING_REQUIRED, whatever the
-// browser does (closed overlay, direct /app, scripts, another tab). The
-// frontend reopens the onboarding on that code. Accounts that completed
-// onboarding or have access (every existing customer) are never affected,
-// and nothing changes while the onboarding table is missing (the documented
-// fallback). Paid actions keep their own access checks underneath.
+// ── Plan required: no app access without a plan (new or expired) ─────
+// services/entitlement.js decides. A new account (onboarding eligible:
+// created since the rollout, onboarding not completed) without paid access,
+// and an account whose paid access ended (access_expires_at in the past),
+// may only use what the onboarding / plan selection and the payment need:
+// every other API route answers 403 ONBOARDING_REQUIRED (reason NO_PLAN or
+// ACCESS_EXPIRED), whatever the browser does (closed overlay, direct /app,
+// scripts, another tab). The frontend opens the onboarding / plans on that
+// code. Accounts with access, and older free accounts that never paid, are
+// not affected. Paid actions keep their own access checks underneath.
 const _GATE_OPEN = [/^\/onboarding\//, /^\/events$/, /^\/t$/, /^\/signup$/, /^\/profile\/(ensure|sync-email)$/, /^\/create-checkout-session$/,
-  /^\/billing\/sync-checkout$/, /^\/get-subscription$/, /^\/user\/preferences$/, /^\/account\/delete$/, /^\/stripe-webhook$/,
+  /^\/billing\/sync-checkout$/, /^\/get-subscription$/, /^\/entitlement$/, /^\/user\/preferences$/, /^\/account\/delete$/, /^\/stripe-webhook$/,
+  // public plan data shown on the plan selection
+  /^\/pricing$/, /^\/exchange-rates$/, /^\/version$/,
   // account and privacy, needed before paying: email verification, email
   // preferences and unsubscribe; admin routes check admins themselves
   /^\/email\//, /^\/verify-email$/, /^\/resend-verification$/, /^\/admin\//];
-const _gateClear = new Map(); // userId -> time until which "not required" is trusted
-async function _onboardingRequired(user) {
-  const hit = _gateClear.get(user.id);
-  if (hit && hit > Date.now()) return false;
-  if (process.env.ONBOARDING_FLOW_DISABLED === 'true' || !(await onboardingFlow.available())) return false;
-  const { data, error } = await supabaseAdmin.from('profiles').select('created_at, onboarding_completed, subscription_status, access_expires_at').eq('id', user.id).maybeSingle();
+const _gateClear = new Map(); // userId -> time until which "no plan required" is trusted
+// The account's entitlement (services/entitlement.js) from its profile row.
+async function _entitlementFor(user) {
+  const { data, error } = await supabaseAdmin.from('profiles').select('created_at, onboarding_completed, subscription_status, access_expires_at, access_plan').eq('id', user.id).maybeSingle();
   if (error) throw error;
-  const prof = data || { created_at: user.created_at, onboarding_completed: null };
-  const required = onboarding.eligibility(prof).eligible && !pricing.hasAccess(prof);
-  if (!required) { _gateClear.set(user.id, Date.now() + 60e3); if (_gateClear.size > 50000) _gateClear.clear(); }
-  return required;
+  // A plan assigned by hand in Supabase is recorded like a purchase the first time it's seen.
+  const prof = data ? await entitlement.adoptManualPlan(supabaseAdmin, user.id, data) : { created_at: user.created_at, onboarding_completed: null };
+  const flowOn = process.env.ONBOARDING_FLOW_DISABLED !== 'true' && await onboardingFlow.available();
+  return { prof, flowOn, ent: entitlement.entitlementOf(prof, { onboardingEligible: flowOn && onboarding.eligibility(prof).eligible }) };
+}
+// The entitlement when a plan is required, else null. "Not required" is
+// remembered for up to a minute — never past the moment access ends.
+async function _planRequired(user) {
+  const hit = _gateClear.get(user.id);
+  if (hit && hit > Date.now()) return null;
+  const { ent } = await _entitlementFor(user);
+  if (!ent.planRequired) {
+    let until = Date.now() + 60e3;
+    if (ent.active && ent.expiresAt) until = Math.min(until, new Date(ent.expiresAt).getTime());
+    _gateClear.set(user.id, until); if (_gateClear.size > 50000) _gateClear.clear();
+    return null;
+  }
+  return ent;
 }
 app.use('/api', async (req, res, next) => {
   if (!req.headers.authorization || _GATE_OPEN.some((r) => r.test(req.path))) return next();
   try {
     const user = await getUserFromToken(req);
-    if (user && await _onboardingRequired(user)) {
-      return res.status(403).json({ error: 'Finish setting up your account to continue.', code: 'ONBOARDING_REQUIRED' });
+    const ent = user ? await _planRequired(user) : null;
+    if (ent) {
+      const expired = ent.state === 'expired';
+      return res.status(403).json({ error: expired ? 'Your OrivenAI access has ended. Choose a plan to continue.' : 'Finish setting up your account to continue.', code: 'ONBOARDING_REQUIRED', reason: expired ? 'ACCESS_EXPIRED' : 'NO_PLAN', route: ent.route });
     }
   } catch (err) {
     // Fail open for data routes; every paid or AI route still checks access itself.
@@ -860,8 +877,10 @@ const PAID_PLANS = pricing.PAID_STATUSES;
 const ACCESS_REQUIRED = { error: 'Your OrivenAI access isn’t active. Choose a plan to continue.', code: 'SUBSCRIPTION_REQUIRED' };
 
 async function _loadAccess(userId) {
-  const { data, error } = await supabaseAdmin.from('profiles').select('subscription_status, access_expires_at').eq('id', userId).maybeSingle();
+  const { data: row, error } = await supabaseAdmin.from('profiles').select('subscription_status, access_expires_at, access_plan').eq('id', userId).maybeSingle();
   if (error) throw error;
+  // A plan assigned by hand in Supabase counts (and is recorded like a purchase).
+  const data = row ? await entitlement.adoptManualPlan(supabaseAdmin, userId, row) : row;
   return { status: (data && data.subscription_status) || 'free', active: pricing.hasAccess(data), expiresAt: (data && data.access_expires_at) || null };
 }
 
@@ -7441,7 +7460,7 @@ const _automations = require('./routes/automationRoutes')(app, {
   backgroundJobs: () => BACKGROUND_JOBS_ENABLED,
   // Time-based: an account whose access period ended is 'free' here, so its
   // rules and schedules stop (services/pricing.js hasAccess).
-  planOf: async (userId) => { const { data } = await supabaseAdmin.from('profiles').select('subscription_status, access_expires_at').eq('id', userId).maybeSingle(); return pricing.hasAccess(data) ? data.subscription_status : 'free'; },
+  planOf: async (userId) => { const { data } = await supabaseAdmin.from('profiles').select('subscription_status, access_expires_at, access_plan').eq('id', userId).maybeSingle(); return pricing.hasAccess(data) ? data.subscription_status : 'free'; },
   log: (m) => console.warn(m),
   // Switching a Meta / TikTok / Pinterest campaign on goes through the same
   // activation as Launch (services/campaignActivation.js).
@@ -14938,6 +14957,22 @@ app.put('/api/user/preferences', async (req, res) => {
 // user id is ever read from the request body.
 
 // What the welcome screen should do for the signed-in account.
+// ── GET /api/entitlement: what this account may do right now ──
+// { active, state: active|expired|none, route: app|onboarding|plans,
+//   planRequired, plan, lastPlan, expiresAt } — services/entitlement.js,
+// from server-written profile fields only. Read-only.
+app.get('/api/entitlement', async (req, res) => {
+  try {
+    const user = await getUserFromToken(req);
+    if (!user) return res.status(401).json({ error: 'Authentication required', code: 'AUTH_REQUIRED' });
+    res.set('Cache-Control', 'no-store');
+    res.json((await _entitlementFor(user)).ent);
+  } catch (err) {
+    console.error('[entitlement GET]', err.message);
+    res.status(503).json({ error: 'Could not check your plan right now. Please try again.', code: 'AUTH_CHECK_FAILED' });
+  }
+});
+
 app.get('/api/onboarding/state', async (req, res) => {
   try {
     const user = await getUserFromToken(req);
@@ -14948,24 +14983,26 @@ app.get('/api/onboarding/state', async (req, res) => {
     // attempts failed). Server data only — the browser can't reset either.
     state.freeFirstAd = { available: !!fa.available, used: fa.reason === 'used' || fa.reason === 'attempts_used' };
     state.stage = onboarding.stage(state, fa);
-    // The guided onboarding (questionnaire → plan → paywall) replaces the
-    // welcome tour for eligible accounts once its table exists.
+    // Where this account goes, decided by the server (services/entitlement.js)
+    // before the app is shown: 'app', 'onboarding' or 'plans'.
+    const { prof, flowOn, ent } = await _entitlementFor(user);
+    state.access = ent;
     state.flow = { enabled: false };
-    if (state.eligible && process.env.ONBOARDING_FLOW_DISABLED !== 'true' && await onboardingFlow.available()) {
+    if (ent.active) {
+      // A paying customer always goes straight into the app — never back to
+      // the onboarding or the plans. An onboarding left unfinished at payment
+      // (e.g. the tab closed on Stripe) is completed here, in the background.
+      state.eligible = false;
+      if (flowOn && onboarding.eligibility(prof).eligible) {
+        onboardingFlow.completeAfterPayment(user.id, prof).catch((err) => console.warn('[OnboardingFlow] completion on visit deferred:', err.code || err.message));
+      }
+    } else if (flowOn && ent.route !== 'app') {
+      // New account → the guided onboarding (questions → assistant → plans);
+      // ended access → the plans straight away (renewal), answers kept.
       const row = await onboardingFlow.getRow(user.id);
-      // An account that already has paid access and never started the guided
-      // onboarding (e.g. bought from the pricing page) is a customer: it goes
-      // straight into the app. One that started it continues (its plan unlocks).
-      let paid = false;
-      if (!row) {
-        const { data: acc } = await supabaseAdmin.from('profiles').select('subscription_status, access_expires_at').eq('id', user.id).maybeSingle();
-        paid = pricing.hasAccess(acc);
-      }
-      if (!paid) {
-        const view = onboardingFlow.publicView(row);
-        if (view) view.checkoutPending = !!(await _pendingCheckout(user.id));
-        state.flow = { enabled: true, session: view };
-      }
+      const view = onboardingFlow.publicView(row);
+      if (view) view.checkoutPending = !!(await _pendingCheckout(user.id));
+      state.flow = { enabled: true, session: view, renewal: ent.route === 'plans' };
     }
     res.json(state);
   } catch (err) {
@@ -15318,7 +15355,7 @@ app.post('/api/onboarding/complete', async (req, res) => {
     // In the mandatory onboarding only a confirmed payment completes it
     // (services/onboardingFlow.js); this older route (the welcome tour) can't
     // mark an account done and so skip the paywall.
-    if (await _onboardingRequired(user)) {
+    if (await _planRequired(user)) {
       return res.status(403).json({ error: 'Finish setting up your account to continue.', code: 'ONBOARDING_REQUIRED' });
     }
     const result = await onboarding.complete(user.id, body.goal || null);
@@ -16943,7 +16980,7 @@ async function _archiveStaleLearnings() {
 // Uncharged background AI (recommendation narration, the daily brief) runs
 // only for accounts with active access.
 async function _userHasAccess(userId) {
-  try { const { data } = await supabaseAdmin.from('profiles').select('subscription_status, access_expires_at').eq('id', userId).maybeSingle(); return pricing.hasAccess(data); }
+  try { const { data } = await supabaseAdmin.from('profiles').select('subscription_status, access_expires_at, access_plan').eq('id', userId).maybeSingle(); return pricing.hasAccess(data); }
   catch (_) { return false; }
 }
 
@@ -17401,7 +17438,7 @@ async function _getOrRefreshAnalysis(user, platform, range, opts) {
   // Narrative policy (see _narrativeMaxAgeMs above).
   let aiAllowed = true;
   try {
-    const { data: prof } = await supabaseAdmin.from('profiles').select('subscription_status, access_expires_at').eq('id', user.id).maybeSingle();
+    const { data: prof } = await supabaseAdmin.from('profiles').select('subscription_status, access_expires_at, access_plan').eq('id', user.id).maybeSingle();
     aiAllowed = pricing.hasAccess(prof); // no access, no AI narrative (it's uncharged background AI)
   } catch (_) { /* unknown plan: allow, as before */ }
   // narrativeAt is set only when a real AI narrative was generated (null for

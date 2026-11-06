@@ -185,11 +185,24 @@ function accessEnd(plan, start) {
   if (plan.days) d.setUTCDate(d.getUTCDate() + plan.days);
   return d;
 }
-// Whether a profile row currently has paid access (time-based, never the
-// status label alone).
+// The canonical plan id for a plan id or name as stored or typed by an
+// operator in Supabase: "annual", "Annual", "Semi-Annual", "semi_annual",
+// "SEMIANNUAL" … → 'annual' / 'semiannual'. null for anything else.
+function planIdFrom(v) {
+  if (v == null) return null;
+  const k = String(v).toLowerCase().replace(/[^a-z]/g, '');
+  return Object.prototype.hasOwnProperty.call(PLANS, k) ? k : null;
+}
+// Whether a profile row currently has paid access — always time-based:
+// access_expires_at must lie in the future, and the row must name what the
+// access is: a paying status (a purchase / a legacy subscription), or one of
+// the five plans in access_plan (also a plan an operator assigned by hand in
+// Supabase). The status label alone, or a plan name alone, never grants it.
+// Only the server and operators can write these columns (browsers have no
+// write access to profiles).
 function hasAccess(profile, now) {
-  if (!profile || !PAID_STATUSES.includes(profile.subscription_status || '')) return false;
-  if (!profile.access_expires_at) return false;
+  if (!profile || !profile.access_expires_at) return false;
+  if (!PAID_STATUSES.includes(profile.subscription_status || '') && !planIdFrom(profile.access_plan)) return false;
   return new Date(profile.access_expires_at).getTime() > (now || Date.now());
 }
 // Customer-facing labels: "€29" and "1 month" / "14 days".
@@ -198,12 +211,15 @@ function periodLabel(plan) {
   if (plan.days) return plan.days + ' days';
   return plan.months === 1 ? '1 month' : plan.months + ' months';
 }
-// Public, display-ready plan list (also served by GET /api/pricing).
+// Public, display-ready plan list (also served by GET /api/pricing). The
+// plan price is BEFORE VAT: Stripe Tax adds the VAT for the customer's
+// location at checkout (taxBehavior 'exclusive'). VAT_RATE / priceExVat()
+// above stay a planning assumption for the AI cost budget only.
 function publicPlans() {
   return PLAN_ORDER.map((id) => {
     const p = PLANS[id];
     return {
-      id, name: p.name, description: p.description, priceInclVat: p.priceInclVat, priceExVat: priceExVat(p), vatRate: VAT_RATE, currency: CURRENCY,
+      id, name: p.name, description: p.description, price: p.priceInclVat, priceExVat: p.priceInclVat, taxBehavior: 'exclusive', vatAddedAtCheckout: true, currency: CURRENCY,
       months: p.months, days: p.days, credits: p.credits, instalments: p.instalments, creditsPerInstalment: creditsPerInstalment(p),
     };
   });
@@ -214,5 +230,5 @@ module.exports = {
   PLANS, PLAN_ORDER, FEATURE_COSTS, CHAT_LIMITS,
   PAID_STATUSES, LEGACY_PLANS, LEGACY_ALLOWANCES, LEGACY_GRACE_DAYS,
   STRIPE_PRICE_IDS, STRIPE_PRICE_ID_RE, STRIPE_MODE, PRICE_ENV, PRICE_ENV_ALIASES, priceEnvNameFor, stripeMode, priceIdsForMode, PricingConfigError, priceIdProblem, stripePriceIdFor, stripePriceStatus,
-  planById, priceInclVatCents, priceExVat, vatAmount, aiBudget, creditsPerInstalment, accessEnd, hasAccess, publicPlans, priceLabel, periodLabel,
+  planById, planIdFrom, priceInclVatCents, priceExVat, vatAmount, aiBudget, creditsPerInstalment, accessEnd, hasAccess, publicPlans, priceLabel, periodLabel,
 };
