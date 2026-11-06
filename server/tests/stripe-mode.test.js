@@ -82,8 +82,8 @@ const fresh = (mod) => { delete require.cache[require.resolve(mod)]; return requ
   check('a LIVE Mode price with a test key → refused before anything is created', x.code === 'PRICE_CONFIG_MISMATCH' && x.created === 0, x);
   x = await refuse({ type: 'recurring', recurring: { interval: 'month' } });
   check('a recurring (subscription) price → refused', x.code === 'PRICE_CONFIG_MISMATCH' && x.created === 0, x);
-  x = await refuse({ tax_behavior: 'exclusive' });
-  check('a price without VAT included (tax behaviour exclusive) → refused', x.code === 'PRICE_CONFIG_MISMATCH' && x.created === 0, x);
+  x = await refuse({ tax_behavior: 'inclusive' });
+  check('a price with VAT inside it (tax behaviour inclusive; VAT must be added on top) → refused', x.code === 'PRICE_CONFIG_MISMATCH' && x.created === 0, x);
   x = await refuse({ unit_amount: 1600 });
   check('a price with a different amount → refused', x.code === 'PRICE_CONFIG_MISMATCH' && x.created === 0, x);
   x = await refuse({});

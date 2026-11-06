@@ -29,9 +29,11 @@
 // ════════════════════════════════════════════════════════════════
 
 // Planning assumption ONLY (Dutch VAT): used to size the AI cost budget
-// below. It is never shown to customers and never used to charge: prices
-// are tax-inclusive Stripe Prices and Stripe Tax calculates the VAT that
-// applies to each buyer at checkout.
+// below. It is never used to charge: plan prices are BEFORE VAT
+// (tax-exclusive Stripe Prices) and Stripe Tax adds the VAT that applies to
+// each buyer at checkout (21 % in the Netherlands). The field name
+// priceInclVat (and purchases.price_incl_vat_cents) predates that change:
+// it holds the plan price the Stripe Price must have, before VAT.
 const VAT_RATE = 0.21;
 const CURRENCY = 'eur';
 const AI_COST_SHARE = 0.30;     // AI may use at most 30% of revenue excl. VAT
@@ -46,7 +48,7 @@ const PLANNING_COST_PER_CREDIT_EUR = 0.0040;
 // (FLEX, MONTHLY, QUARTERLY, SEMIANNUAL, ANNUAL — see .env.example.)
 // Each is a Price ID (price_…, Stripe → Product catalogue → the product →
 // its price; NOT the product's prod_… id). Every price must be a ONE-TIME
-// price in EUR with the amount below and tax behaviour "Inclusive", in the
+// price in EUR with the amount below and tax behaviour "Exclusive", in the
 // SAME mode as the key — checkout verifies that with Stripe before it opens
 // and refuses (nothing created, nothing charged) when a price is missing, a
 // placeholder, from the other mode or different.

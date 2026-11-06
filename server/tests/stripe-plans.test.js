@@ -108,7 +108,7 @@ const days = (a, b) => Math.round((new Date(b) - new Date(a)) / 864e5);
   // ── 2. The Stripe price must match the server's terms ──────────
   console.log('\n2. Stripe price verified before checkout');
   const realFlex = PRICES[pricing.PLANS.flex.stripePriceId];
-  for (const [label, over] of [['recurring (a subscription price)', { type: 'recurring', recurring: { interval: 'month' } }], ['a different amount (€15)', { unit_amount: 1500 }], ['tax behaviour exclusive (VAT would be added on top)', { tax_behavior: 'exclusive' }], ['tax behaviour unspecified', { tax_behavior: 'unspecified' }], ['currency USD', { currency: 'usd' }], ['archived', { active: false }]]) {
+  for (const [label, over] of [['recurring (a subscription price)', { type: 'recurring', recurring: { interval: 'month' } }], ['a different amount (€15)', { unit_amount: 1500 }], ['tax behaviour inclusive (VAT inside the price instead of on top)', { tax_behavior: 'inclusive' }], ['tax behaviour unspecified (account default not exclusive / unreadable)', { tax_behavior: 'unspecified' }], ['currency USD', { currency: 'usd' }], ['archived', { active: false }]]) {
     S.prices[realFlex.id] = Object.assign({}, realFlex, over); purchases._resetForTests();
     const created0 = S.created.length;
     const e = await refuse(() => checkout(u0, 'flex'));
@@ -137,8 +137,8 @@ const days = (a, b) => Math.round((new Date(b) - new Date(a)) / 864e5);
     const sessionPaid = paidSession(c);
     const out = await purchases.onCheckoutCompleted(sessionPaid); // the verified webhook
     const after = await profile(u.id), paid = (await purchaseRows(u.id))[0], g = await grants(paid.id);
-    check(`3.${id}.d payment confirmed: purchase paid with session, payment intent, customer, amount ${X.cents} (tax ${sessionPaid.total_details.amount_tax}), EUR, access start/end, paid time`,
-      out.fulfilled && paid.status === 'paid' && paid.stripe_checkout_session_id === c.id && paid.stripe_payment_intent_id === sessionPaid.payment_intent && paid.stripe_customer_id === sessionPaid.customer && paid.amount_total_cents === X.cents && paid.amount_tax_cents === sessionPaid.total_details.amount_tax && !!paid.access_start && !!paid.access_end && !!paid.paid_at, paid);
+    check(`3.${id}.d payment confirmed: purchase paid with session, payment intent, customer, plan price ${X.cents} + VAT ${sessionPaid.total_details.amount_tax} = total ${sessionPaid.amount_total}, EUR, access start/end, paid time`,
+      out.fulfilled && paid.status === 'paid' && paid.stripe_checkout_session_id === c.id && paid.stripe_payment_intent_id === sessionPaid.payment_intent && paid.stripe_customer_id === sessionPaid.customer && sessionPaid.amount_total === X.cents + sessionPaid.total_details.amount_tax && paid.amount_total_cents === sessionPaid.amount_total && paid.amount_tax_cents === sessionPaid.total_details.amount_tax && paid.price_incl_vat_cents === X.cents && !!paid.access_start && !!paid.access_end && !!paid.paid_at, paid);
     const expectedEnd = pricing.accessEnd(plan, new Date(paid.access_start));
     check(`3.${id}.e profile: plan "${id}", status paid, access until start + ${X.label} (matches the purchase)`,
       after.subscription_status === 'paid' && after.access_plan === id && Math.abs(new Date(after.access_expires_at) - expectedEnd) < 1000 && new Date(after.access_expires_at).getTime() === new Date(paid.access_end).getTime() && (X.days ? days(paid.access_start, paid.access_end) === 14 : true), { start: paid.access_start, end: paid.access_end, expectedEnd });
@@ -184,8 +184,8 @@ const days = (a, b) => Math.round((new Date(b) - new Date(a)) / 864e5);
   await purchases.onCheckoutExpired(paidSession(fc2, { payment_status: 'unpaid', status: 'expired' }));
   check('5.2 cancelled / abandoned checkout: purchase expired, nothing granted', (await purchaseRows(f.id))[1].status === 'expired' && (await profile(f.id)).credits_balance === 0);
   await checkout(f, 'flex'); const fc3 = S.created[S.created.length - 1];
-  const vatOnTop = await purchases.onCheckoutCompleted(paidSession(fc3, { amount_total: 2057 }));
-  check('5.3 a paid total that differs from the plan (e.g. VAT added on top: €20.57 for Flex) is refused: no access, no credits', !vatOnTop.fulfilled && vatOnTop.skipped === 'amount_mismatch' && (await profile(f.id)).credits_balance === 0 && (await purchaseRows(f.id))[2].status === 'pending');
+  const vatOnTop = await purchases.onCheckoutCompleted(paidSession(fc3, { amount_total: 2157 }));
+  check('5.3 a paid total that is not plan price + VAT (Flex €17.00 + €3.57 VAT, but €21.57 paid) is refused: no access, no credits', !vatOnTop.fulfilled && vatOnTop.skipped === 'amount_mismatch' && (await profile(f.id)).credits_balance === 0 && (await purchaseRows(f.id))[2].status === 'pending');
   const swapped = await purchases.onCheckoutCompleted(paidSession(fc3, { metadata: Object.assign({}, fc3.p.metadata, { priceId: pricing.PLANS.annual.stripePriceId }) }));
   check('5.4 a session claiming another plan’s price for this purchase is refused', swapped.skipped === 'price_mismatch' && (await profile(f.id)).credits_balance === 0);
   const other = await purchases.onCheckoutCompleted(paidSession(fc3, { client_reference_id: users.flex.id }));

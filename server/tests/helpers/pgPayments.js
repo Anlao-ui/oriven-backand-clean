@@ -77,11 +77,12 @@ function adapter(pg) {
 }
 
 // A Stripe Price exactly as services/purchases.js expects it for a plan:
-// active, one-time, EUR, the plan's amount, tax behaviour inclusive.
+// active, one-time, EUR, the plan's price (before VAT), tax behaviour
+// exclusive (Stripe Tax adds the VAT on top).
 function priceFor(pricing, planId, over) {
   const plan = pricing.PLANS[planId];
   return Object.assign({ id: 'price_TEST' + planId.toUpperCase() + '0001', object: 'price', active: true, type: 'one_time', recurring: null,
-    currency: 'eur', unit_amount: pricing.priceInclVatCents(plan), tax_behavior: 'inclusive', product: 'prod_TEST' + planId.toUpperCase() }, over || {});
+    currency: 'eur', unit_amount: pricing.priceInclVatCents(plan), tax_behavior: 'exclusive', product: 'prod_TEST' + planId.toUpperCase() }, over || {});
 }
 // Configures test Price IDs for all five plans in services/pricing.js (this
 // process only) and returns the matching fake prices.
@@ -91,7 +92,26 @@ function installTestPrices(pricing) {
   return prices;
 }
 
-// Stripe fake: prices.retrieve, checkout.sessions.create/retrieve/expire.
+// What Stripe's listLineItems answers for a created session (params as given
+// to checkout.sessions.create): one line, the Price, quantity 1, its amount
+// before tax, VAT at the given rate on top (exclusive prices).
+function lineItemsFor(params, prices, rate) {
+  const r = rate === undefined ? 0.21 : rate;
+  return { object: 'list', data: params.line_items.map((li) => {
+    const p = prices[li.price] || {}; const sub = (p.unit_amount || 0) * (li.quantity || 1);
+    const tax = p.tax_behavior === 'inclusive' ? Math.round(sub - sub / (1 + r)) : Math.round(sub * r);
+    return { object: 'item', price: Object.assign({}, p), quantity: li.quantity, currency: 'eur', amount_subtotal: sub, amount_tax: tax, amount_total: p.tax_behavior === 'inclusive' ? sub : sub + tax };
+  }) };
+}
+// The paid session Stripe reports for those params: plan price + VAT.
+function paidSessionFor(id, params, prices, over, rate) {
+  const li = lineItemsFor(params, prices, rate).data[0];
+  return Object.assign({ id, object: 'checkout.session', mode: 'payment', payment_status: 'paid', status: 'complete',
+    client_reference_id: params.client_reference_id, metadata: params.metadata, customer: 'cus_' + params.client_reference_id.slice(0, 6),
+    payment_intent: 'pi_' + id.slice(-8), amount_subtotal: li.amount_subtotal, amount_total: li.amount_total, total_details: { amount_tax: li.amount_tax, amount_discount: 0, amount_shipping: 0 }, currency: 'eur' }, over || {});
+}
+
+// Stripe fake: prices.retrieve, checkout.sessions.create/retrieve/expire/listLineItems.
 function makeStripe(prices) {
   const S = { sessions: {}, created: [], expired: [], priceReads: 0, prices: prices || {} };
   const stripe = {
@@ -100,18 +120,13 @@ function makeStripe(prices) {
       create: async (p, opts) => { const id = 'cs_test_' + crypto.randomBytes(6).toString('hex'); S.sessions[id] = { id, status: 'open', params: p }; S.created.push({ id, p, opts }); return { id, url: 'https://checkout.stripe.test/' + id }; },
       retrieve: async (id) => { if (!S.sessions[id]) throw Object.assign(new Error('No such session'), { statusCode: 404 }); return { id, status: S.sessions[id].status }; },
       expire: async (id) => { S.expired.push(id); S.sessions[id].status = 'expired'; return { id }; },
+      listLineItems: async (id) => { if (!S.sessions[id]) throw Object.assign(new Error('No such session'), { statusCode: 404 }); return (S.lineItems && S.lineItems[id]) || lineItemsFor(S.sessions[id].params, S.prices); },
     } },
   };
   // The session Stripe reports for a created checkout once it's paid: the
-  // total is the Price's amount (VAT inside it, tax behaviour inclusive).
-  function paidSession(created, over) {
-    const li = created.p.line_items[0];
-    const cents = li.price ? S.prices[li.price].unit_amount : li.price_data.unit_amount;
-    return Object.assign({ id: created.id, object: 'checkout.session', mode: 'payment', payment_status: 'paid', status: 'complete',
-      client_reference_id: created.p.client_reference_id, metadata: created.p.metadata, customer: 'cus_' + created.p.client_reference_id.slice(0, 6),
-      payment_intent: 'pi_' + created.id.slice(-8), amount_total: cents, total_details: { amount_tax: Math.round(cents - cents / 1.21) }, currency: 'eur' }, over || {});
-  }
+  // plan price plus 21 % VAT on top (tax behaviour exclusive).
+  function paidSession(created, over) { return paidSessionFor(created.id, created.p, S.prices, over); }
   return { stripe, S, paidSession };
 }
 
-module.exports = { BASE, adapter, priceFor, installTestPrices, makeStripe };
+module.exports = { BASE, adapter, priceFor, installTestPrices, makeStripe, lineItemsFor, paidSessionFor };

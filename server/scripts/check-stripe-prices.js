@@ -23,10 +23,12 @@ const purchases = require('../services/purchases');
   const r = await purchases.checkStripePrices();
   if (process.argv.includes('--json')) { console.log(JSON.stringify(r, null, 2)); process.exit(r.allOk ? 0 : 1); }
   console.log('Stripe mode: ' + r.mode + ' (' + r.keyType + ' key) · account tax default: ' + r.accountTaxDefault + ' · webhook secret: ' + (r.webhookSecretSet ? 'set' : 'MISSING'));
+  const t = r.stripeTax || {};
+  console.log('Stripe Tax: ' + t.status + ' · active registrations: ' + (Array.isArray(t.activeRegistrations) ? (t.activeRegistrations.join(', ') || 'NONE') : 'unreadable (' + (t.registrationsError || '?') + ')') + (r.taxReady ? '' : '  ← VAT is only added when Stripe Tax is active with a registration (e.g. NL)'));
   console.log('Return URLs: ' + r.returnUrls.successUrl + '  |  ' + r.returnUrls.cancelUrl + '\n');
   for (const p of r.plans) {
     console.log((p.ok ? '✓ ' : '✗ ') + p.name.padEnd(12) + (p.env || '(no variable set)').padEnd(34) + (p.priceId || '-'));
-    if (p.stripe) console.log('    Stripe: ' + [p.stripe.active ? 'active' : 'ARCHIVED', p.stripe.type + (p.stripe.recurring ? ' (recurring)' : ''), p.stripe.amount + ' ' + p.stripe.currency, 'tax ' + p.stripe.tax_behavior, p.stripe.livemode ? 'live' : 'test'].join(', ') + '   expected: ' + p.expected.amount + ' ' + p.expected.currency + ', one_time, tax inclusive');
+    if (p.stripe) console.log('    Stripe: ' + [p.stripe.active ? 'active' : 'ARCHIVED', p.stripe.type + (p.stripe.recurring ? ' (recurring)' : ''), p.stripe.amount + ' ' + p.stripe.currency, 'tax ' + p.stripe.tax_behavior, p.stripe.livemode ? 'live' : 'test'].join(', ') + '   expected: ' + p.expected.amount + ' ' + p.expected.currency + ' before VAT, one_time, tax exclusive');
     p.problems.forEach((x) => console.log('    → ' + x));
   }
   console.log('\n' + (r.allOk ? 'All five plans can be sold.' : 'Checkout is refused for the plans marked ✗ — fix what is listed (in Stripe or the environment), then restart the service.'));

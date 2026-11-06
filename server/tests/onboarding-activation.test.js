@@ -78,12 +78,12 @@ let csN = 0;
 H.STRIPE['checkout.sessions.create'] = async (params) => { const id = 'cs_test_' + String(++csN).padStart(12, '0'); SESS[id] = { id, params, paid: false, status: 'open' }; return { id, url: 'https://checkout.stripe.test/' + id }; };
 H.STRIPE['checkout.sessions.retrieve'] = async (id) => { const s = SESS[id]; if (!s) throw Object.assign(new Error('No such session'), { statusCode: 404 }); return sessionObj(s); };
 H.STRIPE['checkout.sessions.expire'] = async (id) => { SESS[id].status = 'expired'; return { id }; };
+// The paid line item (plan price before VAT, 21 % VAT on top): checked before access opens.
+H.STRIPE['checkout.sessions.listLineItems'] = async (id) => { const s = SESS[id]; if (!s) throw Object.assign(new Error('No such session'), { statusCode: 404 }); return require('./helpers/pgPayments').lineItemsFor(s.params, TEST_PRICES); };
 H.STRIPE['webhooks.constructEvent'] = (body, sig) => { if (sig !== 'valid-signature') throw new Error('bad signature'); return JSON.parse(Buffer.isBuffer(body) ? body.toString('utf8') : body); };
+// The session as Stripe reports it: plan price + 21 % VAT on top (exclusive prices).
 function sessionObj(s) {
-  const p = s.params, li = p.line_items[0], cents = li.price ? TEST_PRICES[li.price].unit_amount : li.price_data.unit_amount;
-  return { id: s.id, object: 'checkout.session', mode: 'payment', status: s.paid ? 'complete' : s.status, payment_status: s.paid ? 'paid' : 'unpaid',
-    client_reference_id: p.client_reference_id, metadata: p.metadata, customer: 'cus_' + p.client_reference_id.slice(0, 6), payment_intent: 'pi_' + s.id.slice(-8),
-    amount_total: cents, total_details: { amount_tax: Math.round(cents - cents / 1.21) }, currency: 'eur' };
+  return require('./helpers/pgPayments').paidSessionFor(s.id, s.params, TEST_PRICES, { status: s.paid ? 'complete' : s.status, payment_status: s.paid ? 'paid' : 'unpaid' });
 }
 const lastSession = () => SESS['cs_test_' + String(csN).padStart(12, '0')];
 const webhook = (eventId, s) => H.call('POST', '/api/stripe-webhook', null, JSON.stringify({ id: eventId, type: 'checkout.session.completed', data: { object: sessionObj(s) } }), { 'stripe-signature': 'valid-signature' });

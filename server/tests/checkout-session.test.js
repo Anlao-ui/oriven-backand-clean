@@ -120,20 +120,20 @@ H.STRIPE['checkout.sessions.expire'] = async (id) => ({ id });
   check('D5. at startup with a live key, Semi-Annual uses STRIPE_PRICE_SEMI_ANNUAL_LIVE', got && got.m === 'live' && got.id === 'price_semiLLLL1111', out.stdout || out.stderr);
 
   // ── E. The price rules (pure) ─────────────────────────────────
-  log('\nE. Which Stripe Prices are accepted');
+  log('\nE. Which Stripe Prices are accepted (VAT on top: tax-exclusive)');
   const plan = pricing.PLANS.annual;
-  const good = { id: 'price_annualXX11', object: 'price', active: true, type: 'one_time', recurring: null, currency: 'eur', unit_amount: 24500, tax_behavior: 'inclusive', livemode: true, product: 'prod_x' };
+  const good = { id: 'price_annualXX11', object: 'price', active: true, type: 'one_time', recurring: null, currency: 'eur', unit_amount: 24500, tax_behavior: 'exclusive', livemode: true, product: 'prod_x' };
   const P = (over, taxDefault, mode) => purchases.priceProblems(Object.assign({}, good, over), { priceId: good.id, plan, mode: mode || 'live', taxDefault });
   const cases = [
-    ['E1. one-time, EUR, €245.00, tax inclusive, live price + live key → accepted', P({}), true],
-    ['E2. tax unspecified + account default "inclusive" → accepted (Stripe charges €245.00 incl. VAT)', P({ tax_behavior: 'unspecified' }, 'inclusive'), true],
-    ['E3. tax unspecified + account default "inferred_by_currency" (EUR → inclusive) → accepted', P({ tax_behavior: null }, 'inferred_by_currency'), true],
-    ['E4. tax unspecified + account default "exclusive" → refused (VAT would be added on top)', P({ tax_behavior: 'unspecified' }, 'exclusive'), false],
-    ['E5. tax unspecified + default unreadable → refused', P({ tax_behavior: 'unspecified' }, null), false],
-    ['E6. tax exclusive → refused', P({ tax_behavior: 'exclusive' }, 'inclusive'), false],
-    ['E7. recurring price → refused', P({ type: 'recurring', recurring: { interval: 'month' } }), false],
+    ['E1. one-time, EUR, €245.00 before VAT, tax EXCLUSIVE, live price + live key → accepted', P({}), true],
+    ['E2. tax unspecified + account default "exclusive" → accepted', P({ tax_behavior: 'unspecified' }, 'exclusive'), true],
+    ['E3. tax INCLUSIVE (VAT inside the price) → refused', P({ tax_behavior: 'inclusive' }, 'exclusive'), false],
+    ['E4. tax unspecified + account default "inclusive" → refused', P({ tax_behavior: 'unspecified' }, 'inclusive'), false],
+    ['E5. tax unspecified + default "inferred_by_currency" (EUR = inclusive) → refused', P({ tax_behavior: null }, 'inferred_by_currency'), false],
+    ['E6. tax unspecified + default unreadable → refused', P({ tax_behavior: 'unspecified' }, null), false],
+    ['E7. recurring price → still refused', P({ type: 'recurring', recurring: { interval: 'month' } }), false],
     ['E8. archived price → refused', P({ active: false }), false],
-    ['E9. €245 entered as 245 cents / another amount → refused', P({ unit_amount: 245 }), false],
+    ['E9. another base amount (€296.45 entered as the price, or 245 cents) → refused', P({ unit_amount: 29645 }).length > 0 && P({ unit_amount: 245 }).length > 0 ? [] : ['x'], true],
     ['E10. USD → refused', P({ currency: 'usd' }), false],
     ['E11. test-mode price with a live key → refused', P({ livemode: false }), false],
   ];
@@ -144,24 +144,30 @@ H.STRIPE['checkout.sessions.expire'] = async (id) => ({ id });
   const saved = {};
   for (const id of Object.keys(TEST_PRICES)) { saved[id] = TEST_PRICES[id].tax_behavior; TEST_PRICES[id].tax_behavior = 'unspecified'; }
   let taxReads = 0;
-  H.STRIPE['tax.settings.retrieve'] = async () => { taxReads++; return { object: 'tax.settings', defaults: { tax_behavior: 'inclusive', tax_code: null } }; };
+  H.STRIPE['tax.settings.retrieve'] = async () => { taxReads++; return { object: 'tax.settings', status: 'active', defaults: { tax_behavior: 'exclusive', tax_code: null } }; };
   purchases._resetForTests();
   for (const id of pricing.PLAN_ORDER) {
     r = await call('POST', '/api/create-checkout-session', user(), { plan: id });
-    check('F.' + id + ' price "unspecified" + account default inclusive → checkout opens', r.status === 200 && /^https:\/\/checkout\.stripe\.com\//.test(r.body.url), r.body);
+    check('F.' + id + ' price "unspecified" + account default exclusive → checkout opens', r.status === 200 && /^https:\/\/checkout\.stripe\.com\//.test(r.body.url), r.body);
   }
   check('F.tax the account default is read once and cached', taxReads === 1, taxReads);
-  H.STRIPE['tax.settings.retrieve'] = async () => ({ object: 'tax.settings', defaults: { tax_behavior: 'exclusive' } });
+  H.STRIPE['tax.settings.retrieve'] = async () => ({ object: 'tax.settings', status: 'active', defaults: { tax_behavior: 'inclusive' } });
   purchases._resetForTests(); n = CREATED.length;
   r = await call('POST', '/api/create-checkout-session', user(), { plan: 'flex' });
-  check('F.excl account default exclusive → 503 PRICE_CONFIG_MISMATCH, no session', r.status === 503 && r.body.code === 'PRICE_CONFIG_MISMATCH' && CREATED.length === n, r.body);
+  check('F.incl account default inclusive → 503 PRICE_CONFIG_MISMATCH, no session', r.status === 503 && r.body.code === 'PRICE_CONFIG_MISMATCH' && CREATED.length === n, r.body);
   for (const id of Object.keys(TEST_PRICES)) TEST_PRICES[id].tax_behavior = saved[id];
+  H.STRIPE['tax.settings.retrieve'] = async () => ({ object: 'tax.settings', status: 'active', defaults: { tax_behavior: 'exclusive' } });
   const keepRetrieve = H.STRIPE['prices.retrieve'];
   H.STRIPE['prices.retrieve'] = async () => { throw Object.assign(new Error('No such price'), { statusCode: 404, code: 'resource_missing' }); };
   purchases._resetForTests();
   r = await call('POST', '/api/create-checkout-session', user(), { plan: 'monthly' });
   check('F.404 a price id Stripe doesn\'t know (other account / other mode) → 503 PRICE_NOT_CONFIGURED', r.status === 503 && r.body.code === 'PRICE_NOT_CONFIGURED', r.body);
   H.STRIPE['prices.retrieve'] = keepRetrieve; purchases._resetForTests();
+  n = CREATED.length;
+  r = await call('POST', '/api/create-checkout-session', user(), { plan: 'annual' });
+  check('F.consumer a VAT number is offered but never required (consumers pay without one): tax_id_collection has no "required"', r.status === 200 && CREATED[n].params.tax_id_collection.enabled === true && !CREATED[n].params.tax_id_collection.required, CREATED[n] && CREATED[n].params.tax_id_collection);
+  check('F.tax checkout asks Stripe Tax to add VAT (automatic_tax on, billing address required, optional VAT ID), one line: the plan\'s price ×1',
+    r.status === 200 && CREATED[n].params.automatic_tax.enabled === true && CREATED[n].params.billing_address_collection === 'required' && CREATED[n].params.tax_id_collection.enabled === true && CREATED[n].params.line_items.length === 1 && CREATED[n].params.line_items[0].quantity === 1, CREATED[n] && CREATED[n].params);
 
   // ── G. The per-plan report (startup log, admin check, script) ──
   log('\nG. Price report');
@@ -179,49 +185,84 @@ H.STRIPE['checkout.sessions.expire'] = async (id) => ({ id });
   check('G4. …and for signed-out requests (401)', r.status === 401, r.status);
 
   // ── H. Payment → webhook → plan + credits, per plan ────────────
-  log('\nH. After payment (webhook, idempotent)');
-  const paidSession = (c) => {
-    const cents = TEST_PRICES[c.params.line_items[0].price].unit_amount;
-    return { id: c.id, object: 'checkout.session', mode: 'payment', status: 'complete', payment_status: 'paid', client_reference_id: c.params.client_reference_id, metadata: c.params.metadata,
-      customer: 'cus_' + c.params.client_reference_id.slice(0, 6), payment_intent: 'pi_' + c.id.slice(-8), amount_total: cents, total_details: { amount_tax: Math.round(cents - cents / 1.21) }, currency: 'eur' };
-  };
+  log('\nH. After payment: plan price + VAT, webhook, idempotent credits');
+  const PG = require('./helpers/pgPayments');
+  const LINES = {}; // session id → line items override
+  H.STRIPE['checkout.sessions.listLineItems'] = async (id) => { if (LINES[id] instanceof Error) throw LINES[id]; if (LINES[id]) return LINES[id]; const c = CREATED.find((x) => x.id === id); if (!c) throw Object.assign(new Error('No such session'), { statusCode: 404 }); return PG.lineItemsFor(c.params, TEST_PRICES); };
+  const paidSession = (c, over, rate) => PG.paidSessionFor(c.id, c.params, TEST_PRICES, over, rate);
   const hook = (evt, type, s) => call('POST', '/api/stripe-webhook', null, JSON.stringify({ id: evt, type, data: { object: s } }), { 'stripe-signature': 'valid-signature' });
   H.STRIPE['webhooks.constructEvent'] = (body, sig) => { if (sig !== 'valid-signature') throw new Error('bad signature'); return JSON.parse(Buffer.isBuffer(body) ? body.toString('utf8') : body); };
+  const TOTALS = { flex: [1700, 357, 2057], monthly: [2900, 609, 3509], quarterly: [7800, 1638, 9438], semiannual: [14300, 3003, 17303], annual: [24500, 5145, 29645] };
   let evN = 0;
+  async function bought(id) { const tok = user(); const k = CREATED.length; await call('POST', '/api/create-checkout-session', tok, { plan: id }); return { tok, uid: tok.slice(4), c: CREATED[k] }; }
+  const prof = (uid) => H.rows('profiles').find((x) => x.id === uid);
+  const purch = (c) => H.rows('purchases').find((x) => x.stripe_checkout_session_id === c.id);
   for (const id of pricing.PLAN_ORDER) {
-    const tok = user(); const uid = tok.slice(4); const p = pricing.PLANS[id];
-    n = CREATED.length;
-    await call('POST', '/api/create-checkout-session', tok, { plan: id });
-    const c = CREATED[n]; const s = paidSession(c);
-    const unpaid = Object.assign({}, s, { payment_status: 'unpaid', status: 'complete' });
-    await hook('evt_' + (++evN), 'checkout.session.completed', unpaid);
-    const pr0 = H.rows('profiles').find((x) => x.id === uid);
-    check('H.' + id + ' an unpaid completed session (e.g. bank transfer pending) grants nothing', pr0.credits_balance === 0 && pr0.subscription_status === 'free', pr0);
+    const p = pricing.PLANS[id]; const [base, vat, total] = TOTALS[id];
+    const { tok, uid, c } = await bought(id);
+    const s = paidSession(c);
+    check('H.' + id + ' Stripe charges €' + (base / 100).toFixed(2) + ' + 21 % VAT €' + (vat / 100).toFixed(2) + ' = €' + (total / 100).toFixed(2), s.amount_subtotal === base && s.total_details.amount_tax === vat && s.amount_total === total, s);
+    await hook('evt_' + (++evN), 'checkout.session.completed', Object.assign({}, s, { payment_status: 'unpaid' }));
+    check('H.' + id + ' an unpaid completed session (e.g. bank transfer pending) grants nothing', prof(uid).credits_balance === 0 && prof(uid).subscription_status === 'free', prof(uid));
     const e = 'evt_' + (++evN);
     const r1 = await hook(e, 'checkout.session.completed', s);
-    const pr = H.rows('profiles').find((x) => x.id === uid);
+    const pr = prof(uid); const pu = purch(c);
     const first = p.credits / p.instalments;
-    check('H.' + id + ' paid webhook → plan "' + id + '", access, ' + first + ' credits (' + p.credits + ' total' + (p.instalments > 1 ? ', ' + p.instalments + ' monthly instalments' : '') + ')',
+    check('H.' + id + ' paid webhook → plan "' + id + '", access, ' + first + ' credits (' + p.credits + ' total' + (p.instalments > 1 ? ', ' + p.instalments + ' monthly instalments' : '') + ') — the higher total incl. VAT is accepted',
       r1.status === 200 && pr.subscription_status === 'paid' && pr.access_plan === id && pr.credits_balance === first && !!pr.access_expires_at, { status: r1.status, pr });
-    await hook(e, 'checkout.session.completed', s);                       // Stripe retries the same event
-    await hook('evt_' + (++evN), 'checkout.session.async_payment_succeeded', s); // another event for the same payment
+    check('H.' + id + ' the purchase records plan price ' + base + ', VAT ' + vat + ', total paid ' + total, pu && pu.price_incl_vat_cents === base && pu.amount_tax_cents === vat && pu.amount_total_cents === total, pu);
+    await hook(e, 'checkout.session.completed', s);                               // Stripe retries the same event
+    await hook('evt_' + (++evN), 'checkout.session.async_payment_succeeded', s);  // another event for the same payment
     H.STRIPE['checkout.sessions.retrieve'] = async () => s;
-    const sync = await call('POST', '/api/billing/sync-checkout', tok, { session_id: c.id });  // the success page's own confirmation
+    const sync = await call('POST', '/api/billing/sync-checkout', tok, { session_id: c.id }); // the success page's own confirmation
     H.STRIPE['checkout.sessions.retrieve'] = async (sid) => ({ id: sid, status: 'open' });
-    const pr2 = H.rows('profiles').find((x) => x.id === uid);
     const paidRows = H.rows('purchases').filter((x) => x.user_id === uid && x.status === 'paid');
-    check('H.' + id + ' repeated event + async event + return-page sync → still exactly ' + first + ' credits, one paid purchase', pr2.credits_balance === first && paidRows.length === 1 && sync.status === 200, { bal: pr2.credits_balance, paid: paidRows.length, sync: sync.body });
+    check('H.' + id + ' repeated event + async event + return-page sync → still exactly ' + first + ' credits, one paid purchase', prof(uid).credits_balance === first && paidRows.length === 1 && sync.status === 200, { bal: prof(uid).credits_balance, paid: paidRows.length, sync: sync.body });
     const forged = await call('POST', '/api/stripe-webhook', null, JSON.stringify({ id: 'evt_forged' + evN, type: 'checkout.session.completed', data: { object: s } }), { 'stripe-signature': 'forged' });
-    check('H.' + id + ' a webhook without a valid signature is rejected', forged.status === 400 && H.rows('profiles').find((x) => x.id === uid).credits_balance === first, forged.status);
+    check('H.' + id + ' a webhook without a valid signature is rejected', forged.status === 400 && prof(uid).credits_balance === first, forged.status);
+  }
+
+  log('\nI. Other VAT outcomes and invalid payments');
+  {
+    const { uid, c } = await bought('monthly');
+    LINES[c.id] = PG.lineItemsFor(c.params, TEST_PRICES, 0);
+    await hook('evt_' + (++evN), 'checkout.session.completed', paidSession(c, {}, 0));
+    check('I1. reverse charge / outside the EU: €29.00 + €0 VAT → accepted, 1,750 credits', prof(uid).credits_balance === 1750 && purch(c).amount_total_cents === 2900 && purch(c).amount_tax_cents === 0, purch(c));
   }
   {
-    const tok = user(); const uid = tok.slice(4);
-    n = CREATED.length;
-    await call('POST', '/api/create-checkout-session', tok, { plan: 'monthly' });
-    const s = Object.assign(paidSession(CREATED[n]), { amount_total: 3509 }); // €29 + 21 % on top: what an exclusive price would charge
-    await hook('evt_' + (++evN), 'checkout.session.completed', s);
-    const pr = H.rows('profiles').find((x) => x.id === uid);
-    check('H.amount a payment whose total differs from the plan price grants nothing (flagged for review)', pr.credits_balance === 0 && pr.subscription_status === 'free', pr);
+    const { uid, c } = await bought('annual');
+    LINES[c.id] = PG.lineItemsFor(c.params, TEST_PRICES, 0.19);
+    await hook('evt_' + (++evN), 'checkout.session.completed', paidSession(c, {}, 0.19));
+    check('I2. another EU rate (Germany 19 %): €245.00 + €46.55 → accepted, 1,250 credits', prof(uid).credits_balance === 1250 && purch(c).amount_total_cents === 29155, purch(c));
+  }
+  const refusedCase = async (label, plan, mk) => {
+    const { uid, c } = await bought(plan);
+    const s = mk(c);
+    const res = await hook('evt_' + (++evN), 'checkout.session.completed', s);
+    check(label, res.status === 200 && prof(uid).credits_balance === 0 && prof(uid).subscription_status === 'free' && purch(c).status === 'pending', { status: res.status, pu: purch(c), pr: prof(uid) });
+  };
+  await refusedCase('I3. total ≠ plan price + VAT (€17.00 + €3.57, but €21.57 charged) → no credits', 'flex', (c) => paidSession(c, { amount_total: 2157 }));
+  await refusedCase('I4. a different plan price in the paid line item (€15.00 instead of €17.00) → no credits', 'flex', (c) => { LINES[c.id] = { data: [{ price: { id: c.params.line_items[0].price }, quantity: 1, amount_subtotal: 1500, amount_tax: 315, amount_total: 1815, currency: 'eur' }] }; return paidSession(c, { amount_subtotal: 1500, amount_total: 1815, total_details: { amount_tax: 315, amount_discount: 0 } }); });
+  await refusedCase('I5. another Stripe Price in the paid line item → no credits', 'monthly', (c) => { LINES[c.id] = { data: [{ price: { id: pricing.PLANS.flex.stripePriceId }, quantity: 1, amount_subtotal: 2900, amount_tax: 609, amount_total: 3509, currency: 'eur' }] }; return paidSession(c); });
+  await refusedCase('I6. quantity 2 → no credits', 'monthly', (c) => { LINES[c.id] = { data: [{ price: { id: c.params.line_items[0].price }, quantity: 2, amount_subtotal: 2900, amount_tax: 609, amount_total: 3509, currency: 'eur' }] }; return paidSession(c); });
+  {
+    const { uid, c } = await bought('quarterly');
+    LINES[c.id] = PG.lineItemsFor(c.params, TEST_PRICES, 0.255);
+    await hook('evt_' + (++evN), 'checkout.session.completed', paidSession(c, {}, 0.255));
+    check('I7. any rate Stripe Tax applies is accepted when Stripe\'s figures add up (25.5 %, as in Finland: €78.00 + €19.89) — no hard-coded maximum', prof(uid).credits_balance === 1600 && purch(c).amount_total_cents === 9789 && purch(c).amount_tax_cents === 1989, purch(c));
+  }
+  await refusedCase('I7b. tax on the session differs from the tax Stripe reports on the line item → no credits', 'monthly', (c) => paidSession(c, { amount_total: 2900 + 900, total_details: { amount_tax: 900, amount_discount: 0 } }));
+  await refusedCase('I8. a discount on the session → no credits', 'monthly', (c) => paidSession(c, { amount_total: 2509, total_details: { amount_tax: 609, amount_discount: 1000 } }));
+  await refusedCase('I9. paid in another currency (USD) → no credits', 'monthly', (c) => paidSession(c, { currency: 'usd' }));
+  {
+    const { uid, c } = await bought('quarterly');
+    LINES[c.id] = Object.assign(new Error('Stripe unavailable'), { type: 'StripeConnectionError' });
+    const s = paidSession(c);
+    const res = await hook('evt_retry1', 'checkout.session.completed', s);
+    check('I10. Stripe unreachable while checking the line items → webhook 500 (Stripe retries), nothing granted', res.status >= 500 && prof(uid).credits_balance === 0, { status: res.status });
+    delete LINES[c.id];
+    const res2 = await hook('evt_retry1', 'checkout.session.completed', s);
+    check('I11. …Stripe\'s retry of that same event then grants 1,600 credits once', res2.status === 200 && prof(uid).credits_balance === 1600, { status: res2.status, bal: prof(uid).credits_balance });
   }
 
   check('Z. no outbound network', H.net.blocked.length === 0, H.net.blocked);

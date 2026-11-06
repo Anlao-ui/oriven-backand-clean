@@ -3,17 +3,18 @@
 //
 //   checkout  createCheckout() checks the plan's configured Stripe Price
 //             (services/pricing.js STRIPE_PRICE_IDS) with Stripe — one-time,
-//             EUR, the exact amount, tax behaviour inclusive, active — writes
+//             EUR, the exact plan price, tax behaviour exclusive, active — writes
 //             a 'pending' purchase with the terms of services/pricing.js and
 //             that price/product, then opens a Stripe Checkout session for
 //             that Price in payment mode (no subscription, no automatic
-//             renewal). Stripe Tax works out the VAT inside the price;
-//             businesses can add a VAT ID. A missing, placeholder or
+//             renewal). Stripe Tax adds the VAT for the customer's country
+//             on top of the plan price; businesses can add a VAT ID. A missing, placeholder or
 //             different price refuses the checkout: nothing is created.
 //   paid      only a CONFIRMED payment (checkout.session.completed with
 //             payment_status 'paid', or async_payment_succeeded) fulfils the
-//             purchase, through fulfill_purchase() in Postgres: amount and
-//             currency must match the terms, it runs at most once, and it
+//             purchase: the paid line item, plan price, tax and total are
+//             checked with Stripe (_paidAmounts), then fulfill_purchase() in
+//             Postgres checks plan price and currency again, it runs at most once, and it
 //             grants access + the first credit instalment atomically. The
 //             webhook, the checkout-return sync and a retried event can all
 //             call it; only the first one does anything.
@@ -98,13 +99,11 @@ async function _closeOpenCheckouts(userId) {
 
 // The plan's Stripe Price, checked against the server's terms before any
 // checkout opens: active, one-time (never recurring), EUR, exactly the
-// plan's amount, and charged tax-INCLUSIVE — so the customer pays exactly
-// the shown price and fulfill_purchase() (which requires amount_total ==
-// the price incl. VAT) can grant access. Inclusive means either the price's
-// own tax behaviour is "inclusive", or it is unspecified and the account's
-// default (Stripe → Settings → Tax → "Include tax in prices") makes it
-// inclusive: default 'inclusive', or 'inferred_by_currency' (EUR prices
-// include tax). A verified price is remembered for 10 minutes.
+// plan's price (before VAT), and tax-EXCLUSIVE — Stripe Tax adds the VAT
+// for the customer's country on top at checkout. Exclusive means the
+// price's own tax behaviour is "exclusive", or it is unspecified and the
+// account default (Stripe → Settings → Tax) is "exclusive". A verified
+// price is remembered for 10 minutes.
 // Returns { priceId, productId }.
 const _verified = new Map(); // priceId -> { at, productId }
 const PRICE_UNAVAILABLE = 'Payments for this plan aren’t available right now. Nothing was charged — please try again later or contact contact@orivenai.com.';
@@ -115,12 +114,13 @@ const PRICE_UNAVAILABLE = 'Payments for this plan aren’t available right now. 
 let _taxDefault = null;
 async function accountTaxDefault() {
   if (_taxDefault && Date.now() - _taxDefault.at < 10 * 60e3) return _taxDefault.value;
-  let value = null, error = null;
+  let value = null, status = null, error = null;
   try {
     const s = await _stripe.tax.settings.retrieve();
     value = (s && s.defaults && s.defaults.tax_behavior) || null;
+    status = (s && s.status) || null;
   } catch (err) { error = err.code || err.type || err.message; }
-  _taxDefault = { at: Date.now(), value, error };
+  _taxDefault = { at: Date.now(), value, status, error };
   return value;
 }
 
@@ -133,12 +133,16 @@ function priceProblems(price, { priceId, plan, mode, taxDefault }) {
   if (price.type !== 'one_time' || price.recurring) problems.push('price is recurring, not one-time');
   if (String(price.currency || '').toLowerCase() !== pricing.CURRENCY) problems.push('currency ' + price.currency + ' instead of ' + pricing.CURRENCY);
   if (price.unit_amount !== cents) problems.push('amount ' + price.unit_amount + ' instead of ' + cents);
+  // VAT is charged on top of the plan price: the price must be tax-
+  // EXCLUSIVE — set on the price, or unspecified with the account default
+  // (Stripe → Settings → Tax) "exclusive". An inclusive price would charge
+  // the plan price with VAT inside it (a different amount than sold).
   const tb = price.tax_behavior || 'unspecified';
-  if (tb === 'exclusive') problems.push('tax behaviour exclusive instead of inclusive (VAT would be added on top of the price)');
-  else if (tb !== 'inclusive') {
-    const cur = String(price.currency || '').toLowerCase();
-    const inclusiveByDefault = taxDefault === 'inclusive' || (taxDefault === 'inferred_by_currency' && cur === 'eur');
-    if (!inclusiveByDefault) problems.push('tax behaviour unspecified and the account default is ' + (taxDefault || 'unknown') + ' — set the price (or Settings → Tax → default) to "Inclusive"');
+  if (tb === 'inclusive') problems.push('tax behaviour inclusive instead of exclusive (VAT must be added on top of the plan price)');
+  else if (tb !== 'exclusive') {
+    // ('inferred_by_currency' makes EUR prices inclusive, so only an
+    // explicit "exclusive" default counts.)
+    if (taxDefault !== 'exclusive') problems.push('tax behaviour unspecified and the account default is ' + (taxDefault || 'unknown') + ' — set the price (or Settings → Tax → default) to "Exclusive"');
   }
   // A Test Mode price must never be sold with a live key (or the reverse).
   if (typeof price.livemode === 'boolean' && mode !== 'unknown' && price.livemode !== (mode === 'live')) {
@@ -181,10 +185,18 @@ async function verifiedStripePrice(plan) {
 async function checkStripePrices() {
   const mode = pricing.stripeMode();
   const plans = [];
-  let taxDefault, taxRead = false;
+  // Stripe Tax itself: checkout uses automatic_tax, which adds VAT only when
+  // Stripe Tax is active and registered where the customer is taxed.
+  _taxDefault = null;
+  const taxDefault = await accountTaxDefault();
+  const tax = { status: (_taxDefault && _taxDefault.status) || 'unreadable', defaultTaxBehavior: taxDefault || 'unspecified', error: (_taxDefault && _taxDefault.error) || null, activeRegistrations: null };
+  try {
+    const regs = await _stripe.tax.registrations.list({ status: 'active', limit: 100 });
+    tax.activeRegistrations = ((regs && regs.data) || []).map((x) => x.country).filter(Boolean);
+  } catch (err) { tax.registrationsError = err.code || err.type || err.message; }
   for (const id of pricing.PLAN_ORDER) {
     const plan = pricing.PLANS[id];
-    const row = { plan: id, name: plan.name, env: pricing.priceEnvNameFor(id), priceId: null, expected: { amount: pricing.priceInclVatCents(plan), currency: pricing.CURRENCY, type: 'one_time', tax: 'inclusive' }, ok: false, problems: [] };
+    const row = { plan: id, name: plan.name, env: pricing.priceEnvNameFor(id), priceId: null, expected: { amount: pricing.priceInclVatCents(plan), currency: pricing.CURRENCY, type: 'one_time', tax: 'exclusive' }, ok: false, problems: [] };
     try { row.priceId = pricing.stripePriceIdFor(id); }
     catch (err) {
       row.problems.push('not configured: ' + err.problem + ' (set ' + ('STRIPE_PRICE_' + pricing.PRICE_ENV[id] + '_' + (mode === 'live' ? 'LIVE' : 'TEST')) + ')');
@@ -197,22 +209,23 @@ async function checkStripePrices() {
       plans.push(row); continue;
     }
     row.stripe = { active: price.active, type: price.type, recurring: !!price.recurring, currency: price.currency, amount: price.unit_amount, tax_behavior: price.tax_behavior || 'unspecified', livemode: price.livemode, product: idOf(price.product) };
-    const tb = price.tax_behavior;
-    if (tb !== 'inclusive' && tb !== 'exclusive' && !taxRead) { _taxDefault = null; taxDefault = await accountTaxDefault(); taxRead = true; }
     row.problems = priceProblems(price, { priceId: row.priceId, plan, mode, taxDefault });
     row.ok = row.problems.length === 0;
     plans.push(row);
   }
   return {
     mode, keyType: /^rk_/.test(String(process.env.STRIPE_SECRET_KEY || '')) ? 'restricted' : /^sk_/.test(String(process.env.STRIPE_SECRET_KEY || '')) ? 'secret' : 'missing/invalid',
-    accountTaxDefault: taxRead ? (taxDefault || ('unreadable' + (_taxDefault && _taxDefault.error ? ': ' + _taxDefault.error : ''))) : 'not needed',
+    accountTaxDefault: tax.defaultTaxBehavior, stripeTax: tax,
+    taxReady: tax.status === 'active' && Array.isArray(tax.activeRegistrations) && tax.activeRegistrations.length > 0,
     webhookSecretSet: !!process.env.STRIPE_WEBHOOK_SECRET, returnUrls: checkoutReturnUrls(),
     allOk: plans.every((p) => p.ok), plans,
   };
 }
 function _logPriceCheck(r) {
   const line = (p) => p.plan + ' ' + (p.ok ? 'OK' : 'REFUSED') + ' [' + (p.env || 'no env var') + ' = ' + (p.priceId || '-') + ']' + (p.ok ? '' : ': ' + p.problems.join('; '));
-  const head = '[Purchases] Stripe price check (' + r.mode + ' mode, ' + r.keyType + ' key, tax default ' + r.accountTaxDefault + ', webhook secret ' + (r.webhookSecretSet ? 'set' : 'MISSING') + '): ';
+  const t = r.stripeTax || {};
+  const head = '[Purchases] Stripe price check (' + r.mode + ' mode, ' + r.keyType + ' key, Stripe Tax ' + t.status + ' with registrations ' + (Array.isArray(t.activeRegistrations) ? (t.activeRegistrations.join(',') || 'NONE') : 'unreadable') + ', tax default ' + r.accountTaxDefault + ', webhook secret ' + (r.webhookSecretSet ? 'set' : 'MISSING') + '): ';
+  if (!r.taxReady) console.warn('[Purchases] Stripe Tax is not ready (status ' + t.status + ', active registrations ' + (Array.isArray(t.activeRegistrations) ? t.activeRegistrations.length : 'unreadable') + '): checkout uses automatic_tax, so VAT is not added (or Checkout refuses) until Stripe Tax is active with a registration (e.g. NL).');
   (r.allOk ? console.log : console.warn)(head + (r.allOk ? 'all five plans can be sold. ' : 'checkout is refused for some plans. ') + r.plans.map(line).join(' | '));
 }
 
@@ -303,24 +316,82 @@ async function _purchaseOfSession(session) {
   return { purchase };
 }
 
+// What the customer actually paid for, checked against the purchase before
+// anything is granted. VAT is charged ON TOP of the plan price (tax
+// behaviour exclusive; Stripe Tax works out the rate for the customer's
+// country — 21 % in the Netherlands, another EU rate, or 0 % for reverse
+// charge / outside the EU, or whatever rate applies where the customer is
+// taxed). The rate itself is Stripe Tax's decision and is not capped here;
+// what is checked is that Stripe's figures add up:
+//   · exactly one line item: the purchase's Stripe Price, quantity 1, whose
+//     amount before tax (amount_subtotal) is the plan price;
+//   · no discount; currency EUR;
+//   · the session's tax is a whole, non-negative amount and equals the tax
+//     Stripe reports on that line item;
+//   · total = plan price + tax  (or = plan price for a tax-inclusive price,
+//     i.e. a checkout opened before prices became tax-exclusive).
+// The line items come from Stripe (listLineItems); if Stripe can't be
+// asked, this throws and the webhook answers 500 so Stripe retries later.
+// Returns { base, tax, total } or { problem }.
+async function _paidAmounts(session, purchase) {
+  const base = purchase.price_incl_vat_cents; // the plan price in cents (column name predates tax-exclusive prices)
+  const total = session.amount_total;
+  const tax = (session.total_details && session.total_details.amount_tax) || 0;
+  const discount = (session.total_details && session.total_details.amount_discount) || 0;
+  const li = await _stripe.checkout.sessions.listLineItems(session.id, { limit: 5 });
+  const items = (li && li.data) || [];
+  const item = items[0] || {};
+  const itemPrice = idOf(item.price);
+  const problems = [];
+  if (String(session.currency || '').toLowerCase() !== purchase.currency) problems.push('currency ' + session.currency);
+  if (items.length !== 1) problems.push(items.length + ' line items');
+  if (purchase.stripe_price_id && itemPrice !== purchase.stripe_price_id) problems.push('price ' + itemPrice + ' instead of ' + purchase.stripe_price_id);
+  if (item.quantity !== 1) problems.push('quantity ' + item.quantity);
+  if (item.amount_subtotal !== base) problems.push('plan price ' + item.amount_subtotal + ' instead of ' + base);
+  if (session.amount_subtotal != null && session.amount_subtotal !== base) problems.push('subtotal ' + session.amount_subtotal + ' instead of ' + base);
+  if (discount) problems.push('discount ' + discount);
+  if (!Number.isInteger(tax) || tax < 0) problems.push('tax ' + tax + ' is not a valid amount');
+  else if (typeof item.amount_tax === 'number' && item.amount_tax !== tax) problems.push('tax ' + tax + ' on the session but ' + item.amount_tax + ' on the line item');
+  if (!(total === base + tax || total === base)) problems.push('total ' + total + ' is not price ' + base + ' + tax ' + tax);
+  return problems.length ? { problem: problems.join('; ') } : { base, tax, total };
+}
+
+const _DONE = ['paid', 'refunded', 'partially_refunded', 'disputed', 'dispute_won'];
 async function fulfillFromSession(session) {
   if (session.mode !== 'payment') return { skipped: 'not_payment_mode' };
   if (session.payment_status !== 'paid') return { skipped: 'payment_' + session.payment_status }; // async methods: wait for async_payment_succeeded
   const found = await _purchaseOfSession(session);
   if (!found.purchase) return found;
   const p = found.purchase;
+  // A repeat (webhook retry, second event, the return page's sync) of a
+  // purchase that is already paid: fulfill_purchase() answers "already".
+  let amounts = null;
+  if (!_DONE.includes(p.status)) {
+    amounts = await _paidAmounts(session, p);
+    if (amounts.problem) {
+      alert('fulfillment_refused', { purchase: p.id, session: session.id, reason: 'amount_mismatch', problem: amounts.problem, total: session.amount_total, currency: session.currency });
+      return { userId: p.user_id, purchaseId: p.id, skipped: 'amount_mismatch' };
+    }
+  }
+  // fulfill_purchase() checks the amount against the purchase's plan price,
+  // so it is given the verified price before tax; the tax is passed on and
+  // the real total is recorded right after.
   const { data, error } = await _db.rpc('fulfill_purchase', {
     p_purchase_id: p.id,
     p_session_id: session.id,
     p_payment_intent: idOf(session.payment_intent),
     p_customer: idOf(session.customer),
-    p_amount_total: session.amount_total,
-    p_amount_tax: (session.total_details && session.total_details.amount_tax) || 0,
+    p_amount_total: amounts ? amounts.base : session.amount_total,
+    p_amount_tax: amounts ? amounts.tax : ((session.total_details && session.total_details.amount_tax) || 0),
     p_currency: session.currency,
   });
   if (error) throw error;
   const r = data || {};
   if (!r.ok) { alert('fulfillment_refused', { purchase: p.id, reason: r.reason, amount: session.amount_total, currency: session.currency }); return { userId: p.user_id, purchaseId: p.id, skipped: r.reason }; }
+  if (r.fulfilled && amounts) {
+    const { error: upErr } = await _db.from('purchases').update({ amount_total_cents: amounts.total, amount_tax_cents: amounts.tax, updated_at: new Date().toISOString() }).eq('id', p.id);
+    if (upErr) alert('purchase_total_not_recorded', { purchase: p.id, total: amounts.total, tax: amounts.tax, error: upErr.message });
+  }
   // The customer becomes linked to the profile on the first purchase.
   const cust = idOf(session.customer);
   if (cust) await _db.from('profiles').update({ stripe_customer_id: cust }).eq('id', p.user_id).is('stripe_customer_id', null);
