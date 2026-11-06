@@ -2224,21 +2224,21 @@ app.post('/api/create-checkout-session', async (req, res) => {
   }
   if (pricing.LEGACY_PLANS.includes(plan)) return res.status(410).json({ error: 'This plan is no longer offered. Choose one of the current plans.', code: 'PLAN_RETIRED' });
   if (!pricing.planById(plan)) return res.status(400).json({ error: 'Choose a valid plan.', code: 'UNKNOWN_PLAN' });
-  if (!analytics.allow('checkout:' + user.id, 6, 60e3)) return res.status(429).json({ error: 'Too many checkout attempts. Try again in a minute.' });
+  if (!analytics.allow('checkout:' + user.id, 6, 60e3)) return res.status(429).json({ error: 'Too many checkout attempts. Try again in a minute.', code: 'CHECKOUT_RATE_LIMITED' });
   try {
     const r = await purchases.createCheckout({
       user, planId: plan, source: (req.body && req.body.source) || null,
       // session_id lets the app confirm this payment directly
-      // (/api/billing/sync-checkout) even if a webhook is delayed.
-      successUrl: `${FRONTEND_URL}/app?success=true&session_id={CHECKOUT_SESSION_ID}`,
-      cancelUrl: `${FRONTEND_URL}/app?canceled=true`,
+      // (/api/billing/sync-checkout) even if a webhook is delayed. Always the
+      // app (https://orivenai.com/app in production), never the API host.
+      ...purchases.checkoutReturnUrls(),
     });
     onboarding.recordEvent({ name: 'checkout_started', userId: user.id, props: { plan } });
     res.json({ url: r.url });
   } catch (err) {
     if (err instanceof purchases.PurchaseError) return res.status(err.status).json({ error: err.message, code: err.code });
     console.error('[Checkout] could not create checkout:', err.message, '| type:', err.type || '-', '| code:', err.code || '-');
-    res.status(500).json({ error: 'Could not create checkout session. Please try again.' });
+    res.status(500).json({ error: 'Secure checkout couldn’t be opened. Nothing was charged — please try again.', code: 'CHECKOUT_FAILED' });
   }
 });
 
@@ -15239,6 +15239,18 @@ app.get('/api/admin/me', async (req, res) => {
   if (!user) return res.status(401).json({ error: 'Authentication required' });
   if (!analytics.allow('admin:' + user.id, 60, 60e3)) return res.status(429).json({ error: 'Too many requests' });
   res.json({ admin: analytics.isAdmin(user.id) });
+});
+// ── GET /api/admin/stripe-prices: can each plan be sold? (admins only) ──
+// Checks the five configured Stripe Prices with Stripe right now, read only
+// (prices.retrieve, tax.settings.retrieve), exactly as checkout does. Shows
+// per plan the environment variable, the price id, what Stripe reports and
+// what is wrong. No secrets.
+app.get('/api/admin/stripe-prices', async (req, res) => {
+  const admin = await _requireAdmin(req, res);
+  if (!admin) return;
+  res.set('Cache-Control', 'no-store');
+  try { res.json(await purchases.checkStripePrices()); }
+  catch (err) { res.status(502).json({ error: 'Could not check the prices with Stripe: ' + (err.code || err.message) }); }
 });
 app.get('/api/admin/analytics', async (req, res) => {
   const user = await _requireAdmin(req, res);

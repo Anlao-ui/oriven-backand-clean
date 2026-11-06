@@ -37,6 +37,12 @@ function init({ stripe, db }) {
   const mode = pricing.stripeMode();
   if (mode === 'unknown') console.warn('[Purchases] STRIPE_SECRET_KEY is not a test or live secret key — checkout cannot verify prices.');
   if (bad.length) console.warn('[Purchases] Stripe ' + mode + ' mode: prices not configured — checkout is refused for: ' + bad.map((x) => x.planId + ' (' + x.problem + ')').join(', ') + '. Set STRIPE_PRICE_<PLAN>_' + (mode === 'live' ? 'LIVE' : 'TEST') + ' (see .env.example).');
+  // On the server: check every price with Stripe once after start (read
+  // only) and log one line per plan, so the deploy log says whether all five
+  // plans can be sold — and if not, exactly why.
+  if ((process.env.RENDER || process.env.NODE_ENV === 'production') && mode !== 'unknown' && process.env.STRIPE_PRICE_STARTUP_CHECK !== 'false') {
+    setTimeout(() => { checkStripePrices().then(_logPriceCheck, (err) => console.warn('[Purchases] Stripe price check failed:', err.code || err.message)); }, 3000).unref();
+  }
 }
 
 function alert(event, fields) {
@@ -46,6 +52,28 @@ class PurchaseError extends Error {
   constructor(code, message, status) { super(message); this.code = code; this.status = status || 400; }
 }
 const idOf = (v) => (v && typeof v === 'object' ? v.id : v) || null;
+
+// Where Stripe sends the customer back. The app, never the API host:
+// FRONTEND_URL when set (http only for localhost), otherwise the production
+// site. RENDER_EXTERNAL_URL is the API's own address, so it is never used.
+// {CHECKOUT_SESSION_ID} is left as is — Stripe fills it in. Coming back to
+// success_url proves nothing: access opens only on a confirmed payment
+// (webhook / sync-checkout → fulfill_purchase()).
+const PRODUCTION_APP_ORIGIN = 'https://orivenai.com';
+function checkoutReturnUrls(env) {
+  const e = env || process.env;
+  let base = String(e.FRONTEND_URL || '').trim().replace(/\/+$/, '');
+  let ok = false;
+  try {
+    const u = new URL(base);
+    ok = u.protocol === 'https:' || (u.protocol === 'http:' && /^(localhost|127\.0\.0\.1)$/.test(u.hostname));
+  } catch (_) {}
+  if (!ok) base = (e.NODE_ENV === 'production' || e.RENDER) ? PRODUCTION_APP_ORIGIN : 'http://localhost:5500';
+  return {
+    successUrl: base + '/app?success=true&session_id={CHECKOUT_SESSION_ID}',
+    cancelUrl: base + '/app?canceled=true',
+  };
+}
 
 function durationLabel(plan) {
   if (plan.days) return plan.days + ' days';
@@ -70,16 +98,61 @@ async function _closeOpenCheckouts(userId) {
 
 // The plan's Stripe Price, checked against the server's terms before any
 // checkout opens: active, one-time (never recurring), EUR, exactly the
-// plan's amount, tax behaviour inclusive (so Stripe Tax keeps the shown
-// price as the total instead of adding VAT on top). A verified price is
-// remembered for 10 minutes. Returns { priceId, productId }.
+// plan's amount, and charged tax-INCLUSIVE — so the customer pays exactly
+// the shown price and fulfill_purchase() (which requires amount_total ==
+// the price incl. VAT) can grant access. Inclusive means either the price's
+// own tax behaviour is "inclusive", or it is unspecified and the account's
+// default (Stripe → Settings → Tax → "Include tax in prices") makes it
+// inclusive: default 'inclusive', or 'inferred_by_currency' (EUR prices
+// include tax). A verified price is remembered for 10 minutes.
+// Returns { priceId, productId }.
 const _verified = new Map(); // priceId -> { at, productId }
 const PRICE_UNAVAILABLE = 'Payments for this plan aren’t available right now. Nothing was charged — please try again later or contact contact@orivenai.com.';
+
+// The account's default tax behaviour ('inclusive' | 'exclusive' |
+// 'inferred_by_currency' | null), read once per 10 minutes; null when it
+// can't be read (then an unspecified price is refused).
+let _taxDefault = null;
+async function accountTaxDefault() {
+  if (_taxDefault && Date.now() - _taxDefault.at < 10 * 60e3) return _taxDefault.value;
+  let value = null, error = null;
+  try {
+    const s = await _stripe.tax.settings.retrieve();
+    value = (s && s.defaults && s.defaults.tax_behavior) || null;
+  } catch (err) { error = err.code || err.type || err.message; }
+  _taxDefault = { at: Date.now(), value, error };
+  return value;
+}
+
+// Pure: what's wrong with a Stripe Price for a plan ([] when it's right).
+function priceProblems(price, { priceId, plan, mode, taxDefault }) {
+  const cents = pricing.priceInclVatCents(plan);
+  const problems = [];
+  if (!price || price.id !== priceId) return ['different price returned'];
+  if (price.active === false) problems.push('price is archived (inactive) — a new price was probably created; put its price_… id in the environment');
+  if (price.type !== 'one_time' || price.recurring) problems.push('price is recurring, not one-time');
+  if (String(price.currency || '').toLowerCase() !== pricing.CURRENCY) problems.push('currency ' + price.currency + ' instead of ' + pricing.CURRENCY);
+  if (price.unit_amount !== cents) problems.push('amount ' + price.unit_amount + ' instead of ' + cents);
+  const tb = price.tax_behavior || 'unspecified';
+  if (tb === 'exclusive') problems.push('tax behaviour exclusive instead of inclusive (VAT would be added on top of the price)');
+  else if (tb !== 'inclusive') {
+    const cur = String(price.currency || '').toLowerCase();
+    const inclusiveByDefault = taxDefault === 'inclusive' || (taxDefault === 'inferred_by_currency' && cur === 'eur');
+    if (!inclusiveByDefault) problems.push('tax behaviour unspecified and the account default is ' + (taxDefault || 'unknown') + ' — set the price (or Settings → Tax → default) to "Inclusive"');
+  }
+  // A Test Mode price must never be sold with a live key (or the reverse).
+  if (typeof price.livemode === 'boolean' && mode !== 'unknown' && price.livemode !== (mode === 'live')) {
+    problems.push((price.livemode ? 'Live' : 'Test') + ' Mode price used with a ' + mode + ' key');
+  }
+  return problems;
+}
+
 async function verifiedStripePrice(plan) {
   let priceId;
+  const mode = pricing.stripeMode();
   try { priceId = pricing.stripePriceIdFor(plan.id); }
   catch (err) {
-    alert('stripe_price_not_configured', { plan: plan.id, problem: err.problem });
+    alert('stripe_price_not_configured', { plan: plan.id, problem: err.problem, mode, env: pricing.priceEnvNameFor(plan.id) || ('STRIPE_PRICE_' + (pricing.PRICE_ENV[plan.id] || '') + '_' + (mode === 'live' ? 'LIVE' : 'TEST') + ' (unset)') });
     throw new PurchaseError('PRICE_NOT_CONFIGURED', PRICE_UNAVAILABLE, 503);
   }
   const hit = _verified.get(priceId);
@@ -87,31 +160,60 @@ async function verifiedStripePrice(plan) {
   let price;
   try { price = await _stripe.prices.retrieve(priceId); }
   catch (err) {
-    alert('stripe_price_unavailable', { plan: plan.id, price: priceId, error: err.code || err.message });
+    alert('stripe_price_unavailable', { plan: plan.id, price: priceId, mode, env: pricing.priceEnvNameFor(plan.id), error: err.code || err.type || err.message, status: err.statusCode || null });
     throw new PurchaseError('PRICE_NOT_CONFIGURED', PRICE_UNAVAILABLE, 503);
   }
-  const cents = pricing.priceInclVatCents(plan);
-  const problems = [];
-  if (!price || price.id !== priceId) problems.push('different price returned');
-  else {
-    if (price.active === false) problems.push('price is archived');
-    if (price.type !== 'one_time' || price.recurring) problems.push('price is recurring, not one-time');
-    if (String(price.currency || '').toLowerCase() !== pricing.CURRENCY) problems.push('currency ' + price.currency + ' instead of ' + pricing.CURRENCY);
-    if (price.unit_amount !== cents) problems.push('amount ' + price.unit_amount + ' instead of ' + cents);
-    if (price.tax_behavior !== 'inclusive') problems.push('tax behaviour ' + (price.tax_behavior || 'unspecified') + ' instead of inclusive');
-    // A Test Mode price must never be sold with a live key (or the reverse).
-    const mode = pricing.stripeMode();
-    if (typeof price.livemode === 'boolean' && mode !== 'unknown' && price.livemode !== (mode === 'live')) {
-      problems.push((price.livemode ? 'Live' : 'Test') + ' Mode price used with a ' + mode + ' key');
-    }
-  }
+  const tb = price && price.tax_behavior;
+  const taxDefault = tb === 'inclusive' || tb === 'exclusive' ? null : await accountTaxDefault();
+  const problems = priceProblems(price, { priceId, plan, mode, taxDefault });
   if (problems.length) {
-    alert('stripe_price_mismatch', { plan: plan.id, price: priceId, problems });
+    alert('stripe_price_mismatch', { plan: plan.id, price: priceId, env: pricing.priceEnvNameFor(plan.id), problems });
     throw new PurchaseError('PRICE_CONFIG_MISMATCH', PRICE_UNAVAILABLE, 503);
   }
   const productId = idOf(price.product);
   _verified.set(priceId, { at: Date.now(), productId });
   return { priceId, productId };
+}
+
+// Every plan's price, checked with Stripe now (read-only: prices.retrieve
+// and tax.settings.retrieve). For the startup log, the admin check and
+// scripts/check-stripe-prices.js. No secrets in the result.
+async function checkStripePrices() {
+  const mode = pricing.stripeMode();
+  const plans = [];
+  let taxDefault, taxRead = false;
+  for (const id of pricing.PLAN_ORDER) {
+    const plan = pricing.PLANS[id];
+    const row = { plan: id, name: plan.name, env: pricing.priceEnvNameFor(id), priceId: null, expected: { amount: pricing.priceInclVatCents(plan), currency: pricing.CURRENCY, type: 'one_time', tax: 'inclusive' }, ok: false, problems: [] };
+    try { row.priceId = pricing.stripePriceIdFor(id); }
+    catch (err) {
+      row.problems.push('not configured: ' + err.problem + ' (set ' + ('STRIPE_PRICE_' + pricing.PRICE_ENV[id] + '_' + (mode === 'live' ? 'LIVE' : 'TEST')) + ')');
+      plans.push(row); continue;
+    }
+    let price = null;
+    try { price = await _stripe.prices.retrieve(row.priceId); }
+    catch (err) {
+      row.problems.push('Stripe could not return this price: ' + (err.code || err.type || err.message) + (err.statusCode === 404 ? ' (it does not exist for this key — another account, or the other mode)' : err.statusCode === 403 ? ' (the key may not read prices)' : ''));
+      plans.push(row); continue;
+    }
+    row.stripe = { active: price.active, type: price.type, recurring: !!price.recurring, currency: price.currency, amount: price.unit_amount, tax_behavior: price.tax_behavior || 'unspecified', livemode: price.livemode, product: idOf(price.product) };
+    const tb = price.tax_behavior;
+    if (tb !== 'inclusive' && tb !== 'exclusive' && !taxRead) { _taxDefault = null; taxDefault = await accountTaxDefault(); taxRead = true; }
+    row.problems = priceProblems(price, { priceId: row.priceId, plan, mode, taxDefault });
+    row.ok = row.problems.length === 0;
+    plans.push(row);
+  }
+  return {
+    mode, keyType: /^rk_/.test(String(process.env.STRIPE_SECRET_KEY || '')) ? 'restricted' : /^sk_/.test(String(process.env.STRIPE_SECRET_KEY || '')) ? 'secret' : 'missing/invalid',
+    accountTaxDefault: taxRead ? (taxDefault || ('unreadable' + (_taxDefault && _taxDefault.error ? ': ' + _taxDefault.error : ''))) : 'not needed',
+    webhookSecretSet: !!process.env.STRIPE_WEBHOOK_SECRET, returnUrls: checkoutReturnUrls(),
+    allOk: plans.every((p) => p.ok), plans,
+  };
+}
+function _logPriceCheck(r) {
+  const line = (p) => p.plan + ' ' + (p.ok ? 'OK' : 'REFUSED') + ' [' + (p.env || 'no env var') + ' = ' + (p.priceId || '-') + ']' + (p.ok ? '' : ': ' + p.problems.join('; '));
+  const head = '[Purchases] Stripe price check (' + r.mode + ' mode, ' + r.keyType + ' key, tax default ' + r.accountTaxDefault + ', webhook secret ' + (r.webhookSecretSet ? 'set' : 'MISSING') + '): ';
+  (r.allOk ? console.log : console.warn)(head + (r.allOk ? 'all five plans can be sold. ' : 'checkout is refused for some plans. ') + r.plans.map(line).join(' | '));
 }
 
 async function createCheckout({ user, planId, successUrl, cancelUrl, source }) {
@@ -168,6 +270,12 @@ async function createCheckout({ user, planId, successUrl, cancelUrl, source }) {
     throw err;
   }
   await _db.from('purchases').update({ stripe_checkout_session_id: session.id, updated_at: new Date().toISOString() }).eq('id', id);
+  // The browser goes exactly where Stripe says; without a Stripe https URL
+  // there is nothing to open (never built by hand).
+  if (!session || !/^https:\/\/[^/]+/.test(String(session.url || ''))) {
+    alert('stripe_checkout_without_url', { purchase: id, session: session && session.id });
+    throw new PurchaseError('CHECKOUT_UNAVAILABLE', 'Secure checkout couldn’t be opened. Nothing was charged — please try again.', 502);
+  }
   console.log('[Purchases] checkout', JSON.stringify({ user: user.id, purchase: id, plan: plan.id, source: source || null }));
   return { url: session.url, purchaseId: id, plan: plan.id };
 }
@@ -309,8 +417,8 @@ async function historyFor(userId) {
 }
 
 module.exports = {
-  init, PurchaseError, createCheckout, fulfillFromSession, verifiedStripePrice,
-  _resetForTests() { _verified.clear(); },
+  init, PurchaseError, createCheckout, checkoutReturnUrls, fulfillFromSession, verifiedStripePrice, priceProblems, checkStripePrices,
+  _resetForTests() { _verified.clear(); _taxDefault = null; },
   onCheckoutCompleted, onAsyncPaymentSucceeded, onAsyncPaymentFailed, onCheckoutExpired,
   onChargeRefunded, onDisputeCreated, onDisputeClosed,
   grantDueInstalments, refreshLegacyEntitlements, expireAccess, historyFor,

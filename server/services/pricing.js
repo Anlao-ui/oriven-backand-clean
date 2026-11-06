@@ -63,8 +63,24 @@ function stripeMode(key) {
 function priceIdsForMode(mode, env) {
   const e = env || process.env; const suffix = mode === 'live' ? 'LIVE' : 'TEST';
   const out = {};
-  Object.keys(PRICE_ENV).forEach((id) => { out[id] = (e['STRIPE_PRICE_' + PRICE_ENV[id] + '_' + suffix] || '').trim() || PRICE_PLACEHOLDER[id]; });
+  Object.keys(PRICE_ENV).forEach((id) => {
+    const names = ['STRIPE_PRICE_' + PRICE_ENV[id] + '_' + suffix].concat((PRICE_ENV_ALIASES[id] || []).map((a) => 'STRIPE_PRICE_' + a + '_' + suffix));
+    let v = '';
+    for (const n of names) { v = (e[n] || '').trim(); if (v) break; }
+    out[id] = v || PRICE_PLACEHOLDER[id];
+  });
   return out;
+}
+// Also accepted (read only when the main name is unset): the Semi-Annual
+// price is often named with an underscore, STRIPE_PRICE_SEMI_ANNUAL_LIVE.
+const PRICE_ENV_ALIASES = { semiannual: ['SEMI_ANNUAL'] };
+// Which environment variable actually holds a plan's price in a mode (for
+// diagnostics), or null when none is set.
+function priceEnvNameFor(planId, mode, env) {
+  const e = env || process.env; const suffix = (mode || stripeMode()) === 'live' ? 'LIVE' : 'TEST';
+  if (!PRICE_ENV[planId]) return null;
+  const names = [PRICE_ENV[planId]].concat(PRICE_ENV_ALIASES[planId] || []).map((a) => 'STRIPE_PRICE_' + a + '_' + suffix);
+  return names.find((n) => (e[n] || '').trim()) || null;
 }
 const STRIPE_MODE = stripeMode();
 const STRIPE_PRICE_IDS = priceIdsForMode(STRIPE_MODE);
@@ -195,6 +211,6 @@ module.exports = {
   VAT_RATE, CURRENCY, AI_COST_SHARE, PLANNING_COST_PER_CREDIT_EUR,
   PLANS, PLAN_ORDER, FEATURE_COSTS, CHAT_LIMITS,
   PAID_STATUSES, LEGACY_PLANS, LEGACY_ALLOWANCES, LEGACY_GRACE_DAYS,
-  STRIPE_PRICE_IDS, STRIPE_PRICE_ID_RE, STRIPE_MODE, PRICE_ENV, stripeMode, priceIdsForMode, PricingConfigError, priceIdProblem, stripePriceIdFor, stripePriceStatus,
+  STRIPE_PRICE_IDS, STRIPE_PRICE_ID_RE, STRIPE_MODE, PRICE_ENV, PRICE_ENV_ALIASES, priceEnvNameFor, stripeMode, priceIdsForMode, PricingConfigError, priceIdProblem, stripePriceIdFor, stripePriceStatus,
   planById, priceInclVatCents, priceExVat, vatAmount, aiBudget, creditsPerInstalment, accessEnd, hasAccess, publicPlans, priceLabel, periodLabel,
 };
