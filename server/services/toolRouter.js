@@ -135,7 +135,11 @@ async function executeAction(actionId, user, ctx) {
       detail: message,
       message
     });
-    return { ok: true, message };
+    // Optional result card (same as the chat's toolResults): shown under the
+    // confirmed action. Never fails the action if building it fails.
+    let card = null;
+    if (typeof tool.formatCard === 'function') { try { card = tool.formatCard(execResult, entry.resolved) || null; } catch (_) { card = null; } }
+    return { ok: true, message, card };
   } catch (err) {
     console.error(`[ToolRouter] execute (confirmed) failed for ${entry.tool}:`, err.message);
     return { ok: false, status: 500, error: err.friendlyMessage || 'That action could not be completed. Please try again.' };

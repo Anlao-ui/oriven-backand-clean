@@ -153,6 +153,7 @@ const FEATURE_COSTS = {
   video_generation:    180,  // one 5-second video
   video_generation_10s: 350, // one 10-second video
   automation:           20,  // new automation (rule or schedule); no AI cost — usage control only
+  plan_generation:      90,  // a new Marketing Plan on request (strategy + roadmap, several long calls)
 };
 
 // Assistant (chat) limits that bound the cost of one message.

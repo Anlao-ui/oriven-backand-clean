@@ -42,13 +42,20 @@ const PLAN = {
   content: { pillars: [{ name: 'Studio', ideas: ['Pouring process'] }], cadence: 'Three posts a week' },
   campaigns: [{ name: 'Saturday workshops', goal: 'Bookings', idea: 'Promote workshops locally' }],
   priorities: ['Set up an email list', 'Post three times a week on Instagram'],
-  roadmap: [{ phase: 'Days 1–30', focus: 'Foundations', actions: ['Set up email'] }, { phase: 'Days 31–60', focus: 'Grow', actions: ['Run a workshop campaign'] }, { phase: 'Days 61–90', focus: 'Repeat', actions: ['Launch a loyalty offer'] }],
+  roadmap: [{ phase: 'Days 1–30', focus: 'Foundations', tasks: [{ title: 'Connect Meta Ads', action: 'connect_platform' }] }],
 };
-// The roadmap the prompt asks for: its phase names, two actions each.
+// In-app tasks (services/planCatalog.js actions) for one phase.
+const TASKS = (n) => [
+  { title: 'Write the ' + n + ' workshop ad', why: 'Workshops fill on Saturdays', what: 'Write three headlines for the workshop in Create', action: 'create_ad_copy' },
+  { title: 'Build the ' + n + ' gift-shopper audience', why: 'Gift shoppers buy most', what: 'Save the gift-shopper audience in Audience Builder', action: 'build_audience' },
+  { title: 'Check ' + n + ' campaign results', why: 'See what works', what: 'Review the workshop campaign in Campaign Overview', action: 'review_campaigns' },
+];
+// The roadmap the prompt asks for: its phase names, three in-app tasks each.
+// (The first call also gets the strategy; follow-up chunks only the roadmap.)
 function planFor(sys) {
   const m = sys.match(/"roadmap":\[(.*)\]\}\s*\nRoadmap:/);
   const names = m ? Array.from(m[1].matchAll(/"phase":"([^"]+)"/g)).map((x) => x[1]) : [];
-  return Object.assign({}, PLAN, { roadmap: names.map((n, i) => ({ phase: n, focus: 'Focus ' + (i + 1), actions: [{ step: 'Write the ' + n + ' workshop ad', area: 'create' }, { step: 'Check ' + n + ' results', area: 'campaigns' }] })) });
+  return Object.assign({}, PLAN, { roadmap: names.map((n, i) => ({ phase: n, focus: 'Focus ' + (i + 1), tasks: TASKS(n) })) });
 }
 const PERIODS = { flex: 2, monthly: 4, quarterly: 6, semiannual: 6, annual: 12 };
 // Payment confirmed (what fulfill_purchase does): paid purchase, access
@@ -62,7 +69,7 @@ H.net.handler = async (u, opts) => {
   if (!u.startsWith(AIML)) return null;
   let body = {}; try { body = JSON.parse(opts.body); } catch (_) {}
   const sys = (body.messages && body.messages[0] && body.messages[0].content) || '';
-  const kind = /extract facts about a business/.test(sys) ? 'website' : /marketing strategy covering the next/.test(sys) ? 'plan' : 'other';
+  const kind = /extract facts about a business/.test(sys) ? 'website' : /strategy and action plan covering the next|You are continuing the .* action plan/.test(sys) ? 'plan' : 'other';
   AI.calls.push({ kind, model: body.model, max_tokens: body.max_tokens, system: sys, user: body.messages && body.messages[1] && body.messages[1].content });
   if (kind === 'website') {
     return jres(200, { choices: [{ message: { content: JSON.stringify({ suggestions: {
@@ -252,15 +259,28 @@ const ANSWERS = {
     });
     check('5.8b each period plans its own length: Flex 2 phases, Monthly 4, Quarterly 6, Semi-Annual 6, Annual 12', shapes.every((x) => x.ok), shapes);
     const h = flow.HORIZONS.annual;
-    const big = flow.sanitizePlan(Object.assign({}, PLAN, { roadmap: h.phases.map((n) => ({ phase: n, focus: 'f', actions: Array.from({ length: 14 }, (_, j) => ({ step: 'Action ' + n + ' ' + j, area: 'create' })) })) }), 2, h);
+    const ids = Object.keys(require('../services/planCatalog').ACTIONS);
+    const big = flow.sanitizePlan(Object.assign({}, PLAN, { roadmap: h.phases.map((n) => ({ phase: n, focus: 'f', tasks: Array.from({ length: 20 }, (_, j) => ({ title: 'Task ' + n + ' ' + j, why: 'w', what: 'x', action: ids[j % ids.length] })) })) }), 2, h);
     const steps = flow.planSteps(big, '2026-11-01T00:00:00Z', {});
-    check('5.8c an annual plan can hold more than 100 steps (12 × up to 9), capped per phase, never padded', steps.total === 108 && steps.phases.length === 12 && steps.phases.every((p) => p.steps.length === 9));
-    const thin = Object.assign({}, PLAN, { roadmap: h.phases.map((n) => ({ phase: n, focus: 'f', actions: [{ step: 'Same', area: 'x' }, { step: 'same', area: 'create' }] })) });
+    check('5.8c an annual plan holds full months: 12 months × up to 16 in-app tasks (192), capped per month, never padded', steps.total === 192 && steps.phases.length === 12 && steps.phases.every((p) => p.steps.length === 16));
+    const thin = Object.assign({}, PLAN, { roadmap: h.phases.map((n) => ({ phase: n, focus: 'f', tasks: [{ title: 'Same', action: 'build_audience' }, { title: 'same', action: 'build_audience' }] })) });
     let threw = false; try { flow.sanitizePlan(thin, 2, h); } catch (e) { threw = e.code === 'PLAN_INCOMPLETE'; }
-    check('5.8d repeated actions are dropped; a plan too thin for its period (under 2 steps a phase) is refused', threw);
+    check('5.8d repeated tasks are dropped; a plan too thin for its period (under 2 tasks a phase) is refused', threw);
     const fx = flow.sanitizePlan(planFor(flow.planPrompt(an, 'vector', 2, flow.HORIZONS.flex).system), 2, flow.HORIZONS.flex);
     const fs2 = flow.planSteps(fx, '2026-11-01T00:00:00Z', {});
-    check('5.8e Flex: two phases over 14 days (Days 1–7 from 1 Nov, Days 8–14 to 14 Nov), unknown areas become "outside"', fs2.phases[0].starts.slice(0, 10) === '2026-11-01' && fs2.phases[1].ends.slice(0, 10) === '2026-11-14' && flow.sanitizePlan(Object.assign({}, fx, { roadmap: fx.roadmap.map((p) => ({ phase: p.phase, actions: [{ step: 'a1', area: 'moon' }, { step: 'a2' }] })) }), 2, flow.HORIZONS.flex).roadmap[0].actions[0].area === 'outside');
+    check('5.8e Flex: two phases over 14 days (Days 1–7 from 1 Nov, Days 8–14 to 14 Nov)', fs2.phases[0].starts.slice(0, 10) === '2026-11-01' && fs2.phases[1].ends.slice(0, 10) === '2026-11-14');
+    const mixed = flow.sanitizeTasks([
+      { title: 'Improve your SEO', what: 'Rewrite your homepage', action: 'create_ad_copy' },
+      { title: 'Interview five customers', action: 'research_audience' },
+      { title: 'Write a blog article about candles', action: 'create_ad_copy' },
+      { title: 'Ask a friend for feedback', action: 'outside' },
+      { title: 'Pick a colour', action: 'paint_walls' },
+      { title: 'Research gift shoppers in Utrecht', why: 'w', what: 'x', action: 'research_audience' },
+    ], 10);
+    check('5.8f only in-app work survives: SEO, interviews, blogs, "outside" and unknown actions are dropped', mixed.length === 1 && mixed[0].action === 'research_audience', mixed);
+    const legacy = flow.planSteps({ horizon: flow.HORIZONS.monthly, roadmap: [{ phase: 'Week 1', actions: [{ step: 'Write an ad', area: 'create' }, { step: 'Update the website', area: 'outside' }] }] }, '2026-11-01T00:00:00Z', { 'p1-a1': '2026-11-02T00:00:00Z' });
+    const ls = legacy.phases[0].steps;
+    check('5.8g a plan stored in the older format still shows: its steps, completion kept, area pages as buttons, outside steps without a button', ls.length === 2 && ls[0].done && ls[0].legacy && ls[0].page === 'create' && ls[1].page === null && ls[1].verify === 'manual');
   }
 
   // Failure, retry, attempt cap: the first attempt starts by itself after
@@ -343,20 +363,40 @@ const ANSWERS = {
   log('\n6e. Progress');
   r = await call('GET', '/api/onboarding/progress', A);
   const allIds = r.body.phases ? r.body.phases.flatMap((p) => p.steps.map((x) => x.id)) : [];
-  check('6e.1 steps come from the plan’s roadmap: 4 weekly phases, 8 steps, none done, each with where it’s done', r.status === 200 && r.body.locked === false && r.body.phases.length === 4 && r.body.total === 8 && r.body.completed === 0 && r.body.phases[0].steps[0].area === 'create' && r.body.phases[0].phase === 'Week 1' && new Set(allIds).size === 8, r.body);
-  r = await call('POST', '/api/onboarding/progress', A, { stepId: 'p1-a1', done: true });
-  const doneAt = r.body.phases && r.body.phases[0].steps[0].doneAt;
-  check('6e.2 ticking a step off stores it', r.status === 200 && r.body.completed === 1 && r.body.phases[0].steps[0].done === true && !!doneAt && sess('obA').progress.done['p1-a1'] === doneAt);
+  const s11 = r.body.phases && r.body.phases[0].steps[0];
+  check('6e.1 steps come from the plan’s roadmap: 4 weekly phases, 12 in-app tasks, none done; each with its page, button and how it completes', r.status === 200 && r.body.locked === false && r.body.phases.length === 4 && r.body.total === 12 && r.body.completed === 0 && r.body.phases[0].phase === 'Week 1' && new Set(allIds).size === 12
+    && s11.action === 'create_ad_copy' && s11.page === 'create' && s11.button === 'Open Create' && s11.verify === 'auto' && !!s11.why && !!s11.what && r.body.phases[0].steps[2].verify === 'manual', r.body);
+  // A task OrivenAI can't see (reviewing results) is confirmed by hand.
+  r = await call('POST', '/api/onboarding/progress', A, { stepId: 'p1-a3', done: true });
+  const doneAt = r.body.phases && r.body.phases[0].steps[2].doneAt;
+  check('6e.2 ticking a task OrivenAI can’t verify stores it', r.status === 200 && r.body.completed === 1 && r.body.phases[0].steps[2].done === true && !!doneAt && sess('obA').progress.done['p1-a3'] === doneAt);
   r = await call('GET', '/api/onboarding/progress', A);
-  check('6e.3 …and it stays done on the next visit', r.body.completed === 1 && r.body.phases[0].steps[0].done === true && r.body.phases[0].steps[0].doneAt === doneAt);
-  await call('POST', '/api/onboarding/progress', A, { stepId: 'p1-a1', done: true });
-  check('6e.4 ticking it again keeps the first time', sess('obA').progress.done['p1-a1'] === doneAt);
+  check('6e.3 …and it stays done on the next visit', r.body.completed === 1 && r.body.phases[0].steps[2].done === true && r.body.phases[0].steps[2].doneAt === doneAt);
+  await call('POST', '/api/onboarding/progress', A, { stepId: 'p1-a3', done: true });
+  check('6e.4 ticking it again keeps the first time', sess('obA').progress.done['p1-a3'] === doneAt);
   r = await call('POST', '/api/onboarding/progress', A, { stepId: 'p9-a9', done: true });
   const r2 = await call('POST', '/api/onboarding/progress', A, { stepId: 'p1-a2', done: 'yes' });
   check('6e.5 unknown steps (400 UNKNOWN_STEP) and malformed requests (400) are refused', r.status === 400 && r.body.code === 'UNKNOWN_STEP' && r2.status === 400);
-  await call('POST', '/api/onboarding/progress', A, { stepId: 'p2-a1', done: true });
-  r = await call('POST', '/api/onboarding/progress', A, { stepId: 'p2-a1', done: false });
-  check('6e.6 a step can be unticked', r.body.completed === 1 && !r.body.phases[1].steps[0].done);
+  await call('POST', '/api/onboarding/progress', A, { stepId: 'p2-a3', done: true });
+  r = await call('POST', '/api/onboarding/progress', A, { stepId: 'p2-a3', done: false });
+  check('6e.6 a step can be unticked', r.body.completed === 1 && !r.body.phases[1].steps[2].done);
+  // A verified task can't be ticked by hand, and opening a page doesn't count.
+  r = await call('POST', '/api/onboarding/progress', A, { stepId: 'p1-a1', done: true });
+  check('6e.6a a verified task (write ad copy) can’t be ticked by hand: 409 VERIFIED_AUTOMATICALLY', r.status === 409 && r.body.code === 'VERIFIED_AUTOMATICALLY' && !(sess('obA').progress.done || {})['p1-a1'], r.body);
+  await call('GET', '/api/creative/assets', A); await call('GET', '/api/business/audiences', A); await call('GET', '/api/campaigns', A);
+  r = await call('GET', '/api/onboarding/progress', A);
+  check('6e.6b opening the pages (reading content, audiences, campaigns) completes nothing', r.body.completed === 1, r.body.completed);
+  // The real results complete them: a saved audience, saved ad copy.
+  const obA = sess('obA').user_id;
+  H.rows('business_audiences').push({ id: 'aud-1', user_id: obA, name: 'Gift shoppers', created_at: new Date().toISOString() });
+  H.rows('creative_assets').push({ id: 'ca-1', user_id: obA, kind: 'headline', source_route: '/api/generate-text', status: 'draft', archived: false, created_at: new Date(Date.now() + 1000).toISOString(), content: {} });
+  r = await call('GET', '/api/onboarding/progress', A);
+  check('6e.6c a saved audience completes "Build the gift-shopper audience"; saved ad copy completes "Write the workshop ad" — only the first of each (week 1)', r.body.phases[0].steps[0].done && r.body.phases[0].steps[1].done && !r.body.phases[1].steps[0].done && !r.body.phases[1].steps[1].done && r.body.completed === 3, r.body.phases.map((p) => p.steps.map((x) => x.done)));
+  H.rows('business_audiences').push({ id: 'aud-2', user_id: obA, name: 'Interior lovers', created_at: new Date().toISOString() });
+  r = await call('GET', '/api/onboarding/progress', A);
+  check('6e.6d a second audience completes the second audience task (week 2) — the n-th task of a kind needs n results', r.body.phases[1].steps[1].done && !r.body.phases[2].steps[1].done && r.body.completed === 4, r.body.completed);
+  H.rows('business_audiences').splice(0, H.rows('business_audiences').length, ...H.rows('business_audiences').filter((x) => x.user_id !== obA));
+  H.rows('creative_assets').splice(0, H.rows('creative_assets').length, ...H.rows('creative_assets').filter((x) => x.id !== 'ca-1'));
   r = await call('GET', '/api/onboarding/progress', U);
   const rU = await call('POST', '/api/onboarding/progress', U, { stepId: 'p1-a1', done: true });
   check('6e.7 without access: locked, no steps; ticking refused (402)', r.body.locked === true && r.body.total === 0 && rU.status === 402);
@@ -404,9 +444,9 @@ const ANSWERS = {
   user('obChatP', { subscription_status: 'paid', access_expires_at: FUTURE, credits_balance: 1000, preferences: { assistant: 'momentum' } });
   user('obChatN', { subscription_status: 'paid', access_expires_at: FUTURE, credits_balance: 1000, preferences: { theme: 'dark' } });
   const cp = await chatSys('tok_obChatP');
-  check('6d.1 a chosen assistant: Oriven Chat answers in that persona', cp.status === 200 && /YOUR PERSONA: The user chose Momentum \(Growth & Execution\)/.test(cp.system) && /Practical, motivating and to the point\./.test(cp.system), { status: cp.status, tail: cp.system.slice(-300) });
+  check('6d.1 a chosen assistant: Oriven Chat answers as that assistant', cp.status === 200 && /^You are Momentum, the user's personal assistant inside OrivenAI\./.test(cp.system) && /YOUR IDENTITY: You are Momentum/.test(cp.system) && /Specialisation: Growth & Execution\. Tone: Practical, motivating and to the point\./.test(cp.system), { status: cp.status, head: cp.system.slice(0, 120) });
   const cn = await chatSys('tok_obChatN', { assistant: 'nova', persona: 'nova' });
-  check('6d.2 no chosen assistant (every existing account): no persona added, and none can be injected from the request', cn.status === 200 && !/YOUR PERSONA/.test(cn.system) && !/Nova/.test(cn.system), { status: cn.status });
+  check('6d.2 no chosen assistant (existing accounts): the default assistant (Vector) answers, and another can’t be injected from the request', cn.status === 200 && /YOUR IDENTITY: You are Vector/.test(cn.system) && !/Nova/.test(cn.system), { status: cn.status });
   check('6d.3 chat is still charged as before (onboarding changed nothing about it)', prof('obChatP').credits_balance < 1000 && prof('obChatN').credits_balance < 1000);
 
   // ── 6b. Abuse safeguards ──────────────────────────────────────

@@ -53,7 +53,7 @@ const jres = (status, body) => new Response(JSON.stringify(body), { status, head
 function planFor(sys) {
   const m = String(sys || '').match(/"roadmap":\[(.*)\]\}\s*\nRoadmap:/);
   const names = m ? Array.from(m[1].matchAll(/"phase":"([^"]+)"/g)).map((x) => x[1]) : [];
-  return Object.assign({}, PLAN, { roadmap: names.map((n) => ({ phase: n, focus: 'Focus', actions: [{ step: 'Plan the ' + n + ' email', area: 'create' }, { step: 'Review ' + n + ' orders', area: 'outside' }] })) });
+  return Object.assign({}, PLAN, { roadmap: names.map((n) => ({ phase: n, focus: 'Focus', tasks: require('./helpers/planFixture').tasks(n) })) });
 }
 H.net.handler = async (u, opts) => {
   if (!u.startsWith(AIML)) return null;
@@ -207,7 +207,7 @@ async function toPaywall(tok) {
   r = await call('GET', '/api/onboarding/plan', D);
   check('D.3 the plan is available after payment (Control Center → Marketing Plan reads it)', r.body.locked === false && r.body.plan && r.body.plan.summary === PLAN.summary);
   r = await call('GET', '/api/onboarding/progress', D);
-  check('D.3b …and Progress lists its steps (6 phases × 2)', r.body.locked === false && r.body.total === 12 && r.body.phases.length === 6);
+  check('D.3b …and Progress lists its steps (6 phases × 3 in-app tasks)', r.body.locked === false && r.body.total === 18 && r.body.phases.length === 6);
   check('D.4 no second plan, no second payment needed: state says completed, gate open', (await call('GET', '/api/onboarding/state', D)).body.flow.enabled === false && (await call('GET', '/api/campaigns', D)).status === 200);
 
   // ── H. Existing customers ───────────────────────────────────────
