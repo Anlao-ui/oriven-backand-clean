@@ -26,6 +26,8 @@ const MIG = path.join(__dirname, '..', 'docs', 'migrations');
 const pricing = require('../services/pricing');
 const purchases = require('../services/purchases');
 const flow = require('../services/onboardingFlow');
+// Model calls one Marketing Plan takes for a period (long periods are written in chunks).
+const planCalls = (id) => Math.ceil(flow.HORIZONS[id].phases.length / flow.HORIZONS[id].chunk);
 const onboarding = require('../services/onboarding');
 const { BASE, adapter, priceFor, installTestPrices, makeStripe } = require('./helpers/pgPayments');
 const FE = path.resolve(__dirname, '..', '..', '..', 'oriven-frontend', 'js', 'plans.js');
@@ -57,7 +59,7 @@ const aiText = async (task, system) => {
   aiCalls++;
   const m = String(system || '').match(/"roadmap":\[(.*)\]\}\s*\nRoadmap:/);
   const names = m ? Array.from(m[1].matchAll(/"phase":"([^"]+)"/g)).map((x) => x[1]) : [];
-  return JSON.stringify(Object.assign({}, PLAN, { roadmap: names.map((n) => ({ phase: n, focus: 'Focus', actions: [{ step: 'Plan the ' + n + ' email', area: 'create' }, { step: 'Review ' + n + ' orders', area: 'outside' }] })) }));
+  return JSON.stringify(Object.assign({}, PLAN, { roadmap: names.map((n) => ({ phase: n, focus: 'Focus', tasks: require('./helpers/planFixture').tasks(n) })) }));
 };
 const ANSWERS = { business: { name: 'Bloom & Wick', industry: 'Retail', offer: 'Candles', area: 'Utrecht' }, audience: { type: 'b2c', ideal: 'x', location: 'local', problem: 'x' },
   offer: { main: 'x', different: 'x', price: 'mid' }, goals: { primary: 'sales', success: 'x' }, marketing: { channels: ['none'], challenge: 'time', paidAds: 'no' }, budget: { budget: 'none', time: 'lt2', team: 'me' } };
@@ -154,11 +156,11 @@ const days = (a, b) => Math.round((new Date(b) - new Date(a)) / 864e5);
     const ai0 = aiCalls;
     await flow.getPlan(u.id, await access(u.id)); await waitPlan(u.id);
     const gp = await flow.getPlan(u.id, await access(u.id));
-    check(`3.${id}.j the marketing plan is written once after payment, for ${X.label} (${X.phases} phases)`, gp.status === 'ready' && gp.plan.horizon.period === id && gp.plan.roadmap.length === X.phases && aiCalls === ai0 + 1, { status: gp.status, phases: gp.plan && gp.plan.roadmap.length });
+    check(`3.${id}.j the marketing plan is written once after payment, for ${X.label} (${X.phases} phases)`, gp.status === 'ready' && gp.plan.horizon.period === id && gp.plan.roadmap.length === X.phases && aiCalls === ai0 + planCalls(id), { status: gp.status, phases: gp.plan && gp.plan.roadmap.length, calls: aiCalls - ai0 });
     await flow.getPlan(u.id, await access(u.id)); await flow.getPlan(u.id, await access(u.id));
-    check(`3.${id}.k later visits and refreshes don't write it again`, aiCalls === ai0 + 1);
+    check(`3.${id}.k later visits and refreshes don't write it again`, aiCalls === ai0 + planCalls(id));
   }
-  check('3.z no plan was generated before its payment (one AI call per paid plan, none for checkouts alone)', aiCalls === 5, aiCalls);
+  check('3.z no plan was generated before its payment (one plan per paid plan — Semi-Annual and Annual are written in chunks — none for checkouts alone)', aiCalls === pricing.PLAN_ORDER.reduce((n, id) => n + planCalls(id), 0), aiCalls);
 
   // ── 4. Monthly instalments ─────────────────────────────────────
   console.log('\n4. Monthly credit instalments');
@@ -209,7 +211,7 @@ const days = (a, b) => Math.round((new Date(b) - new Date(a)) / 864e5);
   const legacy = await newUser({ noOnboarding: true });
   await pg.query("UPDATE profiles SET subscription_status = 'paid', access_plan = 'annual', access_expires_at = now() + interval '200 days', credits_balance = 900 WHERE id = $1", [legacy.id]);
   const lp = await flow.getPlan(legacy.id, await access(legacy.id));
-  check('6.3 a paying account from before the onboarding: offered the missing-plan recovery, no purchase needed, nothing generated, credits untouched', lp.recovery === true && !lp.plan && (await purchaseRows(legacy.id)).length === 0 && (await profile(legacy.id)).credits_balance === 900 && aiCalls === 5);
+  check('6.3 a paying account from before the onboarding: offered the missing-plan recovery, no purchase needed, nothing generated, credits untouched', lp.recovery === true && !lp.plan && (await purchaseRows(legacy.id)).length === 0 && (await profile(legacy.id)).credits_balance === 900 && aiCalls === pricing.PLAN_ORDER.reduce((n, id) => n + planCalls(id), 0));
   const durErr = await refuse(() => pg.query("INSERT INTO purchases (id, user_id, plan_id, price_incl_vat_cents, duration_months, duration_days, credits_total, instalments) VALUES ($1, $2, 'monthly', 2900, 0, 0, 1750, 1)", [crypto.randomUUID(), x.id]));
   check('6.4 a purchase without an access duration can’t exist (database check); checkout always takes the duration from the server', !!durErr && /check/i.test(durErr.message));
   check('6.5 the browser can’t set price, credits or duration: createCheckout takes only the plan id', (await purchaseRows(u0.id)).length === 0 && purchases.createCheckout.length === 1);

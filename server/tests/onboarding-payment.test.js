@@ -58,7 +58,7 @@ const aiText = async (task, system) => {
   aiCalls++;
   const m = String(system || '').match(/"roadmap":\[(.*)\]\}\s*\nRoadmap:/);
   const names = m ? Array.from(m[1].matchAll(/"phase":"([^"]+)"/g)).map((x) => x[1]) : [];
-  return JSON.stringify(Object.assign({}, PLAN, { roadmap: names.map((n) => ({ phase: n, focus: 'Focus', actions: [{ step: 'Plan the ' + n + ' email', area: 'create' }, { step: 'Review ' + n + ' orders', area: 'outside' }] })) }));
+  return JSON.stringify(Object.assign({}, PLAN, { roadmap: names.map((n) => ({ phase: n, focus: 'Focus', tasks: require('./helpers/planFixture').tasks(n) })) }));
 };
 const HOOK = { calls: 0, failNext: 0 };
 const ANSWERS = { business: { name: 'Bloom & Wick', industry: 'Retail', offer: 'Candles', area: 'Utrecht', website: 'bloom.example' }, audience: { type: 'b2c', ideal: 'x', location: 'local', problem: 'x' },

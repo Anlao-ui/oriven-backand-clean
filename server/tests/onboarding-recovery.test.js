@@ -47,7 +47,7 @@ H.net.handler = async (u, opts) => {
   AI.lastSystem = sys;
   const m = sys.match(/"roadmap":\[(.*)\]\}\s*\nRoadmap:/);
   const names = m ? Array.from(m[1].matchAll(/"phase":"([^"]+)"/g)).map((x) => x[1]) : [];
-  const plan = Object.assign({}, PLAN, { roadmap: names.map((n) => ({ phase: n, focus: 'Focus', actions: [{ step: 'Write the ' + n + ' email', area: 'create' }, { step: 'Review ' + n + ' orders', area: 'outside' }] })) });
+  const plan = Object.assign({}, PLAN, { roadmap: names.map((n) => ({ phase: n, focus: 'Focus', tasks: require('./helpers/planFixture').tasks(n) })) });
   return new Response(JSON.stringify({ model: 'claude-haiku-4-5', choices: [{ message: { content: JSON.stringify(plan) }, finish_reason: 'stop' }], usage: { completion_tokens: 1500 } }), { status: 200, headers: { 'Content-Type': 'application/json' } });
 };
 
@@ -96,7 +96,7 @@ const BIZ_ANSWERS = { name: 'Bloom & Wick', industry: 'Retail & e-commerce', off
   check('1.8 nothing bought or granted: no purchase, same credits, same access end, same subscription', purchases() === pur0 && untouched('rcL1', before1) && H.rpcCalls.length === rpc0, { credits: prof('rcL1').credits_balance, rpc: H.rpcCalls.slice(rpc0) });
   check('1.9 the session is completed and unlocked with no purchase reference', sess('rcL1').status === 'completed' && !!sess('rcL1').unlocked_at && !sess('rcL1').purchase_id);
   r = await call('GET', '/api/onboarding/plan', L1);
-  check('1.10 the plan is shown on Marketing Plan, and Progress has its steps', r.body.status === 'ready' && !!r.body.plan && (await call('GET', '/api/onboarding/progress', L1)).body.total === 8);
+  check('1.10 the plan is shown on Marketing Plan, and Progress has its steps', r.body.status === 'ready' && !!r.body.plan && (await call('GET', '/api/onboarding/progress', L1)).body.total === 12);
   r = await call('POST', '/api/onboarding/recovery', L1, { answers: REST, assistant: 'nova' });
   const r2 = await call('GET', '/api/onboarding/recovery', L1);
   check('1.11 a plan already exists: no second plan (409 PLAN_EXISTS, no AI call)', r.status === 409 && r.body.code === 'PLAN_EXISTS' && r2.body.reason === 'plan_exists' && AI.calls === 1);

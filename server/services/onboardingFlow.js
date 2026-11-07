@@ -25,6 +25,9 @@
 // plan prompt labels every input by its source and forbids inventing facts.
 
 const pricing = require('./pricing');
+const planCatalog = require('./planCatalog'); // what a Marketing Plan task can be (in-app work only)
+const pageKeys = require('./pageKeys');
+const progressFacts = require('./progressFacts');
 
 const TABLE = 'onboarding_sessions';
 const MAX_PLAN_ATTEMPTS = 3;
@@ -59,20 +62,10 @@ const STEPS = ['welcome',
 // The six assistants, exactly as introduced on the public site (index.html
 // #agents). The persona is used for the plan's voice and, once chosen, for
 // Oriven Chat (server.js /api/ai/chat).
-const ASSISTANTS = {
-  scout:    { name: 'Scout',    role: 'Research & Insights',        tone: 'Curious, thorough and evidence-first.',
-              voice: 'asks what the evidence says before forming an opinion, keeps what is proven apart from what is a hunch, and says how sure it is' },
-  vector:   { name: 'Vector',   role: 'Strategy & Direction',       tone: 'Calm, structured and decisive.',
-              voice: 'starts from the goal, lays out the options and ties every choice back to the result the business wants, so each budget decision can be defended' },
-  nova:     { name: 'Nova',     role: 'Creative & Content',         tone: 'Imaginative, expressive and energetic.',
-              voice: 'explores several creative directions quickly, then commits to one and polishes it in the brand voice' },
-  momentum: { name: 'Momentum', role: 'Growth & Execution',         tone: 'Practical, motivating and to the point.',
-              voice: 'keeps a short list of what comes next and what is blocking it, clears the small things first and keeps work moving week after week' },
-  metric:   { name: 'Metric',   role: 'Performance & Optimisation', tone: 'Precise, direct and evidence-oriented.',
-              voice: 'looks at the numbers before the opinions, shows the data behind every conclusion and says plainly when there is not enough data yet' },
-  flux:     { name: 'Flux',     role: 'Automation & Systems',       tone: 'Systematic, efficient and calm under load.',
-              voice: 'likes repeatable work to run itself, with clear limits, a record of what happened and no surprises' },
-};
+// One definition for the whole backend: services/agents.js (name, role,
+// tone and working approach, taken from the landing page).
+const _agents = require('./agents');
+const ASSISTANTS = Object.fromEntries(_agents.ORDER.map((id) => [id, { name: _agents.AGENTS[id].name, role: _agents.AGENTS[id].role, tone: _agents.AGENTS[id].tone, voice: _agents.AGENTS[id].voice }]));
 
 // ── Answer schema ─────────────────────────────────────────────────
 // Every field the questionnaire can store. Unknown keys are dropped; text is
@@ -257,10 +250,22 @@ async function saveProgress(userId, body) {
   if (b.answers !== undefined) patch.answers = mergeAnswers(row.answers, b.answers);
   if (b.assistant !== undefined) {
     if (!ASSISTANTS[b.assistant]) throw new FlowError(400, 'INVALID_ASSISTANT', 'Choose one of the six assistants.');
+    // The assistant is chosen once (services/agents.js chooseAgent): the
+    // onboarding can make the first choice, never replace it.
+    const cur = await _agents.resolveAgent(_db, userId);
+    if (cur.assigned && cur.id !== b.assistant) throw new FlowError(409, 'ASSISTANT_ALREADY_CHOSEN', ASSISTANTS[cur.id].name + ' is already your personal assistant.');
     patch.assistant = b.assistant;
   }
   const { error } = await _db.from(TABLE).update(patch).eq('user_id', userId);
   if (error) throw error;
+  // The chosen assistant is the account's personal assistant from now on —
+  // stored on the profile right away, paid or not (services/agents.js reads
+  // it there first). A failed write is retried on the next read
+  // (agents.resolveAgent copies it from this session).
+  if (patch.assistant) {
+    try { await _agents.assignAgent(_db, userId, patch.assistant); }
+    catch (err) { console.warn('[OnboardingFlow] assistant not stored on the profile yet:', err.code || err.message); }
+  }
   return getRow(userId);
 }
 
@@ -468,34 +473,57 @@ const PLAN_SECTIONS = [
 ];
 
 // The plan covers the access the customer bought (services/pricing.js
-// periods): its roadmap has one phase per week or month of that period, and
-// each phase's actions become the steps on the Progress page. Step counts
-// grow with the period because there are more phases, never by padding.
+// periods): its roadmap has one phase per week, fortnight or month of that
+// period. Every task is work done INSIDE OrivenAI (services/planCatalog.js)
+// and becomes a step on the Progress page with a button to its page.
+// perPhase: the most tasks a phase may hold; target: the guideline given to
+// the model (a month ≈ 10–15 meaningful tasks; never padded). Long periods
+// are written in chunks (phases per model call) so every month gets full
+// tasks without one oversized answer.
 const HORIZONS = {
-  flex:       { period: 'flex',       label: '14 days',   days: 14,  perPhase: 5, maxTokens: 4000, phases: ['Days 1–7', 'Days 8–14'] },
-  monthly:    { period: 'monthly',    label: '1 month',   days: 30,  perPhase: 4, maxTokens: 4500, phases: ['Week 1', 'Week 2', 'Week 3', 'Week 4'] },
-  quarterly:  { period: 'quarterly',  label: '3 months',  days: 91,  perPhase: 5, maxTokens: 5500, phases: ['Weeks 1–2', 'Weeks 3–4', 'Weeks 5–6', 'Weeks 7–8', 'Weeks 9–10', 'Weeks 11–13'] },
-  semiannual: { period: 'semiannual', label: '6 months',  days: 182, perPhase: 7, maxTokens: 6500, phases: ['Month 1', 'Month 2', 'Month 3', 'Month 4', 'Month 5', 'Month 6'] },
-  annual:     { period: 'annual',     label: '12 months', days: 365, perPhase: 9, maxTokens: 8000, phases: ['Month 1', 'Month 2', 'Month 3', 'Month 4', 'Month 5', 'Month 6', 'Month 7', 'Month 8', 'Month 9', 'Month 10', 'Month 11', 'Month 12'] },
+  flex:       { period: 'flex',       label: '14 days',   days: 14,  perPhase: 9,  target: '5–8',   chunk: 2, maxTokens: 7000, phases: ['Days 1–7', 'Days 8–14'] },
+  monthly:    { period: 'monthly',    label: '1 month',   days: 30,  perPhase: 6,  target: '3–5',   chunk: 4, maxTokens: 7000, phases: ['Week 1', 'Week 2', 'Week 3', 'Week 4'] },
+  quarterly:  { period: 'quarterly',  label: '3 months',  days: 91,  perPhase: 9,  target: '5–8',   chunk: 6, maxTokens: 8000, phases: ['Weeks 1–2', 'Weeks 3–4', 'Weeks 5–6', 'Weeks 7–8', 'Weeks 9–10', 'Weeks 11–13'] },
+  semiannual: { period: 'semiannual', label: '6 months',  days: 182, perPhase: 16, target: '10–15', chunk: 3, maxTokens: 8000, phases: ['Month 1', 'Month 2', 'Month 3', 'Month 4', 'Month 5', 'Month 6'] },
+  annual:     { period: 'annual',     label: '12 months', days: 365, perPhase: 16, target: '10–15', chunk: 3, maxTokens: 8000, phases: ['Month 1', 'Month 2', 'Month 3', 'Month 4', 'Month 5', 'Month 6', 'Month 7', 'Month 8', 'Month 9', 'Month 10', 'Month 11', 'Month 12'] },
 };
-// Where in OrivenAI a step is done ("outside": in the business itself).
+// Where in OrivenAI a step of an OLDER plan is done (plans written before
+// tasks named a catalogue action; still shown, never generated again).
 const STEP_AREAS = ['research', 'create', 'launch', 'campaigns', 'automations', 'outside'];
+const AREA_PAGE = { research: 'research', create: 'create', launch: 'launch', campaigns: 'campaigns', automations: 'automations' };
 function horizonFor(planId) { return HORIZONS[planId] || null; }
 
-function planPrompt(analysis, assistantId, maxChannels, horizon) {
+// Tasks that would send the owner outside OrivenAI. The catalogue already
+// makes them impossible; this also drops a task whose words describe one.
+const OUTSIDE_WORK = /\b(seo|search engine optimi[sz]|blog|article|interview|cold[- ]?call|phone (?:your|potential)|door[- ]to[- ]door|flyer|leaflet|print ad|agency|hire|networking event|trade show|podcast|newsletter|press release|word of mouth)\b/i;
+
+// The roadmap's JSON shape for some phases (the model fills the tasks).
+function _roadmapShape(phases) {
+  return phases.map((ph) => `{"phase":"${ph}","focus":"","tasks":[{"title":"","why":"","what":"","action":""}]}`).join(',');
+}
+function _taskRules(h, phases) {
+  return `Roadmap: exactly ${phases.length} phases with these names, in order. Every task is work the owner does INSIDE OrivenAI — the paid-advertising workspace — and must name exactly one "action" from this list (copy the id):
+${planCatalog.promptList()}
+Never write a task the owner would do outside OrivenAI: no SEO, blog articles, customer interviews, cold calls, flyers, agencies, events or other tools. If something outside matters, leave it out.
+Each task: "title" (starts with a verb, specific to this business, under 90 characters), "why" (why it matters for this business's goal, under 160 characters), "what" (exactly what to do and finish in OrivenAI, under 200 characters), "action" (an id from the list).
+Order the tasks so the work builds up: set-up and research first, then audiences and strategy, creatives, building campaigns, launching, analysing results, optimising and new tests. Later phases continue from earlier ones (optimise and test what was launched) instead of starting over. Aim for ${h.target} meaningful tasks per phase, at most ${h.perPhase}; give fewer when fewer are genuinely useful. Never repeat a task in other words.`;
+}
+
+function planPrompt(analysis, assistantId, maxChannels, horizon, phases) {
   const p = ASSISTANTS[assistantId] || ASSISTANTS.vector;
   const h = horizon || HORIZONS.monthly;
-  const roadmapShape = h.phases.map((ph) => `{"phase":"${ph}","focus":"","actions":[{"step":"","area":"research|create|launch|campaigns|automations|outside"}]}`).join(',');
+  const ph = phases || h.phases;
   const system = `You are ${p.name}, OrivenAI's ${p.role} assistant. Tone: ${p.tone} You ${p.voice}.
-Write a personalized marketing strategy covering the next ${h.label} for the business described in the INPUT: that is how long the owner has OrivenAI. Write in ${p.name}'s tone, addressing the owner as "you".
+Write a personalized paid-advertising strategy and action plan covering the next ${h.label} for the business described in the INPUT: that is how long the owner has OrivenAI. OrivenAI is where they research, build audiences, create ads, launch and analyse campaigns on Meta, Google, TikTok and Pinterest. Write in ${p.name}'s tone, addressing the owner as "you".
 
 Rules:
 - Use only the INPUT. Each value is labelled with its source: "user" (the owner's answer), "user_confirmed_website" (from their website, confirmed by the owner), "website" (read from their website, not confirmed: mention it only as "your website says…"), "derived" (planning rules from their budget and time).
 - Never invent facts: no customer numbers, revenue, reviews, awards, competitors, prices or results that are not in the INPUT. Expected outcomes are targets to aim for, not promises; never guarantee results.
-- Respect every constraint in budget_and_capacity. Recommend at most max_active_channels channels. Budget figures must fit the stated monthly budget; with "No fixed budget yet", give no euro amounts for ads beyond an optional small test the owner decides on.
-- Where the INPUT lacks something the plan needs (no website, unknown results, no customer data), say what the owner should find out or test first. Never fill a gap with an assumption presented as fact.
-- Be specific to this business: name its offer, audience and area. No generic filler.
+- Respect every constraint in budget_and_capacity. Recommend at most max_active_channels ad platforms. Budget figures must fit the stated monthly budget; with "No fixed budget yet", give no euro amounts for ads beyond an optional small test the owner decides on.
+- Where the INPUT lacks something the plan needs, plan the OrivenAI research that finds it out. Never fill a gap with an assumption presented as fact.
+- Be specific to this business: name its offer, audience, area and goal. No generic filler.
 - Plain text inside JSON strings; no markdown.
+- If the INPUT has "owner_request", this is a NEW version of their plan the owner asked for: follow their request wherever it fits these rules (it never overrides them), and say in the summary what changed. "previous_plan" is what they had; keep what still fits, change what they asked. "oriven_context" (source "app") is what they saved in OrivenAI since: research reports, audiences, competitors and campaigns — build on it and don't plan research or audiences they already have.
 
 Reply with JSON only, exactly this shape:
 {"summary":"2-3 sentences",
@@ -503,15 +531,52 @@ Reply with JSON only, exactly this shape:
 "audience":{"text":"","segments":[{"name":"","needs":""}]},
 "positioning":{"statement":"","proof_points":[""]},
 "objectives":[{"objective":"","measure":""}],
-"channels":[{"channel":"","role":"","why":"","effort":"low|medium|high"}],
+"channels":[{"channel":"Meta|Google|TikTok|Pinterest","role":"","why":"","effort":"low|medium|high"}],
 "content":{"pillars":[{"name":"","ideas":[""]}],"cadence":""},
 "campaigns":[{"name":"","goal":"","idea":""}],
 "priorities":[""],
-"roadmap":[${roadmapShape}]}
-Roadmap: exactly ${h.phases.length} phases with these names, in order. Each action is one concrete step the owner can do and tick off within its phase (start with a verb, under 140 characters), building on the earlier phases. "area" is where it is done: research (market/customer research in OrivenAI), create (writing ads or content in OrivenAI), launch (publishing ads), campaigns (reviewing running campaigns and results), automations (scheduling or rules), outside (in the business itself, e.g. updating the website). Give 2 to ${h.perPhase} actions per phase — only as many as are genuinely useful; never repeat an action or pad with filler.
+"roadmap":[${_roadmapShape(ph)}]}
+${_taskRules(h, ph)}
+"channels" are the ad platforms to use; "content" pillars are the creative angles for the ads.
 Limits: up to 3 segments, 3 proof points, 4 objectives, ${maxChannels || 3} channels, 4 pillars with up to 3 ideas each, 3 campaigns, 5 priorities.`;
   const user = 'INPUT (JSON):\n' + JSON.stringify(analysis);
   return { system, user };
+}
+
+// The next chunk of a long roadmap: same rules, building on the strategy and
+// on the tasks of the earlier phases (titles only).
+function roadmapPrompt(analysis, assistantId, horizon, phases, strategy, earlier) {
+  const p = ASSISTANTS[assistantId] || ASSISTANTS.vector;
+  const h = horizon || HORIZONS.monthly;
+  const system = `You are ${p.name}, OrivenAI's ${p.role} assistant. Tone: ${p.tone} You ${p.voice}.
+You are continuing the ${h.label} paid-advertising action plan for the business in the INPUT. The strategy is in STRATEGY; the tasks of the earlier phases are in EARLIER (continue from them: analyse, optimise and test what was launched; never repeat them). Same rules as before: use only the INPUT, never invent facts, respect budget_and_capacity, specific to this business, plain text inside JSON strings.
+Reply with JSON only, exactly this shape:
+{"roadmap":[${_roadmapShape(phases)}]}
+${_taskRules(h, phases)}`;
+  const user = 'INPUT (JSON):\n' + JSON.stringify(analysis) + '\n\nSTRATEGY (JSON):\n' + JSON.stringify(strategy) + '\n\nEARLIER (JSON):\n' + JSON.stringify(earlier);
+  return { system, user };
+}
+
+// Pure: one phase's tasks, validated. Only catalogue actions; no duplicates;
+// nothing that describes outside work. Older plans (actions [{step, area}])
+// are read by planSteps, never produced here.
+function sanitizeTasks(list, max) {
+  const seen = new Set();
+  const out = [];
+  (Array.isArray(list) ? list : []).forEach((x) => {
+    if (out.length >= max || !x || typeof x !== 'object') return;
+    const action = typeof x.action === 'string' ? x.action.trim() : '';
+    if (!planCatalog.action(action)) return;
+    const title = _text(x.title, 160);
+    if (!title) return;
+    const why = _text(x.why, 300), what = _text(x.what, 400);
+    if (OUTSIDE_WORK.test(title + ' ' + what)) return;
+    const k = title.toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+    if (seen.has(k)) return;
+    seen.add(k);
+    out.push({ title, why, what, action });
+  });
+  return out;
 }
 
 // Pure: validates and caps the model's plan. Throws when unusable.
@@ -542,50 +607,74 @@ function sanitizePlan(raw, maxChannels, horizon) {
   };
   const phases = horizon ? horizon.phases.length : 3;
   const perPhase = horizon ? horizon.perPhase : 5;
-  plan.roadmap = arr(r.roadmap, phases).map((p, i) => {
-    const seen = new Set();
-    const actions = arr(p && p.actions, perPhase).map((a) => {
-      const step = t(typeof a === 'string' ? a : a && a.step, 300);
-      const area = a && typeof a === 'object' && STEP_AREAS.includes(a.area) ? a.area : 'outside';
-      return { step, area };
-    }).filter((a) => { const k = a.step.toLowerCase(); if (!a.step || seen.has(k)) return false; seen.add(k); return true; });
-    return { phase: horizon ? horizon.phases[i] : t(p && p.phase, 40), focus: t(p && p.focus, 240), actions };
-  }).filter((p) => p.phase && p.actions.length);
+  plan.roadmap = arr(r.roadmap, phases).map((p, i) => ({
+    phase: horizon ? horizon.phases[i] : t(p && p.phase, 40),
+    focus: t(p && p.focus, 240),
+    tasks: sanitizeTasks(p && p.tasks, perPhase),
+  })).filter((p) => p.phase && p.tasks.length);
   if (horizon) plan.horizon = { period: horizon.period, label: horizon.label, days: horizon.days };
+  plan.format = 2; // tasks name catalogue actions (services/planCatalog.js)
   // Enough substance to be useful: every section present with real content,
-  // every roadmap phase with actions. Anything less is not shown as a plan.
+  // every roadmap phase with at least two in-app tasks. Anything less is not
+  // shown as a plan (the attempt fails and can be retried).
   const len = (v, n) => typeof v === 'string' && v.length >= n;
-  const steps = plan.roadmap.reduce((n, p) => n + p.actions.length, 0);
+  const steps = plan.roadmap.reduce((n, p) => n + p.tasks.length, 0);
   const usable = len(plan.summary, 40) && len(plan.overview.text, 60) && len(plan.audience.text, 40) && len(plan.positioning.statement, 20)
     && plan.objectives.length >= 1 && plan.channels.length >= 1 && plan.content.pillars.length >= 1 && plan.campaigns.length >= 1
-    && plan.priorities.length >= 2 && plan.roadmap.length === phases && plan.roadmap.every((p) => p.actions.length >= 1)
-    && (!horizon || steps >= phases * 2);
+    && plan.priorities.length >= 2 && plan.roadmap.length === phases && plan.roadmap.every((p) => p.tasks.length >= 2)
+    && (!horizon || steps >= phases * 3);
   if (!usable) { const e = new Error('plan incomplete'); e.code = 'PLAN_INCOMPLETE'; throw e; }
   return plan;
 }
 
 // ── Progress steps (from the plan's roadmap) ──────────────────────
-// Pure. One step per roadmap action, ids stable for this plan ("p<phase>-
-// a<action>"); phase dates spread the plan's period evenly from `startIso`
-// (when access began). done: { <stepId>: ISO time } stored for this plan.
-function planSteps(plan, startIso, done) {
+// Pure. One step per roadmap task, ids stable for this plan ("p<phase>-
+// a<task>"); phase dates spread the plan's period evenly from `startIso`
+// (when access began). done: { <stepId>: ISO time } the user confirmed
+// (only for tasks OrivenAI can't see). facts: services/progressFacts.js —
+// a verified task is done when there are enough real results of its kind
+// (the n-th task of a kind needs n), never by opening a page.
+// Each step: { id, step (title), why, what, action, page, button, verify
+// ('auto'|'manual'), done, doneAt, legacy }.
+function planSteps(plan, startIso, done, facts) {
   const h = (plan && plan.horizon) || { period: null, label: '90 days', days: 90 };
   const road = (plan && plan.roadmap) || [];
-  const start = Date.parse(startIso || (plan && plan.generated_at) || '') || Date.now();
+  const start = Date.parse((plan && plan.startsAt) || startIso || (plan && plan.generated_at) || '') || Date.now();
   const span = (h.days * 86400000) / Math.max(1, road.length);
   const d = done || {};
+  const f = facts || null;
+  const seenOfKey = {};
   let total = 0, completed = 0;
-  const phases = road.map((p, i) => ({
-    phase: p.phase, focus: p.focus || '',
-    starts: new Date(start + span * i).toISOString(),
-    ends: new Date(start + span * (i + 1) - 1).toISOString(),
-    steps: (p.actions || []).map((a, j) => {
-      const id = 'p' + (i + 1) + '-a' + (j + 1);
-      const at = d[id] || null;
-      total += 1; if (at) completed += 1;
-      return { id, step: typeof a === 'string' ? a : a.step, area: (a && a.area) || 'outside', done: !!at, doneAt: at };
-    }),
-  }));
+  const phases = road.map((p, i) => {
+    const list = Array.isArray(p.tasks) ? p.tasks : (p.actions || []);
+    return {
+      phase: p.phase, focus: p.focus || '',
+      starts: new Date(start + span * i).toISOString(),
+      ends: new Date(start + span * (i + 1) - 1).toISOString(),
+      steps: list.map((a, j) => {
+        const id = 'p' + (i + 1) + '-a' + (j + 1);
+        const isTask = a && typeof a === 'object' && planCatalog.action(a.action);
+        let step;
+        if (isTask) {
+          const cat = planCatalog.action(a.action), key = planCatalog.verifyKey(a.action);
+          let isDone = false, at = null;
+          if (key) {
+            seenOfKey[key] = (seenOfKey[key] || 0) + 1;
+            isDone = !!f && (f[key] || 0) >= seenOfKey[key];
+          } else { at = d[id] || null; isDone = !!at; }
+          step = { id, step: a.title, why: a.why || '', what: a.what || '', action: a.action, page: cat.page, button: cat.button, verify: key ? 'auto' : 'manual', done: isDone, doneAt: at, legacy: false };
+        } else {
+          // An older plan's action: confirmed by hand, its area's page if any.
+          const area = (a && a.area) || 'outside';
+          const at = d[id] || null;
+          const page = AREA_PAGE[area] || null;
+          step = { id, step: typeof a === 'string' ? a : (a && a.step) || '', why: '', what: '', action: null, area, page, button: page ? 'Open ' + pageKeys.PAGES[page].label : null, verify: 'manual', done: !!at, doneAt: at, legacy: true };
+        }
+        total += 1; if (step.done) completed += 1;
+        return step;
+      }),
+    };
+  });
   return { horizon: h, total, completed, phases };
 }
 
@@ -612,32 +701,65 @@ async function _claim(row, horizon) {
   return Array.isArray(data) && data.length ? data[0] : null;
 }
 
+// The plan from an analysis: the strategy with the first chunk of phases,
+// then the remaining chunks building on it (long periods: every phase gets
+// full tasks), validated as one plan. Throws when the output is unusable.
+// Used for the first plan and for a new plan the owner asks for.
+async function _composePlan(analysis, assistantId, horizon) {
+  const maxCh = analysis.budget_and_capacity.max_active_channels.value;
+  {
+    // One model call; the answer counts only if the model finished (not cut
+    // off at the token limit) and returned content.
+    const call = async (system, user) => {
+      const data = await _aiText('onboarding-plan', system, user, { max_tokens: horizon.maxTokens, returnFull: true });
+      const choice = data && typeof data === 'object' && data.choices && data.choices[0];
+      const content = typeof data === 'string' ? data : (choice && choice.message && choice.message.content) || '';
+      const finish = (choice && choice.finish_reason) || null;
+      if (!content) { const e = new Error('empty provider response'); e.code = 'PLAN_INCOMPLETE'; throw e; }
+      if (finish && !['stop', 'end_turn', 'stop_sequence'].includes(finish)) { const e = new Error('provider output cut off (' + finish + ')'); e.code = 'PLAN_TRUNCATED'; throw e; }
+      return { json: _parseJson(content), data, finish };
+    };
+    // The strategy with the first chunk of phases, then the remaining
+    // chunks building on it (long periods: every month gets full tasks).
+    // Validated as one plan, then stored and marked ready in one update.
+    const chunks = [];
+    for (let i = 0; i < horizon.phases.length; i += horizon.chunk) chunks.push(horizon.phases.slice(i, i + horizon.chunk));
+    const first = planPrompt(analysis, assistantId, maxCh, horizon, chunks[0]);
+    const head = await call(first.system, first.user);
+    const raw = Object.assign({}, head.json, { roadmap: (head.json.roadmap || []).slice(0, chunks[0].length) });
+    const strategy = { summary: raw.summary, objectives: raw.objectives, channels: raw.channels, audience: raw.audience && raw.audience.segments, campaigns: raw.campaigns, priorities: raw.priorities };
+    let outTokens = (head.data && head.data.usage && head.data.usage.completion_tokens) || 0;
+    for (let c = 1; c < chunks.length; c++) {
+      const earlier = raw.roadmap.map((p) => ({ phase: p.phase, tasks: sanitizeTasks(p && p.tasks, horizon.perPhase).map((t) => t.title) }));
+      const next = roadmapPrompt(analysis, assistantId, horizon, chunks[c], strategy, earlier);
+      const part = await call(next.system, next.user);
+      raw.roadmap = raw.roadmap.concat((part.json.roadmap || []).slice(0, chunks[c].length));
+      outTokens += (part.data && part.data.usage && part.data.usage.completion_tokens) || 0;
+    }
+    const plan = sanitizePlan(raw, maxCh, horizon);
+    plan.assistant = assistantId;
+    plan.generated_at = new Date().toISOString();
+    plan.meta = { model: (head.data && head.data.model) || null, finish_reason: head.finish, output_tokens: outTokens || null, calls: chunks.length };
+    return plan;
+  }
+}
+
+function _failCode(err) {
+  return err.code === 'AI_SPEND_LIMIT' ? 'busy' : err.code === 'PLAN_TRUNCATED' ? 'incomplete_output' : (err.code === 'PLAN_INCOMPLETE' || err instanceof SyntaxError || /JSON/.test(err.message || '') ? 'invalid_output' : 'provider_error');
+}
+
 async function _generate(row) {
   const analysis = row.analysis;
-  const maxCh = analysis.budget_and_capacity.max_active_channels.value;
   const horizon = horizonFor(analysis.horizon && analysis.horizon.period) || HORIZONS.monthly;
   const done = row.status === 'completed';
   try {
-    const { system, user } = planPrompt(analysis, row.assistant, maxCh, horizon);
-    // The full provider response: the plan counts only if the model finished
-    // (not cut off at the token limit), returned content, and that content
-    // passes validation. Then it is stored and marked ready in one update.
-    const data = await _aiText('onboarding-plan', system, user, { max_tokens: horizon.maxTokens, returnFull: true });
-    const choice = data && typeof data === 'object' && data.choices && data.choices[0];
-    const content = typeof data === 'string' ? data : (choice && choice.message && choice.message.content) || '';
-    const finish = (choice && choice.finish_reason) || null;
-    if (!content) { const e = new Error('empty provider response'); e.code = 'PLAN_INCOMPLETE'; throw e; }
-    if (finish && !['stop', 'end_turn', 'stop_sequence'].includes(finish)) { const e = new Error('provider output cut off (' + finish + ')'); e.code = 'PLAN_TRUNCATED'; throw e; }
-    const plan = sanitizePlan(_parseJson(content), maxCh, horizon);
-    plan.assistant = row.assistant;
-    plan.generated_at = new Date().toISOString();
-    plan.meta = { model: (data && data.model) || null, finish_reason: finish, output_tokens: (data && data.usage && data.usage.completion_tokens) || null };
+    const plan = await _composePlan(analysis, row.assistant, horizon);
     const { data: saved, error } = await _db.from(TABLE).update(Object.assign({ plan, plan_status: 'ready', plan_ready_at: plan.generated_at, updated_at: plan.generated_at }, done ? {} : { status: 'plan_ready', step: 'ready' }))
       .eq('user_id', row.user_id).eq('plan_status', 'generating').eq('plan_attempts', row.plan_attempts).select('user_id');
     if (error) throw error;
     if (!(Array.isArray(saved) && saved.length)) console.warn('[OnboardingFlow] plan not stored: the attempt was taken over'); // the newer attempt decides
   } catch (err) {
-    const code = err.code === 'AI_SPEND_LIMIT' ? 'busy' : err.code === 'PLAN_TRUNCATED' ? 'incomplete_output' : (err.code === 'PLAN_INCOMPLETE' || err instanceof SyntaxError || /JSON/.test(err.message || '') ? 'invalid_output' : 'provider_error');
+    const code = _failCode(err);
     console.warn('[OnboardingFlow] plan generation failed:', code, err.code || err.message);
     try {
       await _db.from(TABLE).update(Object.assign({ plan_status: 'failed', plan_error: code, updated_at: new Date().toISOString() }, done ? {} : { status: 'in_progress', step: 'assistant' }))
@@ -681,6 +803,79 @@ async function startPlan(userId, opts) {
   const job = _runAs(userId, () => _generate(claimed));
   if (o.wait) await job;
   return { status: 'generating' };
+}
+
+// ── A new plan on request ─────────────────────────────────────────
+// The owner asks for a new version of their plan, with their own
+// instructions. Built from their current onboarding answers, what they saved
+// in OrivenAI (context) and the instructions; covers the rest of their access
+// (the longest period that fits). The current plan stays visible and usable
+// until the new one is ready — a failed attempt changes nothing. The plan
+// replaced is kept (analysis.previous_plan); Progress follows the new plan
+// (its tasks, dated from today; verified tasks count results from today).
+// Nothing else is touched: research, content, campaigns, audiences stay.
+// The caller charges credits; onDone(ok, code) settles them.
+const REGEN_STALE_MS = 10 * 60e3;
+// The longest plan period that fits in the days left (at least 14 days).
+function horizonForDays(days) {
+  const order = ['annual', 'semiannual', 'quarterly', 'monthly', 'flex'];
+  for (const id of order) if (HORIZONS[id].days <= days) return HORIZONS[id];
+  return HORIZONS.flex;
+}
+function regenState(row) {
+  const r = row && row.analysis && row.analysis.regen;
+  if (!r) return null;
+  const stale = r.status === 'generating' && Date.now() - Date.parse(r.startedAt || 0) > REGEN_STALE_MS;
+  return stale ? { status: 'failed', error: 'timeout', at: r.startedAt } : r;
+}
+async function regeneratePlan(userId, opts) {
+  const o = opts || {};
+  const row = await getRow(userId);
+  if (!row || row.plan_status !== 'ready' || !row.plan) throw new FlowError(409, 'NO_PLAN', 'You don’t have a marketing plan to replace yet.');
+  const cur = regenState(row);
+  if (cur && cur.status === 'generating') throw new FlowError(409, 'PLAN_REGENERATING', 'Your new marketing plan is already being written.');
+  if (!_aiBudgetLeft()) throw BUSY();
+  const instructions = _text(o.instructions, 600);
+  const daysLeft = o.accessEnd ? Math.floor((Date.parse(o.accessEnd) - Date.now()) / 864e5) : null;
+  const horizon = daysLeft != null && daysLeft > 0 ? horizonForDays(daysLeft) : (horizonFor(row.plan.horizon && row.plan.horizon.period) || HORIZONS.monthly);
+  const startedAt = new Date().toISOString();
+  const baseAnalysis = Object.assign({}, row.analysis || {});
+  delete baseAnalysis.regen;
+  // Claimed for this request only: the plan must still be the one we read.
+  const claim = Object.assign({}, baseAnalysis, { regen: { status: 'generating', instructions, startedAt } });
+  const { data: got, error: claimErr } = await _db.from(TABLE).update({ analysis: claim, updated_at: startedAt })
+    .eq('user_id', userId).eq('plan_status', 'ready').eq('plan_ready_at', row.plan_ready_at).select('user_id');
+  if (claimErr) throw claimErr;
+  if (!(Array.isArray(got) && got.length)) throw new FlowError(409, 'PLAN_REGENERATING', 'Your plan changed in the meantime. Reload the page and try again.');
+  _countAiCall();
+  const old = row.plan;
+  const analysis = Object.assign(buildAnalysis(row), {
+    horizon: { period: horizon.period, label: horizon.label, days: horizon.days },
+    owner_request: instructions ? { value: instructions, source: 'user' } : { value: 'A fresh version based on my latest information.', source: 'user' },
+    previous_plan: { summary: old.summary || '', priorities: old.priorities || [], channels: (old.channels || []).map((c) => c.channel), source: 'previous_plan' },
+    oriven_context: Object.assign({ source: 'app' }, o.context || {}),
+  });
+  const job = _runAs(userId, async () => {
+    try {
+      const plan = await _composePlan(analysis, row.assistant, horizon);
+      plan.startsAt = plan.generated_at; // its calendar and Progress start today
+      plan.request = instructions || null;
+      plan.version = (old.version || 1) + 1;
+      const keep = Object.assign({}, baseAnalysis, { horizon: analysis.horizon, previous_plan: { plan: old, replacedAt: plan.generated_at } });
+      const { error } = await _db.from(TABLE).update({ plan, plan_ready_at: plan.generated_at, analysis: keep, progress: { planAt: plan.generated_at, done: {} }, updated_at: plan.generated_at })
+        .eq('user_id', userId).eq('plan_ready_at', row.plan_ready_at);
+      if (error) throw error;
+      if (o.onDone) await o.onDone(true);
+    } catch (err) {
+      const code = _failCode(err);
+      console.warn('[OnboardingFlow] new plan failed:', code, err.code || err.message);
+      try { await _db.from(TABLE).update({ analysis: Object.assign({}, baseAnalysis, { regen: { status: 'failed', error: code, instructions, at: new Date().toISOString() } }), updated_at: new Date().toISOString() }).eq('user_id', userId).eq('plan_ready_at', row.plan_ready_at); }
+      catch (e2) { console.error('[OnboardingFlow] could not record failure:', e2.message); }
+      if (o.onDone) await o.onDone(false, code);
+    }
+  });
+  if (o.wait) await job;
+  return { status: 'regenerating', horizon: { period: horizon.period, label: horizon.label, days: horizon.days } };
 }
 
 // Claims completion (status → 'completed') for exactly one request, runs the
@@ -773,6 +968,7 @@ async function getPlan(userId, profile) {
     period,
     horizon: ready && now.plan.horizon ? now.plan.horizon : (h ? { period: h.period, label: h.label, days: h.days } : null),
     attemptsLeft: Math.max(0, MAX_PLAN_ATTEMPTS - (now.plan_attempts || 0)),
+    catalog: planCatalog.clientCatalog(), // each task's page and button (services/planCatalog.js)
     error: now.plan_status === 'failed' ? (now.plan_error || 'generation_failed') : null,
     missing: missingAnswers(now.answers),
     // Paid, nothing started and answers missing: the recovery form completes them.
@@ -780,6 +976,9 @@ async function getPlan(userId, profile) {
     generatedAt: ready ? now.plan_ready_at || null : null,
     sections: ready ? PLAN_SECTIONS.map(([id, title]) => ({ id, title })) : [],
     plan: ready ? now.plan : null,
+    // A new plan the owner asked for: being written / failed (the current plan stays meanwhile).
+    regen: ready ? regenState(now) : null,
+    previous: ready && now.analysis && now.analysis.previous_plan ? { replacedAt: now.analysis.previous_plan.replacedAt || null } : null,
   });
 }
 
@@ -803,15 +1002,21 @@ async function getProgress(userId) {
   const pr = row.progress || {};
   const done = pr.planAt === row.plan.generated_at ? pr.done || {} : {};
   const start = row.unlocked_at || row.plan_ready_at;
-  return Object.assign({ status: 'ready', onboarding: true, startedAt: start }, planSteps(row.plan, start, done));
+  // What the user really did since the plan began completes verified tasks.
+  const facts = await progressFacts.collect(_db, userId, row.plan.startsAt || start || row.plan.generated_at);
+  return Object.assign({ status: 'ready', onboarding: true, startedAt: start }, planSteps(row.plan, start, done, facts));
 }
 
-// Marks one step done or not done. Only ids that exist in the plan.
+// Marks one step done or not done by hand. Only ids that exist in the plan,
+// and only tasks OrivenAI can't verify: a verified task (e.g. "Launch a
+// campaign") completes from the real result, never from a click.
 async function setStep(userId, stepId, isDone) {
   const row = await getRow(userId);
   if (!row || row.plan_status !== 'ready' || !row.plan) throw new FlowError(409, 'NO_PLAN', 'Your marketing plan isn’t ready yet.');
   const all = planSteps(row.plan, row.unlocked_at, {});
-  if (!all.phases.some((p) => p.steps.some((x) => x.id === stepId))) throw new FlowError(400, 'UNKNOWN_STEP', 'That step isn’t part of your plan.');
+  const target = all.phases.reduce((hit, p) => hit || p.steps.find((x) => x.id === stepId), null);
+  if (!target) throw new FlowError(400, 'UNKNOWN_STEP', 'That step isn’t part of your plan.');
+  if (target.verify === 'auto') throw new FlowError(409, 'VERIFIED_AUTOMATICALLY', 'This task completes by itself once you’ve done it in ' + pageKeys.PAGES[target.page].label + '.');
   const pr = row.progress || {};
   const done = Object.assign({}, pr.planAt === row.plan.generated_at ? pr.done || {} : {});
   if (isDone) done[stepId] = done[stepId] || new Date().toISOString(); else delete done[stepId];
@@ -894,7 +1099,8 @@ async function recoveryState(userId, ctx) {
   const missing = missingAnswers(pre.answers);
   const known = REQUIRED.map(([s, k]) => s + '.' + k).filter((p) => !missing.includes(p))
     .map((p) => { const [s, k] = p.split('.'); return Object.assign(fieldSpec(p), { value: pre.answers[s][k], display: _display(p, pre.answers[s][k]), source: pre.sources[p] || 'onboarding' }); });
-  const assistant = (row && row.assistant) || (c.prefs && ASSISTANTS[c.prefs.assistant] ? c.prefs.assistant : null);
+  // The account's saved assistant (profile) first; the onboarding's copy only for older accounts without one.
+  const assistant = (c.prefs && ASSISTANTS[c.prefs.assistant] ? c.prefs.assistant : null) || (row && ASSISTANTS[row.assistant] ? row.assistant : null);
   return {
     available: !!h, reason: h ? 'ok' : 'period_unknown',
     period: h ? h.period : null, horizon: h ? { period: h.period, label: h.label, days: h.days } : null,
@@ -922,7 +1128,8 @@ async function recover(userId, ctx, body) {
   const answers = mergeAnswers(pre.answers, b.answers);
   const missing = missingAnswers(answers);
   if (missing.length) throw new FlowError(400, 'ANSWERS_INCOMPLETE', 'A few answers are still missing.', missing);
-  const assistant = ASSISTANTS[b.assistant] ? b.assistant : st.assistant;
+  // A saved assistant stays (chosen once); the form's choice only counts for an account without one.
+  const assistant = st.assistant || (ASSISTANTS[b.assistant] ? b.assistant : null);
   if (!assistant) throw new FlowError(400, 'ASSISTANT_REQUIRED', 'Choose an assistant first.');
   const now = new Date().toISOString();
   // A completed, unlocked session (the customer already has access); no
@@ -935,14 +1142,19 @@ async function recover(userId, ctx, body) {
     const { error } = await _db.from(TABLE).insert(Object.assign({ user_id: userId, plan_status: 'none', plan_attempts: 0, website_attempts: 0 }, fields));
     if (error && error.code !== '23505') throw error; // 23505: a parallel request created it
   }
+  // An assistant chosen in this form is the account's assistant (profile = source of truth).
+  if (!st.assistant && ASSISTANTS[b.assistant]) {
+    try { await _agents.assignAgent(_db, userId, b.assistant); }
+    catch (err) { console.warn('[OnboardingFlow] assistant not stored on the profile yet:', err.code || err.message); }
+  }
   await startPlan(userId, { planId: st.period });
   return st.period;
 }
 
 module.exports = {
-  init, available, getRow, ensureSession, saveProgress, analyzeWebsite, startPlan, getPlan, completeAfterPayment, getProgress, setStep, paidPlanId: _paidPlanId, recoveryState, recover, legacyPrefill, fieldSpec,
+  init, available, getRow, ensureSession, saveProgress, analyzeWebsite, startPlan, getPlan, regeneratePlan, horizonForDays, completeAfterPayment, getProgress, setStep, paidPlanId: _paidPlanId, recoveryState, recover, legacyPrefill, fieldSpec,
   publicView, buildAnalysis, mergeAnswers, cleanSection, missingAnswers, classifyFetchFailure, verifySuggestions,
-  sanitizePlan, planPrompt, planSteps, horizonFor, normalizeUrl, FlowError,
+  sanitizePlan, sanitizeTasks, planPrompt, roadmapPrompt, planSteps, horizonFor, OUTSIDE_WORK, normalizeUrl, FlowError,
   ASSISTANTS, STEPS, CHOICES, LABELS, PLAN_SECTIONS, HORIZONS, STEP_AREAS, MAX_PLAN_ATTEMPTS, MAX_WEBSITE_READS,
   _resetForTests() { _available = null; _daily = { day: '', calls: 0 }; },
   _dailyForTests() { return Object.assign({ cap: _dailyCap() }, _dailyState()); },

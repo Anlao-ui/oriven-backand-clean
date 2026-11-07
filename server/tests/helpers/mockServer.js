@@ -35,6 +35,7 @@ function boot({ port, env }) {
   const backfill = () => legacyAccess.backfill(TABLES.profiles);
   const hasAccess = legacyAccess.spendAllowed;
   const writes = [];
+  const READ = { fail: null }; // tests set READ.fail = (table, cols) => bool to make a read fail like a dropped connection
   const parseOr = (expr) => {
     const parts = expr.split(',').map((p) => { const [c, op, ...v] = p.split('.'); return { c, op, v: v.join('.') }; });
     return (r) => parts.some(({ c, op, v }) => op === 'is' ? (v === 'null' ? r[c] == null : String(r[c]) === v) : op === 'eq' ? String(r[c]) === v : false);
@@ -73,6 +74,7 @@ function boot({ port, env }) {
       const sel = this.cols ? this.cols.split(',').map((s) => s.trim()) : [];
       const wk = this.p ? Object.keys(Array.isArray(this.p) ? this.p[0] : this.p) : [];
       const err = this._missing(sel.concat(wk)); if (err) return { data: null, error: err };
+      if (this.op === 'select' && READ.fail && READ.fail(this.t, sel)) return { data: null, error: { message: 'connection reset (test)' } };
       const match = () => all.filter((r) => this.f.every((fn) => fn(r)));
       if (this.op === 'insert' || this.op === 'upsert') {
         const items = (Array.isArray(this.p) ? this.p : [this.p]).map((x) => ({ ...x }));
@@ -89,7 +91,7 @@ function boot({ port, env }) {
         }
         return { data: this.wantRows ? (this._single ? out[0] : out) : null, error: null };
       }
-      if (this.op === 'update') { const m = match(); m.forEach((r) => { Object.assign(r, this.p); writes.push([this.t, 'update', this.p]); }); return { data: this.wantRows ? m.map((x) => ({ ...x })) : null, error: null }; }
+      if (this.op === 'update') { const m = match(); m.forEach((r) => { Object.assign(r, this.p); writes.push([this.t, 'update', this.p]); }); return { data: this.wantRows ? (this._single ? (m[0] ? { ...m[0] } : null) : m.map((x) => ({ ...x }))) : null, error: null }; } // .maybeSingle()/.single(): one row or null, like Supabase
       if (this.op === 'delete') { const m = match(); TABLES[this.t] = all.filter((r) => !m.includes(r)); return { data: null, error: null }; }
       let m = match().map((x) => ({ ...x })); if (this.lim != null) m = m.slice(0, this.lim);
       return { data: this._single ? (m[0] || null) : m, error: null };
@@ -146,12 +148,30 @@ function boot({ port, env }) {
       admin: {
         createUser: async ({ email, user_metadata }) => {
           if (AUTH.createFail) { const m = AUTH.createFail; AUTH.createFail = null; return { data: null, error: { message: m } }; }
-          if (AUTH.users.some((u) => u.email === email)) return { data: null, error: { message: 'A user with this email address has already been registered' } };
+          if (AUTH.users.some((u) => String(u.email || '').toLowerCase() === String(email || '').toLowerCase())) return { data: null, error: { message: 'A user with this email address has already been registered', code: 'email_exists', status: 422 } };
           const user = { id: '00000000-0000-4000-8000-' + String(AUTH.users.length + 1).padStart(12, '0'), email, user_metadata, created_at: new Date().toISOString() };
           AUTH.users.push(user); TOKENS['tok_' + user.id] = user;
           return { data: { user }, error: null };
         },
-        deleteUser: async (id, soft) => { if (AUTH.deleteFail) { const m = AUTH.deleteFail; AUTH.deleteFail = null; return { error: { message: m } }; } AUTH.deleted.push(id); if (soft) (AUTH.softDeleted = AUTH.softDeleted || []).push(id); return { error: null }; },
+        // Like Supabase Auth: a soft delete keeps the row (deleted_at) but
+        // replaces the email with a hash and ends sign-in; a hard delete
+        // removes the row. Either way the address can register again.
+        deleteUser: async (id, soft) => {
+          if (AUTH.deleteFail) { const m = AUTH.deleteFail; AUTH.deleteFail = null; return { error: { message: m } }; }
+          AUTH.deleted.push(id);
+          const u = AUTH.users.find((x) => x.id === id);
+          if (!u) return { error: { message: 'User not found', status: 404 } };
+          if (soft) { (AUTH.softDeleted = AUTH.softDeleted || []).push(id); if (!AUTH.keepEmailOnSoftDelete) u.email = 'hashed-' + id; u.deleted_at = new Date().toISOString(); Object.keys(TOKENS).forEach((t) => { if (TOKENS[t] && TOKENS[t].id === id) delete TOKENS[t]; }); }
+          else AUTH.users.splice(AUTH.users.indexOf(u), 1);
+          return { error: null };
+        },
+        getUserById: async (id) => { const u = AUTH.users.find((x) => x.id === id); return u ? { data: { user: u }, error: null } : { data: { user: null }, error: { message: 'User not found', status: 404 } }; },
+        updateUserById: async (id, attrs) => {
+          if (AUTH.updateFail) { const m = AUTH.updateFail; AUTH.updateFail = null; return { data: null, error: { message: m } }; }
+          const u = AUTH.users.find((x) => x.id === id); if (!u) return { data: null, error: { message: 'User not found', status: 404 } };
+          if (attrs.email) u.email = attrs.email; if (attrs.user_metadata) u.user_metadata = attrs.user_metadata;
+          return { data: { user: u }, error: null };
+        },
         listUsers: async () => ({ data: { users: AUTH.users }, error: null }),
       },
     },
@@ -188,7 +208,7 @@ function boot({ port, env }) {
     for (let i = 0; i < 50; i++) { try { await realFetch(BASE + '/api/onboarding/state'); break; } catch (_) { await new Promise((r) => setTimeout(r, 100)); } }
     return quiet;
   }
-  return { SERVER_DIR, TABLES, MISSING, rows, writes, TOKENS, AUTH, rpcCalls, RPC, STRIPE, mail, cronJobs, net, call, start, realFetch, BASE };
+  return { SERVER_DIR, TABLES, MISSING, rows, writes, READ, TOKENS, AUTH, rpcCalls, RPC, STRIPE, mail, cronJobs, net, call, start, realFetch, BASE };
 }
 
 function reporter() {

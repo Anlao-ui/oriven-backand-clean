@@ -264,6 +264,21 @@ const TASKS = {
     model:    MODELS.aiml.text,
     label:    'Creative Variations',
   },
+  // Audience Builder: audience segments from the onboarding answers,
+  // business details and research (services/growthRoutes.js).
+  'audience-builder': {
+    provider: 'aiml',
+    type:     'text',
+    model:    MODELS.aiml.text,
+    label:    'Audience Builder',
+  },
+  // Campaign Comparison: an explanation of real campaign figures only.
+  'campaign-comparison': {
+    provider: 'aiml',
+    type:     'text',
+    model:    MODELS.aiml.text,
+    label:    'Campaign Comparison',
+  },
   'creative-improve': {
     provider: 'aiml',
     type:     'text',

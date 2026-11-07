@@ -86,14 +86,16 @@ function fakeStorage(paths, opts) {
   }
   check('prefixes are <id> and generated/<id>', JSON.stringify(prefixesFor(A)) === JSON.stringify([A, 'generated/' + A]));
 
-  console.log('\n6. Wired into account deletion (server.js)');
+  console.log('\n6. Wired into account deletion (services/accountDeletion.js)');
   {
-    const src = require('fs').readFileSync(require('path').join(__dirname, '..', 'server.js'), 'utf8');
-    const fn = src.slice(src.indexOf('async function _deleteAccount('), src.indexOf("app.post('/api/account/delete'"));
-    const iStripe = fn.indexOf('_cancelSubscriptionForDeletion'), iFiles = fn.indexOf('removeUserFiles'), iRpc = fn.indexOf("rpc('delete_account_data'");
-    check('order: cancel Stripe → remove files → delete data', iStripe > 0 && iFiles > iStripe && iRpc > iFiles, { iStripe, iFiles, iRpc });
-    check('storage failure aborts with STORAGE_DELETE_FAILED', /STORAGE_DELETE_FAILED'; throw e;/.test(fn));
-    check('same bucket the uploads use', /removeUserFiles\(supabaseAdmin\.storage, MANUAL_CREATIVE_BUCKET, userId\)/.test(fn));
+    const fs = require('fs'), path = require('path');
+    const svc = fs.readFileSync(path.join(__dirname, '..', 'services', 'accountDeletion.js'), 'utf8');
+    const fn = svc.slice(svc.indexOf('async function deleteAccount('), svc.indexOf('async function findAuthUserByEmail('));
+    const iStripe = fn.indexOf('cancelSubscription('), iFiles = fn.indexOf('removeUserFiles('), iRpc = fn.indexOf("rpc('delete_account_data'"), iAuth = fn.indexOf('deleteAuthUser(');
+    check('order: cancel Stripe → remove files → delete data → sign-in account', iStripe > 0 && iFiles > iStripe && iRpc > iFiles && iAuth > iRpc, { iStripe, iFiles, iRpc, iAuth });
+    check('storage failure aborts with STORAGE_DELETE_FAILED', /fail\('STORAGE_DELETE_FAILED'/.test(fn));
+    const src = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
+    check('server.js uses the same bucket the uploads use', /storage: supabaseAdmin\.storage, bucket: MANUAL_CREATIVE_BUCKET/.test(src) && /accountDeletion'\)\.deleteAccount\(_deletionDeps\(\), userId\)/.test(src));
   }
 
   console.log(`\n${passed + failed} checks run: ${passed} passed, ${failed} failed`);

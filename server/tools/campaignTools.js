@@ -300,7 +300,10 @@ toolRouter.register({
     return { packageId, pkg: res.data };
   },
   formatSummary: (r) => `Generate a ${PLATFORM_LABELS[r.platform]} campaign package for "${r.product}"`,
-  formatResult: (res, r) => `Campaign package ready for "${res.pkg.campaignName || r.product}" on ${PLATFORM_LABELS[r.platform]}. Say "publish it" to create it as a paused campaign, ready for your review.`
+  formatResult: (res, r) => `Campaign package ready for "${res.pkg.campaignName || r.product}" on ${PLATFORM_LABELS[r.platform]}. It is saved as a draft the user can open in Launch to review and refine; images can be added in Create. Say "publish it" to create it as a paused campaign, ready for your review.`,
+  // The chat card: the browser saves the package as a draft through Create's
+  // own store (app.html window._orvStoreCampaign), so it appears in Launch.
+  formatCard: (res, r) => ({ type: 'campaign', title: (res.pkg && res.pkg.campaignName) || r.product, platform: r.platform, goal: r.goal, product: r.product, pkg: res.pkg, page: 'launch' })
 });
 
 // â”€â”€ V9 (Epic 5) â€” thin wrappers over V8's Creative Engine. Read-only,
