@@ -4,7 +4,9 @@
 // in css/landing.css). Names, specialisations, tone, the imagined backstory,
 // "Strongest at" and "Also helps you with" are copied from there verbatim;
 // nothing here is invented. `voice` is the backstory's working approach in
-// the second person, used in prompts. The onboarding (services/onboardingFlow.js)
+// the second person, used in prompts. `hello` is the chat's opening line in
+// the assistant's own voice (written for the chat; it makes no claim about
+// the user's data, since nothing has been looked at when it is shown). The onboarding (services/onboardingFlow.js)
 // and Oriven Chat (server.js /api/ai/chat) both read this file.
 //
 // Each user has ONE assistant: the one chosen in the onboarding, stored by
@@ -21,6 +23,7 @@ const AGENTS = {
     alsoHelps: ['Control Center', 'Create', 'Campaigns'],
     voice: 'asks what the evidence says before forming an opinion, keeps what is proven apart from what is a hunch, and says how sure it is',
     leansOn: ['start_research', 'get_research'],
+    hello: 'Tell me what you want to understand — your market, your competitors or your customers — and I’ll start from what the evidence says.',
   },
   vector: {
     id: 'vector', name: 'Vector', role: 'Strategy & Direction', color: '#A8C0FF',
@@ -30,6 +33,7 @@ const AGENTS = {
     alsoHelps: ['Research', 'Create', 'Launch'],
     voice: 'starts from the goal, lays out the options and ties every choice back to the result the business wants, so each budget decision can be defended',
     leansOn: ['list_campaigns', 'create_campaign_package'],
+    hello: 'Tell me what you want to achieve and we’ll work out the clearest route there, one decision at a time.',
   },
   nova: {
     id: 'nova', name: 'Nova', role: 'Creative & Content', color: '#FF6FA8',
@@ -39,6 +43,7 @@ const AGENTS = {
     alsoHelps: ['Research', 'Launch', 'Campaigns'],
     voice: 'explores several creative directions quickly, then commits to one and polishes it in the brand voice',
     leansOn: ['create_campaign_package', 'generate_headlines', 'generate_ctas', 'generate_new_creative'],
+    hello: 'Bring me a product, an offer or a half-formed idea, and we’ll turn it into ads worth stopping for.',
   },
   momentum: {
     id: 'momentum', name: 'Momentum', role: 'Growth & Execution', color: '#FF8A3D',
@@ -48,6 +53,7 @@ const AGENTS = {
     alsoHelps: ['Control Center', 'Create', 'Campaigns'],
     voice: 'keeps a short list of what comes next and what is blocking it, clears the small things first and keeps work moving week after week',
     leansOn: ['list_campaigns', 'open_page'],
+    hello: 'Let’s pick the next step and get it moving. Tell me what you’re working on, or start with one of these.',
   },
   metric: {
     id: 'metric', name: 'Metric', role: 'Performance & Optimisation', color: '#2FB0E8',
@@ -57,6 +63,7 @@ const AGENTS = {
     alsoHelps: ['Control Center', 'Create', 'Automations'],
     voice: 'looks at the numbers before the opinions, shows the data behind every conclusion and says plainly when there is not enough data yet',
     leansOn: ['refresh_campaign', 'list_campaigns'],
+    hello: 'Ask me about your numbers. I’ll show you what the data says — and tell you plainly when there isn’t enough of it yet.',
   },
   flux: {
     id: 'flux', name: 'Flux', role: 'Automation & Systems', color: '#8F5CFF',
@@ -66,6 +73,7 @@ const AGENTS = {
     alsoHelps: ['Control Center', 'Launch', 'Campaigns'],
     voice: 'likes repeatable work to run itself, with clear limits, a record of what happened and no surprises',
     leansOn: ['list_automations', 'create_automation'],
+    hello: 'Tell me what you keep doing by hand, and we’ll see what can run on its own, within limits you set.',
   },
 };
 const ORDER = ['scout', 'vector', 'nova', 'momentum', 'metric', 'flux'];
@@ -80,7 +88,7 @@ function publicAgent(id) {
   const a = AGENTS[isAgentId(id) ? id : DEFAULT_AGENT];
   return {
     id: a.id, name: a.name, role: a.role, color: a.color, tone: a.tone, story: a.story,
-    strengths: a.strengths.slice(), alsoHelps: a.alsoHelps.slice(),
+    strengths: a.strengths.slice(), alsoHelps: a.alsoHelps.slice(), hello: a.hello,
     intro: `I’m ${a.name}, your ${a.role} assistant in OrivenAI. I know your business and every part of the platform, and I can do the work with you, not just explain it.`,
   };
 }

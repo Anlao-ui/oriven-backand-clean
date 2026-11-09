@@ -40,6 +40,7 @@ require('./tools/campaignTools'); // registers Tool Router entries as a side eff
 require('./tools/businessTools'); // V7 Phase 1 — registers remember_business_fact
 require('./tools/agentTools'); // Personal assistant — research, campaigns list, automations, credits, open_page
 const agents = require('./services/agents'); // the six assistants + each user's own (resolveAgent)
+const chatViews = require('./services/chatViews'); // which page the user has open (context.view), validated for the chat prompt
 require('./tools/adEditTools'); // Ad Editing Workspace — registers edit_ad_copy, update_campaign_budget, update_audience, generate_new_creative, convert_platform, select_concept_variant
 const creditManager = require('./services/creditManager');
 const planEntitlements = require('./services/planEntitlements'); // Free/Starter/Creator/Professional capability table (mirrors plans.js) // no client of its own -- initialized below, right after supabaseAdmin exists
@@ -7038,8 +7039,12 @@ app.post('/api/ai/chat', requireSubIfAuthed, paidActions.laneGuard('chat'), asyn
     businessbrain: { name: 'Control Center', hint: 'This is the start page: their business context (business, brand, audiences, competitors, connections, knowledge), an overview of their advertising and what needs attention, and Planning. Help them understand what is happening and decide what to do next.' },
     dashboard:     { name: 'Control Center', hint: 'This is the start page: their business context, an overview of their advertising and what needs attention, and Planning. Help them understand what is happening and decide what to do next.' },
   };
-  const pageCtx = ctx.page ? ORV_PRODUCT_CONTEXT[ctx.page] : null;
-  const pageSection = pageCtx ? `\n\nThe user is currently on ORIVEN's "${pageCtx.name}" product. ${pageCtx.hint}` : '';
+  // The exact page open (context.view, a sidebar page id) when the app sends
+  // a known one — services/chatViews.js validates it against its own list and
+  // writes the prompt text itself. Otherwise the older product-level key above.
+  const viewLine = chatViews.viewSection(ctx.view);
+  const pageCtx = !viewLine && typeof ctx.page === 'string' && Object.prototype.hasOwnProperty.call(ORV_PRODUCT_CONTEXT, ctx.page) ? ORV_PRODUCT_CONTEXT[ctx.page] : null;
+  const pageSection = viewLine || (pageCtx ? `\n\nThe user is currently on ORIVEN's "${pageCtx.name}" product. ${pageCtx.hint}` : '');
 
   // Oriven 1.0 (Epic 1) â€” gate on campaignName, not campaignId: the sentence
   // below only ever uses campaignName/platform, and a freshly generated
