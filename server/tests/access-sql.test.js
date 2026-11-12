@@ -177,6 +177,30 @@ const days = (a, b) => Math.round((new Date(b) - new Date(a)) / 86400000);
   const p6 = await profile(db, u6);
   check('Flex bought after an unswept expiry: old credits expire first, 14 new days from now, 1,050 credits', p6.credits_balance === 1050 && days(r6.access_start, r6.access_end) === 14 && Math.abs(new Date(r6.access_start) - Date.now()) < 60000, { p6, r6 });
 
+  // ── Flex bought again while a Flex period is active: queued, never overlapping ──
+  // Product decision 2026-11-12: Flex is not limited to one purchase per
+  // account and never renews automatically. Buying again during an active
+  // period is the documented manual extension: the new 14 days start when the
+  // current period ends. One access window on the profile, no second entitlement.
+  const activeEnd = (await profile(db, u6)).access_expires_at;
+  const f6c = await newPurchase(db, u6, 'flex');
+  const r6c = await fulfill(db, f6c, 'flex');
+  const p6c = await profile(db, u6);
+  // The first Flex (f6) was expired artificially on the profile above, so only the periods in force are compared.
+  const rows6 = await all(db, "SELECT id, access_start, access_end FROM purchases WHERE id = ANY($1::uuid[]) ORDER BY access_start", [[f6b, f6c]]);
+  check('Flex during an active Flex period: queued after the current end (+14 days), one access date on the profile, plan still flex', new Date(r6c.access_start).getTime() === new Date(activeEnd).getTime() && days(activeEnd, p6c.access_expires_at) === 14 && p6c.access_plan === 'flex' && p6c.subscription_status === 'paid', { activeEnd, r6c, p6c });
+  check('paid Flex periods never overlap (each starts at or after the previous end)', rows6.every((r, i) => i === 0 || new Date(r.access_start) >= new Date(rows6[i - 1].access_end)), rows6);
+  check('the same Flex payment delivered twice grants nothing more', (await fulfill(db, f6c, 'flex')).already === true && (await profile(db, u6)).credits_balance === p6c.credits_balance);
+  const rv6 = (await one(db, "SELECT revoke_purchase($1, 'refunded', 'test') AS r", [f6c])).r;
+  check('refund of the queued Flex: back to the earlier end, its credits removed', rv6.revoked && new Date((await profile(db, u6)).access_expires_at).getTime() === new Date(activeEnd).getTime() && (await profile(db, u6)).credits_balance === 1050, { rv6, p: await profile(db, u6) });
+  // After the whole period has expired (and been swept), Flex can be bought again.
+  await db.query("UPDATE profiles SET access_expires_at = now() - interval '1 minute' WHERE id = $1", [u6]);
+  await one(db, 'SELECT expire_access(100) AS n');
+  const f6d = await newPurchase(db, u6, 'flex');
+  const r6d = await fulfill(db, f6d, 'flex');
+  const p6d = await profile(db, u6);
+  check('Flex after a swept expiry: bought again, 14 days from now, fresh 1,050 credits', r6d.ok && r6d.fulfilled && p6d.subscription_status === 'paid' && p6d.credits_balance === 1050 && days(r6d.access_start, r6d.access_end) === 14 && Math.abs(new Date(r6d.access_start) - Date.now()) < 60000, { r6d, p6d });
+
   // ── Only the service role may call the functions ──
   await db.exec("SELECT set_config('test.role', 'authenticated', false)");
   let refused = false;
