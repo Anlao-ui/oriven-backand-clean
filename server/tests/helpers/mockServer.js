@@ -8,7 +8,7 @@ const SERVER_DIR = path.resolve(__dirname, '..', '..');
 const legacyAccess = require('./legacyAccess');
 
 function boot({ port, env }) {
-  for (const k of Object.keys(process.env)) if (/STRIPE|SUPABASE|AIML|OPENAI|ANTHROPIC|SMTP|GOOGLE|META|TIKTOK|PINTEREST|RENDER|ENABLE_BACKGROUND|ONBOARDING|EMAIL|RESEND|FREE_FIRST_AD|SIGNUP_LIMIT|UNVERIFIED/.test(k)) delete process.env[k];
+  for (const k of Object.keys(process.env)) if (/STRIPE|SUPABASE|AIML|OPENAI|ANTHROPIC|SMTP|GOOGLE|META|TIKTOK|PINTEREST|SNAPCHAT|RENDER|ENABLE_BACKGROUND|ONBOARDING|EMAIL|RESEND|FREE_FIRST_AD|SIGNUP_LIMIT|UNVERIFIED/.test(k)) delete process.env[k];
   Object.assign(process.env, {
     PORT: String(port), STRIPE_SECRET_KEY: 'sk_test_mock_only', STRIPE_WEBHOOK_SECRET: 'whsec_mock_only',
     SUPABASE_URL: 'http://127.0.0.1:1', SUPABASE_SERVICE_ROLE_KEY: 'mock', AIML_API_KEY: 'mock-not-a-key', FRONTEND_URL: 'http://localhost:8899',

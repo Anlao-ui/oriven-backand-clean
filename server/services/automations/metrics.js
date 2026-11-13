@@ -40,6 +40,8 @@ const PLATFORM_METRICS = {
   meta:      ['spend', 'impressions', 'clicks', 'conversions', 'ctr', 'cpc', 'cpa', 'roas', 'status'],
   tiktok:    ['spend', 'impressions', 'clicks', 'conversions', 'ctr', 'cpc', 'cpa', 'status'],
   pinterest: ['spend', 'impressions', 'clicks', 'conversions', 'ctr', 'cpc', 'cpa', 'roas', 'status'],
+  // Snapchat: clicks are swipe-ups; no conversions without a Snap Pixel.
+  snapchat:  ['spend', 'impressions', 'clicks', 'ctr', 'cpc', 'status'],
 };
 
 const OPERATORS = { '>': (a, b) => a > b, '>=': (a, b) => a >= b, '<': (a, b) => a < b, '<=': (a, b) => a <= b, '==': (a, b) => a === b };

@@ -5458,11 +5458,12 @@ const _activationDeps = {
   metaFetch: (p, t, q) => _metaFetch(p, t, q), metaApiPost: (p, t, b) => _metaApiPost(p, t, b),
   getTikTokAccess: (u) => _getTikTokAccess(u), tiktokFetch: (p, t, q) => _tiktokFetch(p, t, q), tiktokPost: (p, t, b) => _tiktokPost(p, t, b),
   getPinterestAccess: (u, o) => _getPinterestAccess(u, o), pinterestApiRequest: (...a) => _pinterestApiRequest(...a),
+  getSnapchatAccess: (u, o) => _getSnapchatAccess(u, o), snapchat: () => SNAP,
 };
 function _activateCampaign(user, platform, campaignId, firstActivationHint) {
   return _campaignActivation.run({ platform, user, campaignId, firstActivationHint, db: supabaseAdmin, deps: _activationDeps });
 }
-const _ACT_LABEL = { meta: 'Meta Ads', tiktok: 'TikTok Ads', pinterest: 'Pinterest Ads' };
+const _ACT_LABEL = { meta: 'Meta Ads', tiktok: 'TikTok Ads', pinterest: 'Pinterest Ads', snapchat: 'Snapchat Ads' };
 async function _activationRoute(req, res, platform) {
   try {
     const user = await getUserFromToken(req);
@@ -6380,7 +6381,7 @@ async function _generateAdPackage({ user, product, goal, platform, brandCore, pr
   // asset-diverse tone Search copy doesn't.
   let objectiveSection = '';
   if (platformObjective) {
-    objectiveSection = `\n\nPLATFORM OBJECTIVE: This is specifically a "${platformObjective}" campaign on ${platform === 'meta' ? 'Meta Ads' : platform === 'tiktok' ? 'TikTok Ads' : platform === 'pinterest' ? 'Pinterest Ads' : 'Google Ads'} (a real, platform-specific objective, more specific than the general "${goal}" goal above). Adapt CTA language, hook, and creative direction to genuinely fit "${platformObjective}", not just "${goal}".`;
+    objectiveSection = `\n\nPLATFORM OBJECTIVE: This is specifically a "${platformObjective}" campaign on ${platform === 'meta' ? 'Meta Ads' : platform === 'tiktok' ? 'TikTok Ads' : platform === 'pinterest' ? 'Pinterest Ads' : platform === 'snapchat' ? 'Snapchat Ads' : 'Google Ads'} (a real, platform-specific objective, more specific than the general "${goal}" goal above). Adapt CTA language, hook, and creative direction to genuinely fit "${platformObjective}", not just "${goal}".`;
   }
   if (platform === 'google' && campaignType && campaignType !== 'SEARCH') {
     objectiveSection += `\n\nGOOGLE CAMPAIGN TYPE: This is a ${campaignType.replace(/_/g,' ')} campaign, not Search. ${campaignType === 'PERFORMANCE_MAX' ? 'Write a distinct LONG_HEADLINE-appropriate fuller line in the first description, since Performance Max reuses description copy for its long headline slot.' : campaignType === 'DEMAND_GEN' ? 'Write feed-native, visual-first copy suited to Discover/Gmail/YouTube placements, not search-intent keyword copy.' : ''}`;
@@ -6624,8 +6625,25 @@ async function _generateAdPackage({ user, product, goal, platform, brandCore, pr
 - Write for a visual-discovery/inspiration context — evocative and aspirational, not a hard sell; avoid aggressive urgency language`;
   }
 
+  if (platform === 'snapchat') {
+    // Snap Ads are full-screen vertical (9:16) image/video ads with a swipe-up
+    // to the website. Limits are Snap's own creative fields: headline 34
+    // characters, brand name 32 (services/snapchatAds.js LIMITS).
+    platformSchema = `"snapchatAds": {
+    "headline":"...","brandName":"...","cta":"Shop Now","targetAudience":"...",
+    "verticalConcept":"...","firstSecondHook":"...","campaignObjective":"${goal||'Traffic'}"
+  }`;
+    platformRules = `- headline: 34 characters max (Snapchat's hard limit), punchy, no ending punctuation
+- concepts[].adCopy.headline: also 34 characters max — each becomes a Snap Ad headline
+- brandName: the business name as customers know it, 32 characters max
+- cta: one of Shop Now, Sign Up, Book Now, Get Now, Watch, More, View, Order Now, Try
+- verticalConcept: how the full-screen 9:16 visual should look (subject fills the frame, text-safe top and bottom)
+- firstSecondHook: what grabs attention in the first second — Snapchat users swipe past quickly
+- Write casual, fast, mobile-native copy for a young audience; no hard-sell urgency`;
+  }
+
   const system = `You are Oriven AI — a senior marketing strategist, creative director, and platform specialist.
-Generate a focused ${platform === 'meta' ? 'Meta Ads' : platform === 'tiktok' ? 'TikTok Ads' : platform === 'pinterest' ? 'Pinterest Ads' : 'Google Ads'} campaign package.
+Generate a focused ${platform === 'meta' ? 'Meta Ads' : platform === 'tiktok' ? 'TikTok Ads' : platform === 'pinterest' ? 'Pinterest Ads' : platform === 'snapchat' ? 'Snapchat Ads' : 'Google Ads'} campaign package.
 Reply ONLY with valid JSON — no markdown fences, no extra text.${injectionDefenseRule}
 
 Required JSON structure:
@@ -6700,6 +6718,7 @@ ${platformRules}
   }
   if (format) pkg.creativeFormat = format;
   if (platform === 'pinterest' && format) { pkg.pinterestAds = pkg.pinterestAds || {}; pkg.pinterestAds.creativeType = format === 'video' ? 'video' : 'image'; }
+  if (platform === 'snapchat' && format) { pkg.snapchatAds = pkg.snapchatAds || {}; pkg.snapchatAds.creativeType = format === 'video' ? 'video' : 'image'; }
   // The website the user gave in Create is their landing page: Launch shows
   // it for confirmation instead of asking for it a second time.
   if (brief && brief.website && !(pkg.strategy && pkg.strategy.landingPageUrl)) pkg.strategy.landingPageUrl = brief.website;
@@ -6761,7 +6780,7 @@ ${platformRules}
   // TikTok's Ad Group (Campaign → Ad Group → Ad, identical terminology and
   // object model) — reuse the same normalized shape and force-write
   // guarantee.
-  if (platform === 'pinterest' && campaignStructure) {
+  if ((platform === 'pinterest' || platform === 'snapchat') && campaignStructure) {
     pkg.campaignStructure = {
       campaigns: 1,
       groups: Math.max(1, Math.min(5, parseInt(campaignStructure.groups, 10) || 1)),
@@ -7475,6 +7494,7 @@ const _publishRoutes = require('./routes/publishRoutes')(app, {
   getPinterestAccess: (u) => _getPinterestAccess(u), pinterestApiRequest: (...a) => _pinterestApiRequest(...a),
   pinterestGetOrCreateAdsBoard: (t) => _pinterestGetOrCreateAdsBoard(t), pinterestCreateImagePin: (...a) => _pinterestCreateImagePin(...a),
   pinterestCreateVideoPin: (...a) => _pinterestCreateVideoPin(...a), pinterestArchiveEntities: (...a) => _pinterestArchiveEntities(...a),
+  getSnapchatAccess: (u) => _getSnapchatAccess(u), snapchat: () => SNAP,
   acquirePublishLock: (...a) => _acquirePublishLock(...a), releasePublishLock: (k) => _releasePublishLock(k), logCampaignEvent: (u, o) => _logCampaignEvent(u, o),
 });
 require('./services/campaignSpec').setContextLoader(_publishRoutes.loadContext);
@@ -7503,6 +7523,7 @@ const _automations = require('./routes/automationRoutes')(app, {
     _getMetaAccess: (u) => _getMetaAccess(u), _metaFetch: (p, t, q) => _metaFetch(p, t, q), _metaApiPost: (p, t, b) => _metaApiPost(p, t, b), _metaConversions: (a) => _metaConversions(a),
     _getTikTokAccess: (u) => _getTikTokAccess(u), _tiktokFetch: (p, t, q) => _tiktokFetch(p, t, q), _tiktokPost: (p, t, b) => _tiktokPost(p, t, b),
     _getPinterestAccess: (u, o) => _getPinterestAccess(u, o), _pinterestApiRequest: (...a) => _pinterestApiRequest(...a),
+    _getSnapchatAccess: (u, o) => _getSnapchatAccess(u, o), _snapchat: () => SNAP,
   },
 });
 // Mocked test suites only (tests/automations.test.js) — never set in production.
@@ -11899,6 +11920,391 @@ app.get('/api/pinterest/overview', async (req, res) => {
     res.status(err.status || 500).json({ error: err.message });
   }
 });
+
+// ════════════════════════════════════════════════════════════════════
+// SNAPCHAT ADS — OAuth, account selection, campaigns, reporting
+//
+// Same architecture as Pinterest/Google above: OAuth 2.0 authorization-code
+// flow with a server-side state store (CSRF), real refresh tokens, ad
+// accounts discovered per user and chosen EXPLICITLY (validated against a
+// live discovery call, never trusted from the client), tokens stored only
+// in `integrations` (provider 'snapchat_ads') and never sent to the browser.
+// API details and limits: services/snapchatAds.js. Publishing:
+// routes/publishRoutes.js (POST /api/publish/snapchat).
+//
+// Configuration (Render environment): SNAPCHAT_CLIENT_ID,
+// SNAPCHAT_CLIENT_SECRET, SNAPCHAT_REDIRECT_URI (default on Render:
+// https://oriven-backand-clean.onrender.com/auth/snapchat/callback — must
+// match the redirect URI registered on the Snap OAuth app exactly).
+// Without client id + secret every Snapchat route answers "not configured".
+//
+// OPTIONAL MIGRATION (docs/migrations/2026-11-snapchat-ads.sql) — keeps the
+// discovered ad-account list between requests. Without it the connection
+// still works: the list is re-read from Snapchat when needed.
+// ════════════════════════════════════════════════════════════════════
+const SNAP = require('./services/snapchatAds');
+const _snapCfg = () => SNAP.config(process.env);
+const SNAP_LABEL = 'Snapchat Ads';
+
+// state → { userId, expires } (10 minutes, single use) — same as Pinterest.
+const _snapchatOAuthStates = new Map();
+setInterval(function() {
+  const now = Date.now();
+  for (const [k, v] of _snapchatOAuthStates.entries()) if (v.expires < now) _snapchatOAuthStates.delete(k);
+}, 5 * 60 * 1000).unref();
+function _snapNewState(userId) {
+  const state = crypto.randomBytes(16).toString('hex');
+  _snapchatOAuthStates.set(state, { userId, expires: Date.now() + 10 * 60 * 1000 });
+  return state;
+}
+function _snapError(res, where, err) {
+  const status = err && err.status >= 400 && err.status < 600 ? err.status : 500;
+  console.error('[Snapchat ' + where + ']', status, (err && err.code) || '-', SNAP.redact(err && err.message));
+  const code = (err && err.code) || (status === 401 ? 'RECONNECT_REQUIRED' : status === 429 ? 'RATE_LIMITED' : 'SNAPCHAT_ERROR');
+  return res.status(status).json({ error: (err && err.message) || 'Snapchat Ads request failed.', code });
+}
+
+// Upsert/update on `integrations`, dropping the optional snapchat_* columns
+// when this database hasn't run the optional migration yet.
+const _SNAP_OPTIONAL = ['snapchat_ads_accounts_error', 'snapchat_ads_accounts'];
+async function _snapWrite(op, row, userId) {
+  const r = Object.assign({}, row);
+  const run = () => op === 'upsert'
+    ? supabaseAdmin.from('integrations').upsert(r, { onConflict: 'user_id,provider' })
+    : supabaseAdmin.from('integrations').update(r).eq('user_id', userId).eq('provider', SNAP.PROVIDER);
+  let { error } = await run();
+  // Retry without whichever optional column the database names (exact name:
+  // 'snapchat_ads_accounts' must not match 'snapchat_ads_accounts_error').
+  for (let i = 0; i < _SNAP_OPTIONAL.length && error; i++) {
+    const col = _SNAP_OPTIONAL.find((c) => c in r && new RegExp('\\b' + c + '\\b').test(error.message || ''));
+    if (!col) break;
+    delete r[col];
+    ({ error } = await run());
+  }
+  return error || null;
+}
+
+// GET /api/snapchat/auth-url — authenticated; the Snapchat consent URL.
+app.get('/api/snapchat/auth-url', async (req, res) => {
+  const user = await getUserFromToken(req);
+  if (!user) return res.status(401).json({ error: 'Authentication required' });
+  const cfg = _snapCfg();
+  if (!cfg.configured) return res.status(503).json({ error: 'Snapchat Ads is not configured on the server yet.', code: 'NOT_CONFIGURED' });
+  res.json({ url: SNAP.authorizeUrl(cfg, _snapNewState(user.id)) });
+});
+
+// GET /auth/snapchat?token=<Supabase JWT> — server-side redirect to the
+// consent screen (same shape as /auth/pinterest).
+app.get('/auth/snapchat', async (req, res) => {
+  const cfg = _snapCfg();
+  if (!cfg.configured) return res.redirect(FRONTEND_URL + '/app?snapchat_error=not_configured');
+  const token = String(req.query.token || '').trim();
+  if (!token) return res.redirect(FRONTEND_URL + '/app?snapchat_error=missing_token');
+  let userId;
+  try {
+    const { data, error } = await supabaseAdmin.auth.getUser(token);
+    if (error || !data || !data.user) return res.redirect(FRONTEND_URL + '/app?snapchat_error=invalid_token');
+    userId = data.user.id;
+  } catch (err) {
+    console.error('[Snapchat OAuth] token validation failed:', err.message);
+    return res.redirect(FRONTEND_URL + '/app?snapchat_error=auth_error');
+  }
+  res.redirect(SNAP.authorizeUrl(cfg, _snapNewState(userId)));
+});
+
+// GET /auth/snapchat/callback — code → tokens → ad accounts → saved for the
+// user the state was issued to (never a user named by the request itself).
+app.get('/auth/snapchat/callback', async (req, res) => {
+  const back = (q) => res.redirect(FRONTEND_URL + '/app?' + q);
+  const { code, state, error } = req.query;
+  if (error) {
+    console.warn('[Snapchat OAuth] denied or error:', String(error).slice(0, 60));
+    return back('snapchat_error=' + encodeURIComponent(String(error).slice(0, 60)));
+  }
+  if (!code || !state) return back('snapchat_error=missing_params');
+  const st = _snapchatOAuthStates.get(String(state));
+  _snapchatOAuthStates.delete(String(state));
+  if (!st || st.expires < Date.now()) return back('snapchat_error=invalid_state');
+  const cfg = _snapCfg();
+  if (!cfg.configured) return back('snapchat_error=not_configured');
+
+  let tokens;
+  try { tokens = await SNAP.exchangeCode(cfg, String(code)); }
+  catch (err) {
+    console.error('[Snapchat OAuth] token exchange failed:', err.code || '-', SNAP.redact(err.message));
+    return back('snapchat_error=' + (err.code === 'NETWORK' ? 'network' : 'token_exchange'));
+  }
+  const disc = await SNAP.discoverAccounts(tokens.accessToken);
+
+  // Reconnecting keeps the selected ad account only if this Snapchat user
+  // can still reach it.
+  const { data: prev } = await supabaseAdmin.from('integrations').select('active_ad_account').eq('user_id', st.userId).eq('provider', SNAP.PROVIDER).maybeSingle().then((r) => r, () => ({ data: null }));
+  const row = {
+    user_id: st.userId, provider: SNAP.PROVIDER,
+    access_token: tokens.accessToken, refresh_token: tokens.refreshToken,
+    token_expiry: new Date(Date.now() + tokens.expiresIn * 1000).toISOString(),
+    connected_at: new Date().toISOString(),
+    snapchat_ads_accounts: disc.accounts, snapchat_ads_accounts_error: disc.error || null,
+  };
+  const keep = prev && prev.active_ad_account && disc.accounts.some((a) => a.id === String(prev.active_ad_account.account_id));
+  if (!keep) row.active_ad_account = disc.accounts.length === 1 ? _snapActive(disc.accounts[0], null) : null;
+  const dbErr = await _snapWrite('upsert', row);
+  if (dbErr) { console.error('[Snapchat OAuth] DB upsert error:', dbErr.message); return back('snapchat_error=db'); }
+  console.log('[Snapchat OAuth] connected | user:', st.userId, '| ad accounts:', disc.accounts.length, disc.error ? '| discovery failed' : '');
+  return back('snapchat_connected=1');
+});
+
+function _snapActive(a, profileId) {
+  return { platform: SNAP.PROVIDER, account_id: String(a.id), account_name: String(a.name || a.id), currency: a.currency || null, timezone: a.timezone || null, organization_id: a.organization_id || null, profile_id: profileId || null };
+}
+
+// One refresh per user at a time (two requests must not race to refresh).
+const _snapRefreshing = new Map();
+async function _snapRefresh(userId, refreshToken) {
+  if (_snapRefreshing.has(userId)) return _snapRefreshing.get(userId);
+  const p = (async () => {
+    const t = await SNAP.refreshAccessToken(_snapCfg(), refreshToken);
+    const upd = { access_token: t.accessToken, token_expiry: new Date(Date.now() + t.expiresIn * 1000).toISOString() };
+    if (t.refreshToken) upd.refresh_token = t.refreshToken; // keep the stored one when none is returned
+    await supabaseAdmin.from('integrations').update(upd).eq('user_id', userId).eq('provider', SNAP.PROVIDER);
+    return t.accessToken;
+  })().finally(() => _snapRefreshing.delete(userId));
+  _snapRefreshing.set(userId, p);
+  return p;
+}
+
+// Valid token (+ the selected ad account unless skipActiveAccountCheck).
+// access.request() retries once with a fresh token when Snapchat answers 401.
+async function _getSnapchatAccess(user, opts) {
+  opts = opts || {};
+  if (!_snapCfg().configured) throw Object.assign(new Error('Snapchat Ads is not configured on the server yet.'), { status: 503, code: 'NOT_CONFIGURED' });
+  const { data: intg, error } = await supabaseAdmin.from('integrations')
+    .select('access_token, refresh_token, token_expiry, active_ad_account')
+    .eq('user_id', user.id).eq('provider', SNAP.PROVIDER).maybeSingle();
+  if (error || !intg) throw Object.assign(new Error('Snapchat Ads not connected'), { status: 400, code: 'NOT_CONNECTED' });
+  let accessToken = intg.access_token;
+  const refresh = async () => {
+    if (!intg.refresh_token) throw Object.assign(new Error('Snapchat access expired — reconnect Snapchat Ads.'), { status: 401, code: 'RECONNECT_REQUIRED' });
+    try { accessToken = await _snapRefresh(user.id, intg.refresh_token); }
+    catch (e) { throw Object.assign(new Error('Snapchat access could not be renewed — reconnect Snapchat Ads.'), { status: 401, code: 'RECONNECT_REQUIRED' }); }
+    return accessToken;
+  };
+  // Refresh 5 minutes early (tokens live 60 minutes).
+  if (!intg.token_expiry || new Date(intg.token_expiry).getTime() - Date.now() < 5 * 60 * 1000) await refresh();
+  const request = async (method, path, body, o) => {
+    try { return await SNAP.request(accessToken, method, path, body, o); }
+    catch (e) { if (e.status !== 401) throw e; await refresh(); return SNAP.request(accessToken, method, path, body, o); }
+  };
+  const out = { get accessToken() { return accessToken; }, request };
+  if (opts.skipActiveAccountCheck) return out;
+  const a = intg.active_ad_account;
+  if (!a || !a.account_id) throw Object.assign(new Error('No active Snapchat ad account selected — choose one in Ad Platforms.'), { status: 400, code: 'NO_ACTIVE_ACCOUNT' });
+  return Object.assign(out, {
+    adAccountId: String(a.account_id), accountName: a.account_name || String(a.account_id), currency: a.currency || null,
+    timezone: a.timezone || null, organizationId: a.organization_id || null, profileId: a.profile_id || null, activeAccount: a,
+  });
+}
+// A token-bound client for the shared SNAP helpers (they take a token string).
+function _snapClient(access) {
+  return { token: access.accessToken, call: (fn, ...args) => fn(access.accessToken, ...args).catch(async (e) => { if (e.status !== 401) throw e; await access.request('GET', '/me'); return fn(access.accessToken, ...args); }) };
+}
+
+// GET /api/snapchat/status
+app.get('/api/snapchat/status', async (req, res) => {
+  const user = await getUserFromToken(req);
+  if (!user) return res.status(401).json({ error: 'Authentication required' });
+  const cfg = _snapCfg();
+  const { data, error } = await supabaseAdmin.from('integrations').select('*').eq('user_id', user.id).eq('provider', SNAP.PROVIDER).maybeSingle();
+  if (error) return res.status(500).json({ error: 'Database error' });
+  if (!data) return res.json({ connected: false, configured: cfg.configured });
+  const status = !data.refresh_token && data.token_expiry && new Date(data.token_expiry) < new Date() ? 'disconnected' : 'connected';
+  let accountsStatus = null;
+  if (data.snapchat_ads_accounts_error) accountsStatus = { code: 'DISCOVERY_FAILED', message: 'OrivenAI couldn’t load your Snapchat ad accounts. Try again, or reconnect Snapchat Ads.' };
+  // Without the optional migration there is no stored list: read it live.
+  let accounts = Array.isArray(data.snapchat_ads_accounts) ? data.snapchat_ads_accounts : null;
+  if (!accounts && !('snapchat_ads_accounts' in data) && cfg.configured) {
+    try {
+      const access = await _getSnapchatAccess(user, { skipActiveAccountCheck: true });
+      const disc = await SNAP.discoverAccounts(access.accessToken);
+      if (disc.error) accountsStatus = { code: 'DISCOVERY_FAILED', message: 'OrivenAI couldn’t load your Snapchat ad accounts. Try again, or reconnect Snapchat Ads.' };
+      else accounts = disc.accounts;
+    } catch (e) {
+      accountsStatus = { code: e.code === 'RECONNECT_REQUIRED' ? 'RECONNECT_REQUIRED' : 'DISCOVERY_FAILED', message: e.code === 'RECONNECT_REQUIRED' ? e.message : 'OrivenAI couldn’t load your Snapchat ad accounts. Try again, or reconnect Snapchat Ads.' };
+    }
+  }
+  res.json({
+    connected: true, configured: cfg.configured, status, connected_at: data.connected_at,
+    snapchat_ads_accounts: accounts,
+    snapchat_ads_accounts_status: accountsStatus,
+    active_ad_account: data.active_ad_account || null,
+    public_profile_id: (data.active_ad_account && data.active_ad_account.profile_id) || null,
+  });
+});
+
+// GET /api/snapchat/accounts — re-discover the ad accounts and store them.
+app.get('/api/snapchat/accounts', async (req, res) => {
+  try {
+    const user = await getUserFromToken(req);
+    if (!user) return res.status(401).json({ error: 'Authentication required' });
+    const access = await _getSnapchatAccess(user, { skipActiveAccountCheck: true });
+    let disc = await SNAP.discoverAccounts(access.accessToken);
+    if (disc.status === 401) { await access.request('GET', '/me'); disc = await SNAP.discoverAccounts(access.accessToken); }
+    if (disc.error && disc.status === 401) throw Object.assign(new Error('Snapchat no longer accepts OrivenAI’s access. Reconnect Snapchat Ads.'), { status: 401, code: 'RECONNECT_REQUIRED' });
+    await _snapWrite('update', { snapchat_ads_accounts: disc.accounts, snapchat_ads_accounts_error: disc.error || null }, user.id);
+    res.json({ accounts: disc.accounts, error: disc.error ? 'OrivenAI couldn’t load your Snapchat ad accounts. Try again in a moment.' : null });
+  } catch (err) { _snapError(res, 'accounts', err); }
+});
+
+// POST /api/snapchat/active-account { account_id } — only an ad account this
+// user's Snapchat login can reach right now (live discovery) is accepted.
+app.post('/api/snapchat/active-account', async (req, res) => {
+  try {
+    const user = await getUserFromToken(req);
+    if (!user) return res.status(401).json({ error: 'Authentication required' });
+    const id = String((req.body && req.body.account_id) || '').trim();
+    if (!id) return res.status(400).json({ error: 'account_id is required' });
+    const access = await _getSnapchatAccess(user, { skipActiveAccountCheck: true });
+    const disc = await SNAP.discoverAccounts(access.accessToken);
+    if (disc.error) throw Object.assign(new Error('OrivenAI couldn’t check your Snapchat ad accounts right now. Try again.'), { status: disc.status === 401 ? 401 : 502 });
+    const match = disc.accounts.find((a) => a.id === id);
+    if (!match) {
+      console.warn('[Snapchat ActiveAccount] rejected id not accessible | user:', user.id);
+      return res.status(403).json({ error: 'That ad account is not accessible with your connected Snapchat login.', code: 'ACCOUNT_NOT_ACCESSIBLE' });
+    }
+    const { data: cur } = await supabaseAdmin.from('integrations').select('active_ad_account').eq('user_id', user.id).eq('provider', SNAP.PROVIDER).maybeSingle();
+    // A Public Profile belongs to an organization: keep it only within the same one.
+    const prevProfile = cur && cur.active_ad_account && cur.active_ad_account.organization_id === match.organization_id ? cur.active_ad_account.profile_id : null;
+    const active = _snapActive(match, prevProfile);
+    const err = await _snapWrite('update', { active_ad_account: active, snapchat_ads_accounts: disc.accounts }, user.id);
+    if (err) return res.status(500).json({ error: 'Database error' });
+    res.json({ success: true, active_ad_account: active });
+  } catch (err) { _snapError(res, 'active-account', err); }
+});
+
+// POST /api/snapchat/public-profile { profile_id } — the Public Profile Snap
+// Ads run under (shown on the ad; Snap marks it required for Snap Ad
+// creatives). With only the snapchat-marketing-api scope OrivenAI can't list
+// profiles (Snap's Public Profile API is allow-listed), so the advertiser
+// pastes the id from Snap Business Manager → Public Profiles. Empty clears it.
+const _SNAP_UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+app.post('/api/snapchat/public-profile', async (req, res) => {
+  try {
+    const user = await getUserFromToken(req);
+    if (!user) return res.status(401).json({ error: 'Authentication required' });
+    const raw = String((req.body && req.body.profile_id) || '').trim();
+    if (raw && !_SNAP_UUID.test(raw)) return res.status(400).json({ error: 'That isn’t a Snapchat Public Profile ID. It looks like 1a2b3c4d-…, and you find it in Snap Business Manager → Public Profiles.', code: 'PROFILE_ID_INVALID' });
+    const { data } = await supabaseAdmin.from('integrations').select('active_ad_account').eq('user_id', user.id).eq('provider', SNAP.PROVIDER).maybeSingle();
+    if (!data) return res.status(404).json({ error: 'Snapchat Ads not connected', code: 'NOT_CONNECTED' });
+    if (!data.active_ad_account || !data.active_ad_account.account_id) return res.status(400).json({ error: 'Choose a Snapchat ad account first.', code: 'NO_ACTIVE_ACCOUNT' });
+    const active = Object.assign({}, data.active_ad_account, { profile_id: raw ? raw.toLowerCase() : null });
+    const err = await _snapWrite('update', { active_ad_account: active }, user.id);
+    if (err) return res.status(500).json({ error: 'Database error' });
+    res.json({ success: true, active_ad_account: active });
+  } catch (err) { _snapError(res, 'public-profile', err); }
+});
+
+// POST /api/snapchat/disconnect — removes OrivenAI's stored tokens. Snap
+// documents no token-revoke endpoint; the advertiser can also remove the app
+// in Snap Business Manager.
+app.post('/api/snapchat/disconnect', async (req, res) => {
+  const user = await getUserFromToken(req);
+  if (!user) return res.status(401).json({ error: 'Authentication required' });
+  const { error } = await supabaseAdmin.from('integrations').delete().eq('user_id', user.id).eq('provider', SNAP.PROVIDER);
+  if (error) return res.status(500).json({ error: 'Database error' });
+  _snapchatOAuthStates.forEach((v, k) => { if (v.userId === user.id) _snapchatOAuthStates.delete(k); });
+  console.log('[Snapchat OAuth] disconnected | user:', user.id);
+  res.json({ success: true });
+});
+
+function _snapCampaignRow(c) {
+  const o = c.objective_v2_properties || {};
+  return {
+    campaign_id: String(c.id), campaign_name: c.name || 'Unnamed', status: c.status || 'UNKNOWN',
+    delivery_status: Array.isArray(c.delivery_status) ? c.delivery_status : null,
+    objective: o.objective_v2_type || c.objective || null,
+    daily_budget: c.daily_budget_micro != null ? Number(c.daily_budget_micro) / SNAP.MICRO : null,
+    lifetime_spend_cap: c.lifetime_spend_cap_micro != null ? Number(c.lifetime_spend_cap_micro) / SNAP.MICRO : null,
+    start_time: c.start_time || null, end_time: c.end_time || null, created_time: c.created_at || null,
+  };
+}
+
+// GET /api/snapchat/campaigns — the selected ad account's campaigns.
+app.get('/api/snapchat/campaigns', async (req, res) => {
+  try {
+    const user = await getUserFromToken(req);
+    if (!user) return res.status(401).json({ error: 'Authentication required' });
+    const a = await _getSnapchatAccess(user);
+    const j = await a.request('GET', '/adaccounts/' + encodeURIComponent(a.adAccountId) + '/campaigns?limit=500');
+    const campaigns = SNAP.items(j, 'campaigns', 'campaign').filter((c) => c.status !== 'DELETED').map(_snapCampaignRow);
+    res.json({ account: { id: a.adAccountId, name: a.accountName, currency: a.currency }, campaigns });
+  } catch (err) { _snapError(res, 'campaigns', err); }
+});
+
+// GET /api/snapchat/overview?date_range=… — account totals + campaigns with
+// their own totals (Snap's per-campaign breakdown), plus a daily series when
+// ?series=1. Spend is Snap's micro-currency converted to the account currency;
+// clicks are swipe-ups. Conversions are not reported (no Snap Pixel setup in
+// OrivenAI yet) — null, never 0.
+app.get('/api/snapchat/overview', async (req, res) => {
+  try {
+    const user = await getUserFromToken(req);
+    if (!user) return res.status(401).json({ error: 'Authentication required' });
+    const a = await _getSnapchatAccess(user);
+    // Snap stats are read for at most 90 days here; a longer range is reported as clamped.
+    const wanted = Math.max(1, _rangeDays(req.query.date_range, req.query.date_since, req.query.date_until));
+    const days = Math.min(90, wanted);
+    const until = new Date().toISOString().slice(0, 10);
+    const since = SNAP.addDays(until, -(days - 1));
+    const account = { id: a.adAccountId, timezone: a.timezone };
+    const camps = SNAP.items(await a.request('GET', '/adaccounts/' + encodeURIComponent(a.adAccountId) + '/campaigns?limit=500'), 'campaigns', 'campaign').filter((c) => c.status !== 'DELETED');
+    const client = _snapClient(a);
+    let stats = null, statsError = null;
+    try { stats = await client.call((t) => SNAP.campaignStats(t, account, since, until)); }
+    catch (e) { statsError = e.message; console.warn('[Snapchat Overview] stats unavailable:', e.status || '-', SNAP.redact(e.message)); }
+    const only = req.query.campaignId ? String(req.query.campaignId) : null;
+    const pick = (id) => (stats && stats.byCampaign[id]) || { spend: 0, impressions: 0, clicks: 0, videoViews: 0, conversions: null };
+    const campaigns = camps.map((c) => Object.assign(_snapCampaignRow(c), stats ? { metrics: pick(String(c.id)) } : { metrics: null }));
+    let overview = null;
+    if (stats) {
+      const rows = only ? [pick(only)] : Object.values(stats.byCampaign);
+      const t = { spend: 0, impressions: 0, clicks: 0 };
+      rows.forEach((r) => { t.spend += r.spend; t.impressions += r.impressions; t.clicks += r.clicks; });
+      overview = { spend: t.spend, impressions: t.impressions, clicks: t.clicks, ctr: t.impressions ? (t.clicks / t.impressions) * 100 : 0, cpc: t.clicks ? t.spend / t.clicks : 0, cpm: t.impressions ? (t.spend / t.impressions) * 1000 : 0, conversions: null, cpa: null };
+    }
+    let series;
+    if (req.query.series === '1') {
+      try { series = await client.call((t) => SNAP.dailySeries(t, account, since, until, only ? [only] : camps.map((c) => String(c.id)))); } catch (_) { series = null; }
+    }
+    res.json({ account: { id: a.adAccountId, name: a.accountName, currency: a.currency }, date_range: { since, until, days, clamped: wanted > 90 }, overview, statsError: statsError ? 'Snapchat didn’t return performance data right now.' : null, campaigns, series });
+  } catch (err) { _snapError(res, 'overview', err); }
+});
+
+// The campaign must belong to the selected ad account before anything changes.
+async function _snapOwnedCampaign(a, id) {
+  if (!_SNAP_UUID.test(String(id))) throw Object.assign(new Error('Invalid campaign ID'), { status: 404, code: 'NOT_FOUND' });
+  const c = SNAP.items(await a.request('GET', '/campaigns/' + encodeURIComponent(id)), 'campaigns', 'campaign')[0];
+  if (!c || String(c.ad_account_id) !== a.adAccountId) throw Object.assign(new Error('This campaign isn’t in your selected Snapchat ad account.'), { status: 404, code: 'NOT_FOUND' });
+  return c;
+}
+// POST /api/snapchat/campaign/:id/pause
+app.post('/api/snapchat/campaign/:id/pause', async (req, res) => {
+  try {
+    const user = await getUserFromToken(req);
+    if (!user) return res.status(401).json({ error: 'Authentication required', code: 'AUTH_REQUIRED' });
+    const a = await _getSnapchatAccess(user);
+    await _snapOwnedCampaign(a, req.params.id);
+    await _snapClient(a).call((t) => SNAP.updateCampaign(t, a.adAccountId, req.params.id, { status: 'PAUSED' }));
+    _logCampaignEvent(user, { platform: 'snapchat', campaignName: (req.body && req.body.campaignName) || null, title: 'Campaign paused', detail: 'Campaign ' + req.params.id + ' was paused on Snapchat Ads.', severity: 'low' });
+    res.json({ ok: true, success: true, status: 'PAUSED' });
+  } catch (err) {
+    console.error('[Snapchat Pause] error:', SNAP.redact(err.message));
+    const out = _campaignActivation.actionError(err, SNAP_LABEL);
+    res.status(out.status).json(out.body);
+  }
+});
+// POST /api/snapchat/campaign/:id/resume — Launch's Activate / Resume
+// (services/campaignActivation.js, the same activation Automations uses).
+app.post('/api/snapchat/campaign/:id/resume', (req, res) => _activationRoute(req, res, 'snapchat'));
 
 // ── Pinterest Ads — Launch publish integration ─────────────────────────
 //

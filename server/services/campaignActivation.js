@@ -1,5 +1,5 @@
 // ════════════════════════════════════════════════════════════════════
-// Activating a campaign OrivenAI published (Meta, TikTok, Pinterest).
+// Activating a campaign OrivenAI published (Meta, TikTok, Pinterest, Snapchat).
 //
 // Publishing creates every object paused — the campaign, its ad sets / ad
 // groups and its ads (services/campaignSpec.js). Enabling only the campaign
@@ -27,12 +27,20 @@
 // a paused campaign, so enabling the campaign is enough.
 // ════════════════════════════════════════════════════════════════════
 
-const PAUSED = { meta: ['PAUSED'], tiktok: ['DISABLE'], pinterest: ['PAUSED'] };
-const LABEL = { meta: 'Meta Ads', tiktok: 'TikTok Ads', pinterest: 'Pinterest Ads' };
+const PAUSED = { meta: ['PAUSED'], tiktok: ['DISABLE'], pinterest: ['PAUSED'], snapchat: ['PAUSED'] };
+const LABEL = { meta: 'Meta Ads', tiktok: 'TikTok Ads', pinterest: 'Pinterest Ads', snapchat: 'Snapchat Ads' };
 const STEP_TIMEOUT_MS = Number(process.env.ACTIVATION_STEP_TIMEOUT_MS) || 20000;
 
 const idList = (v) => (Array.isArray(v) ? v.map((x) => String(x && typeof x === 'object' ? x.id : x)).filter(Boolean) : null);
 const digits = (v) => { const d = String(v == null ? '' : v).replace(/[^0-9]/g, ''); return d || String(v || ''); };
+// Snapchat ids are UUIDs; every other platform's ids are numeric.
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+const sameAccount = (platform, a, b) => (platform === 'snapchat' ? String(a).toLowerCase() === String(b).toLowerCase() : digits(a) === digits(b));
+function cleanId(platform, v) {
+  const s = String(v == null ? '' : v).trim().toLowerCase();
+  if (platform === 'snapchat') return UUID.test(s) ? s : '';
+  return s.replace(/[^0-9]/g, '');
+}
 const isPausedFor = (platform) => (r) => r && (PAUSED[platform] || []).indexOf(String(r.status || '').toUpperCase()) !== -1;
 
 class ActivationError extends Error {
@@ -101,7 +109,7 @@ async function activate({ platform, userId, campaignId, accountId, firstActivati
   };
   try {
     // A record from another ad account: the ids aren't this account's objects.
-    if (recorded && recorded.accountId && accountId && digits(recorded.accountId) !== digits(accountId)) {
+    if (recorded && recorded.accountId && accountId && !sameAccount(platform, recorded.accountId, accountId)) {
       throw new ActivationError('WRONG_ACCOUNT', 'This campaign was published to another ad account than the one connected now.', { recordedAccountId: String(recorded.accountId) });
     }
     const list = async () => {
@@ -241,6 +249,26 @@ async function providerOps(platform, deps, user, cid) {
     return { accountId: adAccountId, adapter: { listAdSets: () => list('ad_groups'), listAds: () => list('ads'), enableAds: enable('ads'), enableAdSets: enable('ad_groups'),
       enableCampaign: async () => { const r = await enable('campaigns')([cid]); if (r.failed.length) throw new Error('Pinterest refused to switch the campaign on'); } } };
   }
+  if (platform === 'snapchat') {
+    // Snap Ads API: Campaign → Ad Squads → Ads. Status changes are full-object
+    // PUTs (services/snapchatAds.js reads each object first), one per object.
+    const access = await deps.getSnapchatAccess(user);
+    const S = deps.snapchat();
+    const c = S.items(await access.request('GET', '/campaigns/' + encodeURIComponent(cid)), 'campaigns', 'campaign')[0];
+    if (!c || String(c.ad_account_id) !== String(access.adAccountId)) throw Object.assign(new Error('campaign not found'), { code: 'NOT_FOUND' });
+    const list = async (edge, one) => S.items(await access.request('GET', '/campaigns/' + encodeURIComponent(cid) + '/' + edge + '?limit=500'), edge, one).map((r) => ({ id: String(r.id), status: r.status }));
+    const enableEach = (fn) => async (ids) => {
+      const done = [];
+      for (const id of ids) {
+        try { await fn(access.accessToken, id, { status: 'ACTIVE' }); done.push(id); }
+        catch (e) { e.enabledIds = done; throw e; }
+      }
+      return { failed: [] };
+    };
+    return { accountId: access.adAccountId, adapter: { listAdSets: () => list('adsquads', 'adsquad'), listAds: () => list('ads', 'ad'),
+      enableAds: enableEach(S.updateAd), enableAdSets: enableEach(S.updateAdSquad),
+      enableCampaign: () => S.updateCampaign(access.accessToken, access.adAccountId, cid, { status: 'ACTIVE' }) } };
+  }
   throw new ActivationError('UNSUPPORTED', 'Activation of child objects is not used for this platform.');
 }
 
@@ -249,7 +277,7 @@ async function providerOps(platform, deps, user, cid) {
 // server's record decides: with a record that was already activated, it is a
 // resume whatever the caller says; without any record no child is touched.
 async function run({ platform, user, campaignId, firstActivationHint, db, deps, now }) {
-  const cid = String(campaignId == null ? '' : campaignId).replace(/[^0-9]/g, '');
+  const cid = cleanId(platform, campaignId);
   if (!cid) throw Object.assign(new Error('Invalid campaign ID'), { code: 'NOT_FOUND' });
   const ops = await providerOps(platform, deps, user, cid);
   const recorded = await recordedChildren(db, user.id, platform, cid);

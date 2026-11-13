@@ -39,8 +39,9 @@
 const campaignGoals = require('./campaignGoals');
 
 const SPEC_VERSION = 1;
-const PLATFORMS = ['meta', 'google', 'tiktok', 'pinterest'];
-const PK = { google: 'googleAds', meta: 'metaAds', tiktok: 'tiktokAds', pinterest: 'pinterestAds' };
+const PLATFORMS = ['meta', 'google', 'tiktok', 'pinterest', 'snapchat'];
+const PK = { google: 'googleAds', meta: 'metaAds', tiktok: 'tiktokAds', pinterest: 'pinterestAds', snapchat: 'snapchatAds' };
+const SNAP = require('./snapchatAds');
 const GOALS = ['Sales', 'Leads', 'Traffic', 'Awareness'];
 
 // ── Countries ──────────────────────────────────────────────────────
@@ -202,6 +203,7 @@ const SUPPORT = {
   google: { types: createCompat.typeKeys('google'), goals: GOALS },
   tiktok: { goals: createCompat.typeInfo('tiktok').goals.slice(), videoRequired: !createCompat.platformSupportsFormat('tiktok', 'image'), blockedGoals: _tiktokBlocked },
   pinterest: { goals: GOALS },
+  snapchat: { goals: createCompat.typeInfo('snapchat').goals.slice() },
 };
 
 // Facts that need a real (test) ad account to confirm — reported, not hidden.
@@ -210,6 +212,7 @@ const LIVE_UNVERIFIED = {
   google: ['Search, Performance Max (brand guidelines at campaign level) and Demand Gen payloads have not been sent to a live Google Ads account yet.'],
   tiktok: ['location_ids use GeoNames country ids; video ads (SINGLE_VIDEO) and ad-group-only budgets have not been sent to a live TikTok account yet.'],
   pinterest: ['targeting_spec LOCATION array and SALES/LEADS conversion metadata (optimization_goal_metadata) have not been sent to a live Pinterest account yet.'],
+  snapchat: ['Snap Marketing API payloads (campaign, ad squad, media upload, WEB_VIEW creative, ad) have not been sent to a live Snapchat ad account yet.'],
 };
 
 // ── helpers ───────────────────────────────────────────────────────
@@ -367,7 +370,7 @@ function buildSpec(pkg, platform, ctx) {
   src.budget = budget.source;
   const dest = destinationOf(pkg, platform, profile);
   src.destinationUrl = dest.source;
-  const utm = Object.assign({ source: { meta: 'facebook', google: 'google', tiktok: 'tiktok', pinterest: 'pinterest' }[platform], medium: platform === 'google' ? 'cpc' : 'paid_social', campaign: slug(name) }, ov.utm || {});
+  const utm = Object.assign({ source: { meta: 'facebook', google: 'google', tiktok: 'tiktok', pinterest: 'pinterest', snapchat: 'snapchat' }[platform], medium: platform === 'google' ? 'cpc' : 'paid_social', campaign: slug(name) }, ov.utm || {});
   src.utm = ov.utm ? 'user' : 'auto';
   const urlParams = 'utm_source=' + encodeURIComponent(utm.source) + '&utm_medium=' + encodeURIComponent(utm.medium) + '&utm_campaign=' + encodeURIComponent(utm.campaign) + (utm.content ? '&utm_content=' + encodeURIComponent(utm.content) : '');
 
@@ -407,7 +410,7 @@ function buildSpec(pkg, platform, ctx) {
     const ads = [];
     for (let j = 0; j < struct.adsPerGroup; j++) { const v = variants[k % variants.length]; k++; ads.push(Object.assign({ name: '' }, v)); }
     groups.push({
-      name: _str(gOv.name) || (name + (totalGroups > 1 ? ' — ' + (platform === 'meta' ? 'Ad set ' : 'Ad group ') + (i + 1) : (platform === 'meta' ? ' — Ad set' : ' — Ad group'))),
+      name: _str(gOv.name) || (name + (totalGroups > 1 ? ' — ' + (platform === 'meta' ? 'Ad set ' : platform === 'snapchat' ? 'Ad squad ' : 'Ad group ') + (i + 1) : (platform === 'meta' ? ' — Ad set' : platform === 'snapchat' ? ' — Ad squad' : ' — Ad group'))),
       ageMin: Number.isInteger(gOv.ageMin) ? gOv.ageMin : null,
       ageMax: Number.isInteger(gOv.ageMax) ? gOv.ageMax : null,
       ads: ads.map((a, j) => Object.assign(a, { name: (_str(gOv.name) || name) + ' — Ad ' + (j + 1) })),
@@ -556,6 +559,33 @@ function buildSpec(pkg, platform, ctx) {
     spec.creative = { format: (o.creativeType === 'video' && video) ? 'VIDEO' : 'IMAGE', imageUrl: images.primary, images: images.all, videoUrl: video, wantsVideo: o.creativeType === 'video', videoPending: !video && videoPendingOf(pkg) };
   }
 
+  if (platform === 'snapchat') {
+    // Snap Ads: Campaign → Ad Squad → Ad (WEB_VIEW creative: full-screen Top
+    // Snap with a swipe-up to the website). Budget is per ad squad; OrivenAI
+    // splits the confirmed daily budget evenly, so the total equals what the
+    // user set. One country per campaign (Snap requires a language entry for
+    // multi-country targeting, which OrivenAI doesn't send).
+    const cfg = SNAP.GOAL_CONFIG[goal] || null;
+    const fmtWanted = String((pkg.inputs && pkg.inputs.format) || pkg.creativeFormat || o.creativeType || '').toLowerCase();
+    const wantsVideo = fmtWanted === 'video' || fmtWanted === 'videos';
+    spec.campaign.objective = cfg ? cfg.objective : null;
+    spec.campaign.budgetLevel = 'AD_SQUAD';
+    spec.optimization = { goal: cfg ? cfg.optimization : null, billingEvent: 'IMPRESSION', bidStrategy: 'AUTO_BID' };
+    spec.budget.perAdSquad = spec.budget.amount ? Math.floor((spec.budget.amount / spec.adGroups.length) * 100) / 100 : null;
+    spec.targeting.placement = 'snapchat_automatic';
+    spec.targeting.placementLabel = 'Snapchat (automatic placements)';
+    const brand = _str(o.brandName || profile.company_name);
+    src.brandName = o.brandName ? 'ai' : (profile.company_name ? 'profile' : 'missing');
+    spec.identity = { profileId: opt.profileId || null, brandName: brand ? brand.slice(0, SNAP.LIMITS.BRAND) : null, brandNameLong: brand.length > SNAP.LIMITS.BRAND };
+    spec.creative = { format: wantsVideo && video ? 'VIDEO' : 'IMAGE', imageUrl: images.primary, images: images.all, videoUrl: video, wantsVideo, videoPending: wantsVideo && !video && videoPendingOf(pkg) };
+    spec.adGroups.forEach((grp) => grp.ads.forEach((ad) => {
+      const h = _str(ad.headline || name);
+      ad.snapHeadline = h.length > SNAP.LIMITS.HEADLINE ? h.slice(0, SNAP.LIMITS.HEADLINE - 1).replace(/\s+\S*$/, '').trim() + '…' : h;
+      ad.snapHeadlineCut = h.length > SNAP.LIMITS.HEADLINE;
+      ad.snapCta = SNAP.ctaFor(ad.cta || o.cta, goal);
+    }));
+  }
+
   return spec;
 }
 
@@ -601,7 +631,7 @@ function validate(spec, ctx) {
   const add = (level, field, code, message, extra) => issues.push(Object.assign({ level, field, code, message }, extra || {}));
   const p = spec.platform;
   const goal = spec.campaign.goal;
-  const pname = { meta: 'Meta', google: 'Google Ads', tiktok: 'TikTok', pinterest: 'Pinterest' }[p];
+  const pname = { meta: 'Meta', google: 'Google Ads', tiktok: 'TikTok', pinterest: 'Pinterest', snapchat: 'Snapchat' }[p];
 
   // Countries — never a silent default, never "everywhere".
   if (!spec.targeting.countries.length) add('error', 'targeting.countries', 'country_missing', 'Choose the country or countries to advertise in. Your business profile has no country OrivenAI can read, so nothing is assumed.');
@@ -729,6 +759,35 @@ function validate(spec, ctx) {
     else add('info', 'targeting.languages', 'pinterest_language', 'Pinterest language targeting isn’t sent by OrivenAI; your ad reaches everyone in the chosen countries.');
   }
 
+  if (p === 'snapchat') {
+    const L = SNAP.LIMITS;
+    if (!SNAP.GOAL_CONFIG[goal]) {
+      const r = createCompat.REASONS['snapchat_goal_' + goal];
+      add('error', 'campaign.goal', 'snapchat_goal', r ? r.message + ' ' + r.suggestion : 'This goal can’t be published to Snapchat yet.', { params: { goal, reason: 'snapchat_goal_' + goal } });
+    }
+    if (spec.targeting.countries.length > 1) add('error', 'targeting.countries', 'snapchat_one_country', 'OrivenAI publishes a Snapchat campaign to one country at a time. Choose one country, and publish a copy of the campaign for each other country.', { params: { countries: spec.targeting.countries.slice() } });
+    if (spec.targeting.ageMin > L.MIN_AGE_MAX) add('error', 'targeting.age', 'snapchat_age_min', 'Snapchat’s minimum target age can be at most ' + L.MIN_AGE_MAX + '. Lower the youngest age.', { params: { max: L.MIN_AGE_MAX } });
+    else if (spec.targeting.ageMax >= L.MAX_AGE_CAP) add('info', 'targeting.age', 'snapchat_age_open', 'Snapchat’s oldest age setting is ' + L.MAX_AGE_CAP + ', so OrivenAI sends no upper age limit: the ad reaches everyone ' + spec.targeting.ageMin + ' and older.', { params: { min: spec.targeting.ageMin, cap: L.MAX_AGE_CAP } });
+    if (spec.budget.amount && spec.budget.perAdSquad < L.MIN_DAILY) add('error', 'budget.amount', 'snapchat_budget_min', 'Snapchat needs at least ' + L.MIN_DAILY + ' per day for each ad squad. With ' + spec.adGroups.length + ' ad squad(s), set at least ' + (L.MIN_DAILY * spec.adGroups.length) + ' per day.', { params: { min: L.MIN_DAILY, squads: spec.adGroups.length, atLeast: L.MIN_DAILY * spec.adGroups.length } });
+    if (spec.creative.format === 'VIDEO') {
+      if (!/^https?:\/\//i.test(String(spec.creative.videoUrl || ''))) add('error', 'creative.video', 'video_not_online', 'The video isn’t stored online, so OrivenAI can’t upload it to Snapchat. Generate or upload the video again.', { params: { platform: 'Snapchat' } });
+      add('info', 'creative.video', 'snapchat_video_spec', 'Snapchat plays videos full screen: 1080 × 1920 (9:16), MP4 or MOV, at least 3 seconds, up to 32 MB. Snapchat rejects a video of another shape.');
+    } else {
+      if (spec.creative.wantsVideo && spec.creative.videoPending) add('error', 'creative.video', 'video_pending', 'The video for this campaign is still being generated. It can be published once the video is ready.', { variant: 'snapchat' });
+      else if (spec.creative.wantsVideo) add('warning', 'creative.video', 'snapchat_video_missing', 'This campaign was made as a video ad, but it has no video. It will be published as a full-screen image ad.');
+      if (!spec.creative.imageUrl) add('error', 'creative.image', 'image_missing', 'Add an image. Snapchat ads are full-screen images or videos.', { variant: 'snapchat' });
+      else add('info', 'creative.image', 'snapchat_image_frame', 'Snapchat ads fill the phone screen (1080 × 1920). OrivenAI places each image whole on a blurred full-screen background; nothing is cut off.');
+    }
+    if (!spec.identity.brandName && !spec.identity.profileId) add('error', 'identity.brandName', 'snapchat_brand', 'Add your company name in your business profile. Snapchat shows it as the brand name on the ad.');
+    else if (spec.identity.brandNameLong) add('warning', 'identity.brandName', 'snapchat_brand_long', 'Snapchat shows at most ' + L.BRAND + ' characters of the brand name; it will be shortened to “' + spec.identity.brandName + '”.', { params: { name: spec.identity.brandName } });
+    if (!spec.identity.profileId) add('warning', 'identity.profileId', 'snapchat_profile', 'No Snapchat Public Profile is set. Snapchat may require one on ads; add your Public Profile ID in Ad Platforms → Snapchat Ads if Snapchat rejects the ad.');
+    spec.adGroups.forEach((grp, i) => grp.ads.forEach((ad, j) => {
+      if (!ad.snapHeadline) add('error', `adGroups[${i}].ads[${j}].headline`, 'copy_missing', 'Ad ' + (j + 1) + ' has no headline.', { variant: 'snapchat', params: { n: j + 1 } });
+      else if (ad.snapHeadlineCut) add('warning', `adGroups[${i}].ads[${j}].headline`, 'snapchat_headline_long', 'Snapchat headlines are at most ' + L.HEADLINE + ' characters; Ad ' + (j + 1) + ' will show “' + ad.snapHeadline + '”.', { params: { n: j + 1, text: ad.snapHeadline } });
+    }));
+    if (spec.targeting.languages.length) add('info', 'targeting.languages', 'snapchat_language', 'Snapchat language targeting isn’t sent by OrivenAI; your ad reaches everyone in the chosen country.');
+  }
+
   // Shared Create/Launch compatibility rules (services/createCompat.js) —
   // the same check /api/ai/create-ad runs before charging. Issues the
   // platform blocks above already explain in more detail are not repeated.
@@ -736,7 +795,7 @@ function validate(spec, ctx) {
     const fmt = p === 'google' ? (spec.campaignType === 'SEARCH' ? 'text' : 'image') : String((spec.creative && spec.creative.format) || 'IMAGE').toLowerCase();
     const cc = createCompat.check({ platform: p, campaignType: spec.campaignType, goal, format: fmt, objective: p === 'pinterest' ? (spec.pinterestObjective || null) : null });
     for (const iss of cc.issues || []) {
-      if (p === 'tiktok' && (iss.field === 'goal' || iss.field === 'format')) continue;
+      if ((p === 'tiktok' || p === 'snapchat') && (iss.field === 'goal' || iss.field === 'format')) continue;
       if (p === 'google' && iss.field === 'campaignType') continue;
       add('error', 'compat.' + iss.field, 'compat_' + iss.code, (iss.message + ' ' + (iss.suggestion || '')).trim(), { params: { reason: iss.reason || iss.code } });
     }
@@ -783,15 +842,16 @@ function checklist(spec, issues) {
   if (p === 'google' && spec.campaignType === 'SEARCH') keys.push('keywords');
   keys.push('destination', 'budget', 'targeting', 'tracking');
   if (p === 'meta') keys.push('compliance');
-  if (p === 'meta' || p === 'tiktok') keys.push('identity');
+  if (p === 'meta' || p === 'tiktok' || p === 'snapchat') keys.push('identity');
   const ads = spec.adGroups.reduce((n, g) => n + (g.ads ? g.ads.length : 0), 0);
-  const groupWord = p === 'meta' ? 'ad set' : 'ad group';
+  const groupWord = p === 'meta' ? 'ad set' : p === 'snapchat' ? 'ad squad' : 'ad group';
   const cur = spec.budget.currency ? ' ' + spec.budget.currency : '';
   const summary = {
     campaign: () => [spec.campaign.goal, p === 'google' ? GOOGLE_TYPE_LABEL[spec.campaignType] : formatLabel(spec), spec.adGroups.length + ' ' + groupWord + (spec.adGroups.length === 1 ? '' : 's') + ' · ' + ads + ' ad' + (ads === 1 ? '' : 's')].filter(Boolean).join(' · '),
     creative: () => {
       const c = spec.creative || {};
       if (p === 'google') return spec.campaignType === 'SEARCH' ? 'Text ads — no image is sent to Google.' : 'Image, logo and business name from your business profile.';
+      if (p === 'snapchat') return c.format === 'VIDEO' ? 'Full-screen video Snap Ad with a swipe-up to your website.' : 'Full-screen image Snap Ad (1080 × 1920) with a swipe-up to your website.';
       if (c.format === 'VIDEO') return p === 'tiktok' ? ('Video' + (c.coverFromVideo ? ' — TikTok uses a frame of the video as the cover.' : ' with a cover image.')) : 'Video Pin.';
       const n = (c.images || []).length || (c.imageUrl ? 1 : 0);
       return (p === 'pinterest' ? 'Image Pin' : 'Image ad') + (n > 1 ? ' · ' + n + ' images' : '') + '.';
@@ -799,17 +859,18 @@ function checklist(spec, issues) {
     copy: () => p === 'google' ? (spec.assets.headlines.length + ' headlines · ' + spec.assets.descriptions.length + ' descriptions.') : p === 'pinterest' ? ('Pin title: “' + spec.pin.title + '”.') : (ads + ' ad' + (ads === 1 ? '' : 's') + ' with text.'),
     keywords: () => { const n = spec.adGroups.reduce((s, g) => s + ((g.keywords || []).length), 0); return n + ' keyword' + (n === 1 ? '' : 's') + (spec.assets.callouts.length ? ' · ' + spec.assets.callouts.length + ' callouts' : '') + '.'; },
     destination: () => spec.tracking.destinationUrl || '',
-    budget: () => spec.budget.amount ? spec.budget.amount + cur + ' per day.' : '',
+    budget: () => spec.budget.amount ? spec.budget.amount + cur + ' per day' + (p === 'snapchat' && spec.adGroups.length > 1 ? ' (' + spec.budget.perAdSquad + cur + ' per ad squad).' : '.') : '',
     targeting: () => [spec.targeting.countries.map(countryName).join(', '), 'Ages ' + spec.targeting.ageMin + '–' + spec.targeting.ageMax + (spec.targeting.ageMax >= 65 ? '+' : ''), spec.targeting.placementLabel].filter(Boolean).join(' · '),
     tracking: () => !spec.tracking.needsConversion ? 'Not needed for this objective.' : (p === 'meta' ? 'Meta Pixel selected · ' + spec.tracking.conversionEvent : p === 'pinterest' ? 'Pinterest Tag selected · ' + spec.tracking.conversionEvent : 'Conversion tracking is set up.'),
     compliance: () => 'Special ad categories confirmed' + (spec.compliance && spec.compliance.euTargeted ? ' · EU transparency: ' + spec.compliance.dsaBeneficiary : '') + '.',
-    identity: () => p === 'meta' ? ('Facebook Page connected' + (spec.identity.instagramUsername ? ' · Instagram @' + spec.identity.instagramUsername : '') + '.') : ('TikTok identity: ' + (spec.identity.displayName || 'selected') + '.'),
+    identity: () => p === 'meta' ? ('Facebook Page connected' + (spec.identity.instagramUsername ? ' · Instagram @' + spec.identity.instagramUsername : '') + '.') : p === 'snapchat' ? ('Brand name: ' + (spec.identity.brandName || '—') + (spec.identity.profileId ? ' · Public Profile set.' : '.')) : ('TikTok identity: ' + (spec.identity.displayName || 'selected') + '.'),
   };
   const summaryCode = {
-    campaign: () => ({ code: 'campaign', params: { goal: spec.campaign.goal, type: p === 'google' ? spec.campaignType : (spec.creative && spec.creative.format === 'VIDEO' ? 'VIDEO' : 'IMAGE'), groups: spec.adGroups.length, groupWord: p === 'meta' ? 'adset' : 'adgroup', ads } }),
+    campaign: () => ({ code: 'campaign', params: { goal: spec.campaign.goal, type: p === 'google' ? spec.campaignType : (spec.creative && spec.creative.format === 'VIDEO' ? 'VIDEO' : 'IMAGE'), groups: spec.adGroups.length, groupWord: p === 'meta' ? 'adset' : p === 'snapchat' ? 'adsquad' : 'adgroup', ads } }),
     creative: () => {
       const c = spec.creative || {};
       if (p === 'google') return { code: spec.campaignType === 'SEARCH' ? 'creative_google_text' : 'creative_google_image' };
+      if (p === 'snapchat') return { code: c.format === 'VIDEO' ? 'creative_snap_video' : 'creative_snap_image' };
       if (c.format === 'VIDEO') return { code: p === 'tiktok' ? (c.coverFromVideo ? 'creative_tiktok_video_frame' : 'creative_tiktok_video_cover') : 'creative_video_pin' };
       const n = (c.images || []).length || (c.imageUrl ? 1 : 0);
       return { code: (p === 'pinterest' ? 'creative_image_pin' : 'creative_image_ad') + (n > 1 ? '_n' : ''), params: { n } };
@@ -817,11 +878,11 @@ function checklist(spec, issues) {
     copy: () => p === 'google' ? { code: 'copy_google', params: { headlines: spec.assets.headlines.length, descriptions: spec.assets.descriptions.length } } : p === 'pinterest' ? { code: 'copy_pin', params: { title: spec.pin.title } } : { code: 'copy_ads', params: { n: ads } },
     keywords: () => { const n = spec.adGroups.reduce((s, g) => s + ((g.keywords || []).length), 0); return { code: spec.assets.callouts.length ? 'keywords_callouts' : 'keywords', params: { n, callouts: spec.assets.callouts.length } }; },
     destination: () => ({ code: 'destination', params: { url: spec.tracking.destinationUrl } }),
-    budget: () => ({ code: 'budget', params: { amount: spec.budget.amount, currency: spec.budget.currency || '' } }),
+    budget: () => (p === 'snapchat' && spec.adGroups.length > 1 ? { code: 'budget_snap_split', params: { amount: spec.budget.amount, per: spec.budget.perAdSquad, currency: spec.budget.currency || '' } } : { code: 'budget', params: { amount: spec.budget.amount, currency: spec.budget.currency || '' } }),
     targeting: () => ({ code: 'targeting', params: { countries: spec.targeting.countries.slice(), ageMin: spec.targeting.ageMin, ageMax: spec.targeting.ageMax, plus: spec.targeting.ageMax >= 65, placement: p === 'tiktok' ? 'tiktok_feed' : (spec.targeting.placement || null), placementLabel: spec.targeting.placementLabel || '' } }),
     tracking: () => !spec.tracking.needsConversion ? { code: 'tracking_none' } : { code: p === 'meta' ? 'tracking_pixel' : p === 'pinterest' ? 'tracking_tag' : 'tracking_google', params: { event: spec.tracking.conversionEvent || '' } },
     compliance: () => ({ code: spec.compliance && spec.compliance.euTargeted ? 'compliance_eu' : 'compliance', params: { beneficiary: (spec.compliance && spec.compliance.dsaBeneficiary) || '' } }),
-    identity: () => p === 'meta' ? { code: spec.identity.instagramUsername ? 'identity_meta_ig' : 'identity_meta', params: { instagram: spec.identity.instagramUsername || '' } } : { code: spec.identity.displayName ? 'identity_tiktok' : 'identity_tiktok_selected', params: { name: spec.identity.displayName || '' } },
+    identity: () => p === 'meta' ? { code: spec.identity.instagramUsername ? 'identity_meta_ig' : 'identity_meta', params: { instagram: spec.identity.instagramUsername || '' } } : p === 'snapchat' ? { code: spec.identity.profileId ? 'identity_snap_profile' : 'identity_snap', params: { name: spec.identity.brandName || '' } } : { code: spec.identity.displayName ? 'identity_tiktok' : 'identity_tiktok_selected', params: { name: spec.identity.displayName || '' } },
   };
   const by = {};
   for (const i of issues) { const s = sectionOf(i.field); (by[s] = by[s] || []).push(i); }
@@ -877,6 +938,7 @@ function applyChanges(pkg, platform, changes) {
   if (changes.budget != null) {
     const n = _num(changes.budget);
     if (!n) no('budget.amount', 'The budget must be a positive number.', 'budget_invalid');
+    else if (platform === 'snapchat' && n < SNAP.LIMITS.MIN_DAILY) no('budget.amount', 'Snapchat needs at least ' + SNAP.LIMITS.MIN_DAILY + ' per day.', 'snapchat_budget_min', { min: SNAP.LIMITS.MIN_DAILY });
     else if (platform === 'tiktok' && !(n > TIKTOK_MIN_ADGROUP_DAILY)) no('budget.amount', 'TikTok needs more than ' + TIKTOK_MIN_ADGROUP_DAILY + ' per day.', 'tiktok_budget_min', { min: TIKTOK_MIN_ADGROUP_DAILY });
     else {
       const v = Math.round(n * 100) / 100;
@@ -1232,6 +1294,41 @@ payloads.pinterest = {
   },
 };
 
+// Snap Marketing API v1 (developers.snap.com Ads API reference). Everything
+// is created PAUSED; money in micro-currency; country codes lowercase; ages
+// are strings (Snap's examples), max_age omitted for "no upper limit".
+payloads.snapchat = {
+  campaign(spec, adAccountId, startTime) {
+    return { campaigns: [{ name: spec.campaign.name.slice(0, SNAP.LIMITS.NAME), ad_account_id: String(adAccountId), status: 'PAUSED', start_time: startTime, buy_model: 'AUCTION', objective_v2_properties: { objective_v2_type: spec.campaign.objective } }] };
+  },
+  adSquad(spec, i, campaignId, startTime) {
+    const grp = spec.adGroups[i];
+    const lo = grp.ageMin != null ? grp.ageMin : spec.targeting.ageMin;
+    const hi = grp.ageMax != null ? grp.ageMax : spec.targeting.ageMax;
+    const demo = { min_age: String(lo) };
+    if (hi < SNAP.LIMITS.MAX_AGE_CAP) demo.max_age = String(hi);
+    return { adsquads: [{
+      campaign_id: String(campaignId), name: grp.name.slice(0, SNAP.LIMITS.NAME), type: 'SNAP_ADS', status: 'PAUSED',
+      placement_v2: { config: 'AUTOMATIC' }, billing_event: 'IMPRESSION', optimization_goal: spec.optimization.goal, bid_strategy: 'AUTO_BID',
+      daily_budget_micro: Math.round(spec.budget.perAdSquad * SNAP.MICRO), delivery_constraint: 'DAILY_BUDGET', start_time: startTime,
+      targeting: { geos: spec.targeting.countries.map((cc) => ({ country_code: String(cc).toLowerCase() })), demographics: [demo] },
+    }] };
+  },
+  creative(spec, ad, adAccountId, mediaId) {
+    const cr = {
+      ad_account_id: String(adAccountId), name: ad.name.slice(0, SNAP.LIMITS.NAME), type: 'WEB_VIEW', top_snap_media_id: String(mediaId),
+      headline: ad.snapHeadline, shareable: true, call_to_action: ad.snapCta,
+      web_view_properties: { url: withParams(spec.tracking.destinationUrl, spec.tracking.urlParams) },
+    };
+    if (spec.identity.brandName) cr.brand_name = spec.identity.brandName;
+    if (spec.identity.profileId) cr.profile_properties = { profile_id: spec.identity.profileId };
+    return { creatives: [cr] };
+  },
+  ad(spec, ad, adSquadId, creativeId) {
+    return { ads: [{ ad_squad_id: String(adSquadId), creative_id: String(creativeId), name: ad.name.slice(0, SNAP.LIMITS.NAME), type: 'REMOTE_WEBPAGE', status: 'PAUSED' }] };
+  },
+};
+
 function withParams(url, params) {
   if (!url || !params) return url;
   return url + (url.includes('?') ? '&' : '?') + params;
@@ -1269,6 +1366,7 @@ module.exports = {
   setContextLoader, loadContext,
   SPEC_VERSION, PLATFORMS, GOALS, COUNTRIES, COUNTRY_BY_ISO, LANGUAGES, GOOGLE_LANG_CODE, META_SPECIAL_CATEGORIES, META_CONVERSION_EVENTS,
   META_PLACEMENTS, PINTEREST_CONVERSION_EVENTS, GOOGLE_SNIPPET_HEADERS, TIKTOK_MIN_ADGROUP_DAILY, SUPPORT, LIVE_UNVERIFIED, G,
+  SNAPCHAT_MIN_DAILY: SNAP.LIMITS.MIN_DAILY,
   parseCountries, parseLanguages, isEu, countryName, validUrl,
   buildSpec, validate, hasErrors, applyChanges, payloads, summary, metaCta, withParams, budgetOf, destinationOf,
 };
