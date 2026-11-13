@@ -97,6 +97,16 @@
         },
       },
     },
+    // Snap Ads: full-screen vertical (9:16) image or video with a swipe-up to
+    // the website. Sales and Leads optimise for Snap Pixel events, which
+    // OrivenAI can't select yet — not offered rather than published as
+    // something else.
+    snapchat: {
+      label: 'Snapchat Ads', sub: 'Full-screen vertical Snap Ads',
+      tagline: 'Reach people between Stories and Spotlight with full-screen ads.',
+      defaultType: 'STANDARD',
+      types: { STANDARD: { label: 'Standard', goals: ['Traffic', 'Awareness'], formats: ['image', 'video'], structure: true } },
+    },
   };
 
   // Why something is unavailable — written for a first-time advertiser,
@@ -104,6 +114,9 @@
   var REASONS = {
     tiktok_goal_Sales: { message: 'TikTok sales campaigns need a TikTok Pixel purchase event, which OrivenAI can’t set up yet.', suggestion: 'Choose “Get more website visitors” on TikTok, or run a sales campaign on Meta or Google.' },
     tiktok_goal_Leads: { message: 'TikTok lead campaigns use TikTok’s own forms, which OrivenAI doesn’t support yet.', suggestion: 'Choose “Get more website visitors” on TikTok, or run a lead campaign on Meta or Google.' },
+    snapchat_goal_Sales: { message: 'Snapchat sales campaigns optimise for Snap Pixel purchases, which OrivenAI can’t set up yet.', suggestion: 'Choose “Get more website visitors” on Snapchat, or run a sales campaign on Meta or Google.' },
+    snapchat_goal_Leads: { message: 'Snapchat lead campaigns optimise for Snap Pixel sign-ups or Snapchat’s own lead forms, which OrivenAI doesn’t support yet.', suggestion: 'Choose “Get more website visitors” on Snapchat, or run a lead campaign on Meta or Google.' },
+    format_snapchat_text: { message: 'Snapchat ads are full-screen images or videos. Text-only ads don’t exist on Snapchat.', suggestion: 'Choose Image or Video.' },
     pmax_goal: { message: 'Performance Max is for sales and leads.', suggestion: 'Use Demand Gen for image ads with this goal, or a Search text ad.' },
     format_meta_video: { message: 'OrivenAI can publish image ads to Meta, but not video ads yet.', suggestion: 'Use an image ad on Meta, or make a video ad for TikTok or Pinterest.' },
     format_tiktok_image: { message: 'TikTok ads are videos. Image-only ads don’t run in the TikTok feed.', suggestion: 'Use a video ad on TikTok, or an image ad on Meta or Pinterest.' },
@@ -112,7 +125,7 @@
     format_google_image_only: { message: 'This Google ad type needs images, not text only.', suggestion: 'Choose Image, or switch to Search for a text ad.' },
     objective_unsupported: { message: 'This objective can’t be published by OrivenAI yet.', suggestion: 'Keep the standard objective for your goal.' },
     objective_video_completion: { message: 'Video Completion needs a video ad and the “Increase brand awareness” goal.', suggestion: 'Choose Video and “Increase brand awareness”, or keep the standard objective.' },
-    platform_unknown: { message: 'Choose where the ad should run: Google, Meta, TikTok or Pinterest.', suggestion: '' },
+    platform_unknown: { message: 'Choose where the ad should run: Google, Meta, TikTok, Pinterest or Snapchat.', suggestion: '' },
     type_unknown: { message: 'This Google campaign type can’t be published by OrivenAI.', suggestion: 'Use Search, Performance Max or Demand Gen.' },
     goal_unknown: { message: 'Choose what the ad should achieve.', suggestion: '' },
     structure_range: { message: 'Choose 1 to 5 ad sets or ad groups, with 1 to 5 ads in each.', suggestion: 'Use a smaller number of ads.' },
@@ -130,6 +143,7 @@
     meta_ratio: 'Meta shows feed images between 1.91:1 (wide) and 4:5 (tall). Meta may crop this image in some placements.',
     pin_wide: 'Pins look best tall (2:3). A wide image shows smaller in the Pinterest feed.',
     pin_tall: 'Pinterest cuts off Pins taller than 1:2.1 in the feed. Use a less tall image if the bottom matters.',
+    snap_frame: 'Snapchat ads fill the phone screen (9:16). When you publish, OrivenAI places this image whole on a blurred full-screen background — a tall 9:16 image fills the screen best.',
   };
   // Objectives the old Create offered that the publish code can't honour.
   var UNSUPPORTED_OBJECTIVES = ['engagement', 'app promotion', 'app_promotion', 'appromotion', 'video views', 'video_views', 'community interaction'];
@@ -197,7 +211,7 @@
       } else {
         var ti = typeInfo(p, campaignType);
         ok = !!ti && ti.formats.indexOf(f) !== -1;
-        if (!ok) reasonKey = p === 'meta' && f === 'video' ? 'format_meta_video' : (p === 'tiktok' && f === 'image' ? 'format_tiktok_image' : null);
+        if (!ok) reasonKey = p === 'meta' && f === 'video' ? 'format_meta_video' : (p === 'tiktok' && f === 'image' ? 'format_tiktok_image' : (p === 'snapchat' && f === 'text' ? 'format_snapchat_text' : null));
         type = pi.defaultType;
       }
       var r = reasonKey ? REASONS[reasonKey] : null;
@@ -251,11 +265,12 @@
     if (!fmt) { fmt = ti.formats[0]; normalized.push('format'); }
     if (p === 'google' && type === 'SEARCH' && fmt === 'image' && opts.legacy) { fmt = 'text'; normalized.push('format'); }
     if (goal && ti.goals.indexOf(goal) === -1) {
-      add(p === 'tiktok' ? 'tiktok_goal' : 'goal_type', 'goal', p === 'tiktok' ? 'tiktok_goal_' + goal : (type === 'PERFORMANCE_MAX' ? 'pmax_goal' : 'objective_unsupported'));
+      add(p === 'tiktok' || p === 'snapchat' ? p + '_goal' : 'goal_type', 'goal', p === 'tiktok' || p === 'snapchat' ? p + '_goal_' + goal : (type === 'PERFORMANCE_MAX' ? 'pmax_goal' : 'objective_unsupported'));
     }
     if (ti.formats.indexOf(fmt) === -1) {
       var fk = p === 'meta' && fmt === 'video' ? 'format_meta_video'
         : p === 'tiktok' ? 'format_tiktok_image'
+        : p === 'snapchat' ? 'format_snapchat_text'
         : p === 'google' && fmt === 'video' ? 'format_google_video'
         : p === 'google' && type === 'SEARCH' ? 'format_google_text_only'
         : p === 'google' ? 'format_google_image_only'
@@ -291,7 +306,7 @@
   //   video:  'per-ad' | 'single' | 0
   function assetsFor(p, type, fmt) {
     if (fmt === 'text') return { copy: true, images: 0, video: 0 };
-    if (fmt === 'video') return { copy: true, images: 0, video: p === 'pinterest' ? 'single' : 'per-ad' };
+    if (fmt === 'video') return { copy: true, images: 0, video: p === 'pinterest' || p === 'snapchat' ? 'single' : 'per-ad' };
     if (p === 'google') return { copy: true, images: type === 'PERFORMANCE_MAX' ? 'pmax' : 'single', video: 0 };
     return { copy: true, images: 'per-ad', video: 0 };
   }
@@ -386,6 +401,8 @@
     } else if (p === 'pinterest') {
       if (list.some(function (i) { return i.width / i.height > 1.01; })) out.push({ code: 'pin_wide', message: IMAGE_REASONS.pin_wide });
       if (list.some(function (i) { return i.height / i.width > 2.1; })) out.push({ code: 'pin_tall', message: IMAGE_REASONS.pin_tall });
+    } else if (p === 'snapchat') {
+      if (list.some(function (i) { return Math.abs(i.width / i.height - 0.5625) > 0.02; })) out.push({ code: 'snap_frame', message: IMAGE_REASONS.snap_frame });
     }
     return out;
   }
@@ -488,7 +505,7 @@
     if (!t) return [];
     state = state || {};
     var out = [];
-    var plats = { google: /\bgoogle\b/, meta: /\b(meta|facebook|instagram)\b/, tiktok: /\btik\s?tok\b/, pinterest: /\bpinterest\b/ };
+    var plats = { google: /\bgoogle\b/, meta: /\b(meta|facebook|instagram)\b/, tiktok: /\btik\s?tok\b/, pinterest: /\bpinterest\b/, snapchat: /\bsnap(chat)?\b/ };
     Object.keys(plats).forEach(function (k) {
       if (k !== state.platform && plats[k].test(t) && /\b(on|for|run|publish|use|post|advertise)\b/.test(t)) out.push({ kind: 'platform', message: 'Your note mentions ' + PLATFORMS[k].label + '. The ad is made for ' + (PLATFORMS[state.platform] ? PLATFORMS[state.platform].label : 'the platform you chose') + ' — change that in step 2 if you meant another platform.' });
     });

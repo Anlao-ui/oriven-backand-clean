@@ -12,7 +12,7 @@
 //
 //   budget.scope: 'campaign' (campaign daily budget)
 //                 'adset'   (Meta ad sets — how OrivenAI Launch publishes)
-//                 'adgroup' (TikTok / Pinterest ad groups)
+//                 'adgroup' (TikTok / Pinterest ad groups, Snapchat ad squads)
 //                 'shared'  (Google shared budget — not editable here)
 //                 'lifetime' | 'none' (not editable by a daily-% rule)
 //
@@ -28,15 +28,16 @@
 
 const B = require('./budget');
 
-const PLATFORMS = ['google', 'meta', 'tiktok', 'pinterest'];
-const PROVIDER = { google: 'google_ads', meta: 'meta_ads', tiktok: 'tiktok_ads', pinterest: 'pinterest_ads' };
-const LABEL = { google: 'Google Ads', meta: 'Meta Ads', tiktok: 'TikTok Ads', pinterest: 'Pinterest Ads' };
+const PLATFORMS = ['google', 'meta', 'tiktok', 'pinterest', 'snapchat'];
+const PROVIDER = { google: 'google_ads', meta: 'meta_ads', tiktok: 'tiktok_ads', pinterest: 'pinterest_ads', snapchat: 'snapchat_ads' };
+const LABEL = { google: 'Google Ads', meta: 'Meta Ads', tiktok: 'TikTok Ads', pinterest: 'Pinterest Ads', snapchat: 'Snapchat Ads' };
 
 const CAPABILITIES = {
   google:    { status: true, budget: true, budgetScopes: ['campaign'], notes: ['Shared budgets are never changed by a rule (they affect other campaigns).'] },
   meta:      { status: true, budget: true, budgetScopes: ['campaign', 'adset'], notes: ['Ad-set budgets (how OrivenAI publishes) are scaled together; lifetime budgets are not changed.'] },
   tiktok:    { status: true, budget: true, budgetScopes: ['campaign', 'adgroup'], notes: ['Total (lifetime) budgets are not changed.'] },
   pinterest: { status: true, budget: true, budgetScopes: ['campaign', 'adgroup'], notes: ['Lifetime spend caps are not changed.'] },
+  snapchat:  { status: true, budget: true, budgetScopes: ['campaign', 'adgroup'], notes: ['Ad squad daily budgets (how OrivenAI publishes) are scaled together; lifetime budgets are not changed. Conversions aren’t reported (no Snap Pixel in OrivenAI yet).'] },
 };
 
 function ymd(ms) { return new Date(ms).toISOString().slice(0, 10); }
@@ -391,7 +392,77 @@ function create(d) {
     },
   };
 
-  return { google, meta, tiktok, pinterest };
+  // ── Snapchat Ads ────────────────────────────────────────────────
+  // Snap Marketing API v1: campaign → ad squads. Budgets in micro-currency;
+  // status/budget changes are full-object PUTs (services/snapchatAds.js).
+  const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+  const snapStatus = (s) => s === 'ACTIVE' ? 'active' : s === 'PAUSED' ? 'paused' : s === 'DELETED' ? 'archived' : 'other';
+  const snapchat = {
+    async account(user) {
+      const a = await d._getSnapchatAccess(user);
+      return { access: a, accountId: String(a.adAccountId), currency: a.currency || null, timezone: a.timezone || null };
+    },
+    _budget(c, squads, currency) {
+      const M = 1e6;
+      if (n(c.daily_budget_micro) > 0) return { scope: 'campaign', amount: n(c.daily_budget_micro) / M, currency, items: [], editable: !!currency, reason: currency ? undefined : 'unknown_currency' };
+      const own = squads.filter((s) => String(s.campaign_id) === String(c.id) && s.status !== 'DELETED');
+      if (!own.length) return { scope: n(c.lifetime_spend_cap_micro) > 0 ? 'lifetime' : 'none', amount: n(c.lifetime_spend_cap_micro) > 0 ? n(c.lifetime_spend_cap_micro) / M : null, currency, items: [], editable: false, reason: n(c.lifetime_spend_cap_micro) > 0 ? 'lifetime_budget' : 'no_budget' };
+      if (own.some((s) => !(n(s.daily_budget_micro) > 0))) return { scope: 'adgroup', amount: null, currency, items: [], editable: false, reason: 'lifetime_budget' };
+      const items = own.map((s) => ({ id: String(s.id), name: s.name || '', amount: n(s.daily_budget_micro) / M }));
+      return { scope: 'adgroup', amount: B.round(items.reduce((t, i) => t + i.amount, 0), currency), currency, items, editable: !!currency, reason: currency ? undefined : 'unknown_currency' };
+    },
+    async listCampaigns(user, days) {
+      const acc = await snapchat.account(user);
+      const SN = d._snapchat();
+      const t = acc.access.accessToken, ad = acc.accountId;
+      const camps = await SN.listAll(t, '/adaccounts/' + encodeURIComponent(ad) + '/campaigns', 'campaigns', 'campaign');
+      const squads = await SN.listAll(t, '/adaccounts/' + encodeURIComponent(ad) + '/adsquads', 'adsquads', 'adsquad');
+      const list = camps.filter((c) => snapStatus(c.status) !== 'archived').map((c) => ({ id: String(c.id), name: c.name || '', status: snapStatus(c.status), rawStatus: c.status || '', metrics: null, budget: snapchat._budget(c, squads, acc.currency) }));
+      if (days && list.length) {
+        const w = windowDates(days);
+        try {
+          const st = await SN.campaignStats(t, { id: ad, timezone: acc.timezone }, w.since, w.until);
+          list.forEach((c) => {
+            const r = st.byCampaign[c.id];
+            c.metrics = r ? { spend: r.spend, impressions: r.impressions, clicks: r.clicks, conversions: 0, conversionValue: null } : { spend: 0, impressions: 0, clicks: 0, conversions: 0, conversionValue: null };
+          });
+        } catch (err) { list.forEach((c) => { c.metrics = null; c.metricsError = classifyError(err).kind; }); }
+      }
+      return { account: { id: ad, currency: acc.currency, timezone: acc.timezone }, campaigns: list };
+    },
+    async getCampaign(user, id) {
+      if (!UUID.test(String(id))) return null;
+      const acc = await snapchat.account(user);
+      const SN = d._snapchat();
+      const t = acc.access.accessToken;
+      let c;
+      try { c = await SN.getCampaign(t, id); } catch (err) { if (err.status === 404) return null; throw err; }
+      if (!c || String(c.ad_account_id) !== acc.accountId) return null;
+      const squads = await SN.listAll(t, '/campaigns/' + encodeURIComponent(id) + '/adsquads', 'adsquads', 'adsquad');
+      return { id: String(c.id), name: c.name || '', status: snapStatus(c.status), rawStatus: c.status || '', metrics: null, budget: snapchat._budget(c, squads, acc.currency), accountId: acc.accountId };
+    },
+    async setStatus(user, id, status) {
+      const acc = await snapchat.account(user);
+      await d._snapchat().updateCampaign(acc.access.accessToken, acc.accountId, id, { status: status === 'active' ? 'ACTIVE' : 'PAUSED' });
+    },
+    async setBudget(user, campaign, change) {
+      const acc = await snapchat.account(user);
+      const SN = d._snapchat();
+      const t = acc.access.accessToken;
+      if (campaign.budget.scope === 'campaign') {
+        await SN.updateCampaign(t, acc.accountId, campaign.id, { daily_budget_micro: Math.round(change.next * 1e6) });
+        return [{ id: campaign.id, previous: change.previous, next: change.next }];
+      }
+      if (campaign.budget.scope !== 'adgroup') throw Object.assign(new Error('This budget can’t be changed by an automation.'), { kind: 'platform' });
+      const items = B.scaleItems(campaign.budget.items, change.previous, change.next, campaign.budget.currency);
+      // Snap's minimum is 5 per ad squad per day (all currencies).
+      if (items.some((i) => i.next < 5)) throw Object.assign(new Error('Snapchat needs at least 5 per day for each ad squad; this change would go below that.'), { status: 400 });
+      for (const i of items) await SN.updateAdSquad(t, i.id, { daily_budget_micro: Math.round(i.next * 1e6) });
+      return items;
+    },
+  };
+
+  return { google, meta, tiktok, pinterest, snapchat };
 }
 
 module.exports = { PLATFORMS, PROVIDER, LABEL, CAPABILITIES, create, classifyError, windowDates };

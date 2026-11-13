@@ -98,7 +98,7 @@ function createEngine(deps) {
   const killed = () => (deps.killSwitch ? !!deps.killSwitch() : false);
   // Launch's activation (services/campaignActivation.js), injected by server.js.
   const activateCampaign = deps.activateCampaign || null;
-  const ACTIVATED_PLATFORMS = ['meta', 'tiktok', 'pinterest'];
+  const ACTIVATED_PLATFORMS = ['meta', 'tiktok', 'pinterest', 'snapchat'];
 
   // ── Settings ─────────────────────────────────────────────────────
   async function getSettings(userId) {

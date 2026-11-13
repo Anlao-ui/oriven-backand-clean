@@ -13,7 +13,7 @@ Every route below returns `401` when called without a valid token, verified via 
 
 ## Platform connections
 
-`/api/google/*` (`auth-url`, `status`, `accounts`, `active-account`, `disconnect`, `diag`), `/auth/google`, `/auth/google/callback`, and the equivalent `/api/meta/*`/`/auth/meta*` and `/api/tiktok/*`/`/auth/tiktok*` sets.
+`/api/google/*` (`auth-url`, `status`, `accounts`, `active-account`, `disconnect`, `diag`), `/auth/google`, `/auth/google/callback`, and the equivalent `/api/meta/*`/`/auth/meta*` and `/api/tiktok/*`/`/auth/tiktok*` sets. Snapchat Ads: `/auth/snapchat`, `/auth/snapchat/callback`, `/api/snapchat/{auth-url,status,accounts,active-account,public-profile,disconnect,campaigns,overview}`, `POST /api/snapchat/campaign/:id/{pause,resume}`, `POST /api/publish/snapchat`.
 
 ## Campaign management (Google/Meta/TikTok)
 

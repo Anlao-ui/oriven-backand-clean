@@ -28,6 +28,7 @@ Extracted directly from `process.env.*` references across `server.js`, `provider
 | `META_APP_ID` / `META_APP_SECRET` / `META_REDIRECT_URI` | Meta OAuth. |
 | `TIKTOK_APP_ID` / `TIKTOK_APP_SECRET` / `TIKTOK_REDIRECT_URI` | TikTok OAuth. |
 | `PINTEREST_APP_ID` / `PINTEREST_APP_SECRET` / `PINTEREST_REDIRECT_URI` | Pinterest OAuth. Without id + secret, `/api/pinterest/auth-url` answers 503. |
+| `SNAPCHAT_CLIENT_ID` / `SNAPCHAT_CLIENT_SECRET` / `SNAPCHAT_REDIRECT_URI` | Snapchat Ads OAuth (Snap Business Manager → Business Details → OAuth Apps; scope `snapchat-marketing-api`). The redirect URI must match the one registered on the Snap app exactly; on Render it defaults to `https://oriven-backand-clean.onrender.com/auth/snapchat/callback`. Without id + secret every Snapchat route answers "not configured" (503). |
 
 ## Billing
 

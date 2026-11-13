@@ -1,8 +1,8 @@
 // ════════════════════════════════════════════════════════════════
-// Campaign spec + publishing routes (Meta, Google Ads, TikTok, Pinterest).
+// Campaign spec + publishing routes (Meta, Google Ads, TikTok, Pinterest, Snapchat).
 //
 //   POST /api/campaigns/spec        build + validate the complete campaign
-//   POST /api/publish/meta|google|tiktok|pinterest
+//   POST /api/publish/meta|google|tiktok|pinterest|snapchat
 //
 // Every publish:
 //   1. builds the spec from the package + business profile + the user's
@@ -94,6 +94,15 @@ module.exports = function registerPublishRoutes(app, d) {
           const list = Array.isArray(t) ? t : (t && t.items) || [];
           options.conversionTags = list.map((x) => ({ id: String(x.id), name: x.name || String(x.id) }));
         } catch (_) {}
+      } else if (platform === 'snapchat') {
+        access = await d.getSnapchatAccess(user);
+        options.connected = true;
+        options.currency = access.currency || null;
+        options.profileId = access.profileId || null;
+        try {
+          const a = d.snapchat().items(await access.request('GET', '/adaccounts/' + encodeURIComponent(access.adAccountId)), 'adaccounts', 'adaccount')[0];
+          if (a) { options.currency = a.currency || options.currency; options.timezone = a.timezone || null; }
+        } catch (_) {}
       }
     } catch (err) {
       options.connected = false;
@@ -107,6 +116,7 @@ module.exports = function registerPublishRoutes(app, d) {
   function publicOptions(o) {
     const out = {};
     for (const k of ['connected', 'currency', 'pixels', 'conversionTags', 'instagramUsername', 'pageId', 'identityName', 'conversionActions', 'connectionError', 'connectionCode']) if (o[k] != null) out[k] = o[k];
+    if (o.profileId !== undefined) out.publicProfileSet = !!o.profileId;
     return out;
   }
 
@@ -129,6 +139,7 @@ module.exports = function registerPublishRoutes(app, d) {
     googleSnippetHeaders: S.GOOGLE_SNIPPET_HEADERS,
     tiktokGoals: S.SUPPORT.tiktok.goals,
     tiktokMinDaily: S.TIKTOK_MIN_ADGROUP_DAILY,
+    snapchatMinDaily: S.SNAPCHAT_MIN_DAILY,
   };
 
   // ── POST /api/campaigns/spec ─────────────────────────────────────
@@ -258,7 +269,7 @@ module.exports = function registerPublishRoutes(app, d) {
     for (const [what, id, fn] of steps) { try { await fn(); } catch (e) { leftovers.push({ what, id: String(id) }); } }
     return { complete: !leftovers.length, leftovers };
   }
-  const platformLabel = (p) => ({ meta: 'Meta Ads', google: 'Google Ads', tiktok: 'TikTok Ads', pinterest: 'Pinterest Ads' }[p]);
+  const platformLabel = (p) => ({ meta: 'Meta Ads', google: 'Google Ads', tiktok: 'TikTok Ads', pinterest: 'Pinterest Ads', snapchat: 'Snapchat Ads' }[p]);
 
   // ════════════════════════════════════════════════════════════════
   // META — Marketing API (version from META_GRAPH, v25.0)
@@ -640,6 +651,91 @@ module.exports = function registerPublishRoutes(app, d) {
   });
 
   // ════════════════════════════════════════════════════════════════
+  // SNAPCHAT — Snap Marketing API v1
+  //   media (Top Snap 1080×1920) → campaign → ad squad(s) → WEB_VIEW
+  //   creative per ad → ad (REMOTE_WEBPAGE). Everything PAUSED. Media is
+  //   uploaded first so a bad image/video fails before anything is created.
+  //   Rollback deletes the ads, ad squads and campaign it created; Snap has
+  //   no delete for creatives or media — those stay in the ad account's
+  //   library, unused, and never deliver.
+  // ════════════════════════════════════════════════════════════════
+  async function snapVideoBytes(url) {
+    const r = await require('../services/safeFetch').safeFetch(url);
+    if (!r.ok) throw Object.assign(new Error('Could not download the campaign video (HTTP ' + r.status + '). Generate or upload it again.'), { status: 422 });
+    const ct = String(r.headers.get('content-type') || '').split(';')[0].trim().toLowerCase();
+    const buf = Buffer.from(await r.arrayBuffer());
+    const isMov = ct === 'video/quicktime' || /\.mov(\?|$)/i.test(url);
+    if (ct && !/^video\/(mp4|quicktime)$/.test(ct) && !/octet-stream/.test(ct)) throw Object.assign(new Error('Snapchat accepts MP4 or MOV videos (this file is "' + ct + '").'), { status: 422 });
+    return { buffer: buf, contentType: isMov ? 'video/quicktime' : 'video/mp4', fileName: isMov ? 'orivenai-video.mov' : 'orivenai-video.mp4' };
+  }
+  app.post('/api/publish/snapchat', d.requireSubOrFreeStrict, async (req, res) => {
+    let prep = null;
+    const created = { campaignId: null, adSquadIds: [], adIds: [], creativeIds: [], mediaIds: [] };
+    try {
+      prep = await prepare(req, res, 'snapchat');
+      if (!prep) return;
+      const { spec, access, user } = prep;
+      const SN = d.snapchat();
+      const acct = access.adAccountId;
+      const call = (m, p, b) => access.request(m, p, b);
+      const tok = () => access.accessToken;
+
+      // 1. Media
+      const mediaFor = {};
+      if (spec.creative.format === 'VIDEO') {
+        const v = await snapVideoBytes(spec.creative.videoUrl);
+        const id = await SN.uploadMedia(tok(), acct, { type: 'VIDEO', name: spec.campaign.name + ' — video', buffer: v.buffer, fileName: v.fileName, contentType: v.contentType });
+        created.mediaIds.push(id); mediaFor.__video = id;
+      } else {
+        const urls = Array.from(new Set(spec.adGroups.flatMap((g) => g.ads.map((a) => a.imageUrl)).concat([spec.creative.imageUrl]).filter(Boolean)));
+        for (const u of urls) {
+          const framed = await SN.topSnapImage(await img.fetchImage(u));
+          const id = await SN.uploadMedia(tok(), acct, { type: 'IMAGE', name: spec.campaign.name + ' — image ' + (urls.indexOf(u) + 1), buffer: framed, fileName: 'orivenai-image.jpg', contentType: 'image/jpeg' });
+          created.mediaIds.push(id); mediaFor[u] = id;
+        }
+      }
+      const mediaOf = (ad) => mediaFor.__video || mediaFor[ad.imageUrl] || mediaFor[spec.creative.imageUrl];
+
+      // 2. Campaign, 3. ad squads → creative + ad per ad
+      const start = new Date(Date.now() + 60 * 1000).toISOString();
+      const camp = SN.created(await call('POST', '/adaccounts/' + encodeURIComponent(acct) + '/campaigns', S.payloads.snapchat.campaign(spec, acct, start)), 'campaigns', 'campaign');
+      created.campaignId = String(camp.id);
+      const squadsOut = [], adsOut = [];
+      for (let i = 0; i < spec.adGroups.length; i++) {
+        const sq = SN.created(await call('POST', '/campaigns/' + encodeURIComponent(camp.id) + '/adsquads', S.payloads.snapchat.adSquad(spec, i, camp.id, start)), 'adsquads', 'adsquad');
+        created.adSquadIds.push(String(sq.id));
+        squadsOut.push({ id: String(sq.id), name: spec.adGroups[i].name });
+        for (const ad of spec.adGroups[i].ads) {
+          const mediaId = mediaOf(ad);
+          if (!mediaId) throw Object.assign(new Error('No image or video was uploaded for ' + ad.name + '.'), { status: 422 });
+          const cr = SN.created(await call('POST', '/adaccounts/' + encodeURIComponent(acct) + '/creatives', S.payloads.snapchat.creative(spec, ad, acct, mediaId)), 'creatives', 'creative');
+          created.creativeIds.push(String(cr.id));
+          const a = SN.created(await call('POST', '/adsquads/' + encodeURIComponent(sq.id) + '/ads', S.payloads.snapchat.ad(spec, ad, sq.id, cr.id)), 'ads', 'ad');
+          created.adIds.push(String(a.id));
+          adsOut.push({ id: String(a.id), adSquadId: String(sq.id), creativeId: String(cr.id), reviewStatus: a.review_status || null });
+        }
+      }
+      d.logCampaignEvent(user, { platform: 'snapchat', campaignName: spec.campaign.name, title: 'Published "' + spec.campaign.name + '" to Snapchat Ads', detail: 'Campaign created, paused, ready for review (' + squadsOut.length + ' ad squad(s), ' + adsOut.length + ' ad(s)). Snapchat reviews new ads before they deliver.', severity: 'low' });
+      const acctSn = await succeed(prep, 'snapchat', { campaignId: created.campaignId, adSetIds: created.adSquadIds, adIds: created.adIds });
+      return res.json(Object.assign({ ok: true, platform: 'snapchat', status: 'paused', campaignId: created.campaignId, adSquads: squadsOut, ads: adsOut, summary: S.summary(spec) }, acctSn));
+    } catch (err) {
+      let rb = null;
+      if (prep && prep.access) {
+        const SN = d.snapchat();
+        const t = prep.access.accessToken;
+        const steps = [];
+        created.adIds.forEach((id) => steps.push(['ad', id, () => SN.remove(t, 'ads', id)]));
+        created.adSquadIds.forEach((id) => steps.push(['ad squad', id, () => SN.remove(t, 'adsquads', id)]));
+        if (created.campaignId) steps.push(['campaign', created.campaignId, () => SN.remove(t, 'campaigns', created.campaignId)]);
+        rb = await rollbackAll(steps);
+      }
+      return fail(res, 'snapchat', prep, err, rb);
+    } finally {
+      if (prep) d.releasePublishLock(prep.lockKey);
+    }
+  });
+
+  // ════════════════════════════════════════════════════════════════
   // POST /api/publish/:platform/status — what happened to this campaign's
   // publish. Read-only towards the platform: it never creates anything.
   //   { campId }                       → the recorded state; for an
@@ -668,11 +764,15 @@ module.exports = function registerPublishRoutes(app, d) {
       const list = (r && (r.list || r)) || [];
       return (Array.isArray(list) ? list : []).filter((c) => c.campaign_name === name && fresh(c.create_time) && c.operation_status !== 'DELETE' && c.secondary_status !== 'CAMPAIGN_STATUS_DELETE').map((c) => ({ id: String(c.campaign_id), status: c.operation_status || null }));
     }
+    if (platform === 'snapchat') {
+      const list = d.snapchat().items(await access.request('GET', '/adaccounts/' + encodeURIComponent(access.adAccountId) + '/campaigns?limit=500'), 'campaigns', 'campaign');
+      return list.filter((c) => c.name === name && c.status !== 'DELETED' && fresh(c.created_at)).map((c) => ({ id: String(c.id), status: c.status || null }));
+    }
     const r = await d.pinterestApiRequest(access.accessToken, 'GET', '/ad_accounts/' + access.adAccountId + '/campaigns?page_size=250');
     const list = Array.isArray(r) ? r : (r && r.items) || [];
     return list.filter((c) => c.name === name && c.status !== 'ARCHIVED' && fresh(c.created_time)).map((c) => ({ id: String(c.id), status: c.status || null }));
   }
-  const ACCESS = { meta: (u) => d.getMetaAccess(u), google: (u) => d.getGadsAccess(u), tiktok: (u) => d.getTikTokAccess(u), pinterest: (u) => d.getPinterestAccess(u) };
+  const ACCESS = { meta: (u) => d.getMetaAccess(u), google: (u) => d.getGadsAccess(u), tiktok: (u) => d.getTikTokAccess(u), pinterest: (u) => d.getPinterestAccess(u), snapchat: (u) => d.getSnapchatAccess(u) };
 
   app.post('/api/publish/:platform/status', async (req, res) => {
     const platform = req.params.platform;
