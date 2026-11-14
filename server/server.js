@@ -11954,9 +11954,21 @@ setInterval(function() {
 }, 5 * 60 * 1000).unref();
 function _snapNewState(userId) {
   const state = crypto.randomBytes(16).toString('hex');
-  _snapchatOAuthStates.set(state, { userId, expires: Date.now() + 10 * 60 * 1000 });
+  _snapchatOAuthStates.set(state, { userId, createdAt: Date.now(), expires: Date.now() + 10 * 60 * 1000 });
   return state;
 }
+// Callback bookkeeping for diagnosis (memory only, 15 minutes): states that
+// were already used (a second callback with the same state is refused and
+// reported as such) and a short SHA-256 fingerprint of every code this server
+// already sent to Snap (never the code itself) — so a reused or double-
+// delivered code is told apart from one Snap expired or never accepted.
+const _snapUsedStates = new Map();   // state -> { at, count }
+const _snapSentCodes = new Map();    // sha256(code)[0..16] -> at
+setInterval(function() {
+  const cut = Date.now() - 15 * 60 * 1000;
+  for (const [k, v] of _snapUsedStates.entries()) if (v.at < cut) _snapUsedStates.delete(k);
+  for (const [k, v] of _snapSentCodes.entries()) if (v < cut) _snapSentCodes.delete(k);
+}, 5 * 60 * 1000).unref();
 function _snapError(res, where, err) {
   const status = err && err.status >= 400 && err.status < 600 ? err.status : 500;
   console.error('[Snapchat ' + where + ']', status, (err && err.code) || '-', SNAP.redact(err && err.message));
@@ -12022,21 +12034,50 @@ app.get('/auth/snapchat/callback', async (req, res) => {
     return back('snapchat_error=' + encodeURIComponent(String(error).slice(0, 60)));
   }
   if (!code || !state) return back('snapchat_error=missing_params');
-  const st = _snapchatOAuthStates.get(String(state));
-  _snapchatOAuthStates.delete(String(state));
-  if (!st || st.expires < Date.now()) return back('snapchat_error=invalid_state');
+  const stateKey = String(state);
+  const st = _snapchatOAuthStates.get(stateKey);
+  _snapchatOAuthStates.delete(stateKey);
+  if (!st || st.expires < Date.now()) {
+    const used = _snapUsedStates.get(stateKey);
+    if (used) {
+      used.count++;
+      console.warn('[Snapchat OAuth] callback invoked again with an already-used state | invocation:', used.count, '| ms since first:', Date.now() - used.at);
+      return back('snapchat_error=invalid_state&snapchat_reason=state_already_used&snapchat_attempt=' + used.count);
+    }
+    return back('snapchat_error=invalid_state');
+  }
+  _snapUsedStates.set(stateKey, { at: Date.now(), count: 1 });
   const cfg = _snapCfg();
   if (!cfg.configured) return back('snapchat_error=not_configured');
 
+  // The code exactly as received. OAuth codes never contain spaces; a space
+  // can only be a '+' that query decoding turned into one, so it is put back.
+  let codeStr = String(Array.isArray(code) ? code[0] : code);
+  const codeHadSpace = /\s/.test(codeStr);
+  if (codeHadSpace) codeStr = codeStr.replace(/ /g, '+');
+  const fp = crypto.createHash('sha256').update(codeStr).digest('hex').slice(0, 16);
+  const codeAgeS = Math.round((Date.now() - (st.createdAt || Date.now())) / 1000);
+  const alreadySent = _snapSentCodes.has(fp);
+  _snapSentCodes.set(fp, Date.now());
+
   let tokens;
-  try { tokens = await SNAP.exchangeCode(cfg, String(code)); }
+  try { tokens = await SNAP.exchangeCode(cfg, codeStr); }
   catch (err) {
     // err.reason is Snap's OAuth error code (invalid_client, invalid_grant, …)
-    // from a fixed list — never a token, code or secret. Logged and passed to
-    // the app so the user (and support) can see why the sign-in failed.
+    // from a fixed list; err.diag is Snap's cleaned answer (status,
+    // error_description, request-id headers) — never a token, code or secret.
     const reason = /^[a-z0-9_]{1,40}$/.test(String(err.reason || '')) ? err.reason : 'unknown';
-    console.error('[Snapchat OAuth] token exchange failed | user:', st.userId, '| reason:', reason, '| redirect_uri:', cfg.redirectUri);
-    return back('snapchat_error=' + (err.code === 'NETWORK' ? 'network' : 'token_exchange') + '&snapchat_reason=' + encodeURIComponent(reason));
+    const d = err.diag || {};
+    console.error('[Snapchat OAuth] token exchange failed', JSON.stringify({ user: st.userId, reason, status: d.status || null, description: d.description || null,
+      contentType: d.contentType || null, headers: d.headers || {}, request: d.request || null, redirectUri: cfg.redirectUri,
+      codeLength: codeStr.length, codeHadSpace, codeAgeSeconds: codeAgeS, codeSentBefore: alreadySent, callbackInvocation: 1 }));
+    const q = ['snapchat_error=' + (err.code === 'NETWORK' ? 'network' : 'token_exchange'), 'snapchat_reason=' + encodeURIComponent(reason)];
+    if (d.status) q.push('snapchat_status=' + encodeURIComponent(String(d.status)));
+    if (d.description) q.push('snapchat_detail=' + encodeURIComponent(d.description));
+    q.push('snapchat_code_age=' + codeAgeS, 'snapchat_code_len=' + codeStr.length);
+    if (codeHadSpace) q.push('snapchat_code_space=1');
+    if (alreadySent) q.push('snapchat_code_reused=1');
+    return back(q.join('&'));
   }
   const disc = await SNAP.discoverAccounts(tokens.accessToken);
 

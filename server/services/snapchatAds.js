@@ -96,8 +96,34 @@ async function _tokenPost(cfg, fields, fetchImpl, auth) {
   try { r = await f(AUTH_BASE + '/access_token', { method: 'POST', headers, body: new URLSearchParams(form).toString() }); }
   catch (e) { throw new SnapError('Could not reach Snapchat to sign in (' + redact(e.message) + ').', 502, { code: 'NETWORK', reason: 'network' }); }
   let j = {};
-  try { j = await r.json(); } catch (_) { j = {}; }
-  return { ok: r.ok && !!j.access_token, status: r.status, j };
+  const text = await r.text().catch(() => '');
+  try { j = text ? JSON.parse(text) : {}; } catch (_) { j = {}; }
+  return { ok: r.ok && !!j.access_token, status: r.status, j, diag: tokenDiag(r, j, text, auth) };
+}
+
+// What a refused token request can safely tell us: HTTP status, Snap's error
+// and error_description (cleaned, length-capped, long token-like runs
+// removed), the response content type, request-id style headers, and how the
+// request was sent. Never the code, a token, the secret or the request body.
+function cleanText(s, max) {
+  return String(s == null ? '' : s)
+    .replace(/[A-Za-z0-9_\-+/=.]{24,}/g, '[…]')
+    .replace(/[^A-Za-z0-9 .,:;'()_\-[\]…]/g, ' ')
+    .replace(/\s+/g, ' ').trim().slice(0, max || 160);
+}
+function tokenDiag(r, j, text, auth) {
+  const h = (n) => { try { return r.headers && r.headers.get ? r.headers.get(n) : null; } catch (_) { return null; } };
+  const ids = {};
+  ['x-request-id', 'x-snap-request-id', 'x-envoy-upstream-service-time', 'www-authenticate', 'date'].forEach((n) => { const v = h(n); if (v) ids[n] = cleanText(v, 80); });
+  return {
+    status: r.status,
+    error: cleanText(j && j.error, 40) || null,
+    description: cleanText(j && j.error_description, 160) || null,
+    contentType: cleanText(h('content-type'), 60) || null,
+    jsonBody: !!(text && j && Object.keys(j).length),
+    headers: ids,
+    request: { method: 'POST', contentType: 'application/x-www-form-urlencoded', clientAuth: auth === 'basic' ? 'basic' : 'body' },
+  };
 }
 async function _tokenRequest(cfg, fields, fetchImpl) {
   let res = await _tokenPost(cfg, fields, fetchImpl, 'body');
@@ -107,7 +133,7 @@ async function _tokenRequest(cfg, fields, fetchImpl) {
   if (!res.ok) {
     const reason = oauthReason(res.status, res.j);
     const reconnect = ['invalid_grant', 'invalid_client', 'unauthorized_client'].includes(reason);
-    throw new SnapError('Snapchat refused the sign-in (' + reason + ').', reconnect || res.status === 400 || res.status === 401 ? 401 : 502, { code: reconnect ? 'RECONNECT_REQUIRED' : 'TOKEN_FAILED', reason });
+    throw new SnapError('Snapchat refused the sign-in (' + reason + ').', reconnect || res.status === 400 || res.status === 401 ? 401 : 502, { code: reconnect ? 'RECONNECT_REQUIRED' : 'TOKEN_FAILED', reason, diag: res.diag });
   }
   const j = res.j;
   return { accessToken: j.access_token, refreshToken: j.refresh_token || null, expiresIn: Number(j.expires_in) || 3600 };
@@ -371,7 +397,7 @@ function ctaFor(text, goal) {
 
 module.exports = {
   AUTH_BASE, API, SCOPE, PROVIDER, PROD_REDIRECT, DEV_REDIRECT, MICRO, LIMITS, WEB_VIEW_CTAS, GOAL_CONFIG,
-  config, authorizeUrl, exchangeCode, refreshAccessToken, checkCredentials, oauthReason, request, items, created, listAll, subError, redact, SnapError,
+  config, authorizeUrl, exchangeCode, refreshAccessToken, checkCredentials, oauthReason, cleanText, request, items, created, listAll, subError, redact, SnapError,
   discoverAccounts, getCampaign, getAdSquad, getAd, updateCampaign, updateAdSquad, updateAd, remove,
   topSnapImage, uploadMedia, zonedMidnight, addDays, campaignStats, dailySeries, ctaFor,
 };
