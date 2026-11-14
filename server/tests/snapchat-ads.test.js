@@ -427,7 +427,9 @@ const future = () => new Date(Date.now() + 3600e3).toISOString();
     check('M.10 config-check with a wrong secret: rejected (invalid_client)', bad.body.credentials === 'rejected' && bad.body.snapReason === 'invalid_client', bad.body);
     P.tokenCalls.length = 0;
     await H.call('GET', '/api/snapchat/config-check'); await H.call('GET', '/api/snapchat/config-check');
-    check('M.11 config-check is cached (no Snap request for repeated checks)', P.tokenCalls.length <= 1, P.tokenCalls.length);
+    check('M.11 config-check is cached (one check = 2 Snap requests at most, repeated checks add none)', P.tokenCalls.length <= 2, P.tokenCalls.length);
+    const sv = await H.call('GET', '/api/snapchat/config-check');
+    check('M.12 config-check proves the secret: a deliberately wrong secret gets invalid_client (Snap checks the secret before the code)', sv.body.secretVerified === true && sv.body.wrongSecretReason === 'invalid_client' && /^snap…t-id$/.test(sv.body.clientIdHint) && !/snap-secret/.test(JSON.stringify(sv.body)), sv.body);
   }
 
   log('\nN. invalid_grant diagnostics (production: snapchat_reason=invalid_grant)');
