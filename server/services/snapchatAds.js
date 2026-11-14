@@ -138,7 +138,26 @@ async function _tokenRequest(cfg, fields, fetchImpl) {
   const j = res.j;
   return { accessToken: j.access_token, refreshToken: j.refresh_token || null, expiresIn: Number(j.expires_in) || 3600 };
 }
-const exchangeCode = (cfg, code, fetchImpl) => _tokenRequest(cfg, { grant_type: 'authorization_code', code, redirect_uri: cfg.redirectUri }, fetchImpl);
+// redirectUri: the exact URI the code was issued for (RFC 6749 §4.1.3:
+// "identical" to the authorization request's; Snap: "Must match redirect_uri
+// from the previous /authorize call"). Defaults to the configured one.
+const exchangeCode = (cfg, code, fetchImpl, redirectUri) => _tokenRequest(cfg, { grant_type: 'authorization_code', code, redirect_uri: redirectUri || cfg.redirectUri }, fetchImpl);
+
+// The redirect URI to send at the token exchange, given the path Snapchat
+// actually redirected the browser to. Express routes match loosely (a
+// trailing slash and letter case are ignored), so a callback can arrive at
+// "/auth/snapchat/callback/" while the configured URI has no slash — the
+// code is then bound to the URI Snap used, not the configured one. Only a
+// variant of the configured callback (same origin, same path ignoring one
+// trailing slash and case) is accepted; anything else keeps the configured URI.
+function exchangeRedirectUri(cfg, actualPath) {
+  let conf;
+  try { conf = new URL(cfg.redirectUri); } catch (_) { return { uri: cfg.redirectUri, variant: false }; }
+  const p = String(actualPath || '');
+  const norm = (s) => s.replace(/\/$/, '').toLowerCase();
+  if (!p || p === conf.pathname || norm(p) !== norm(conf.pathname) || !/^\/[A-Za-z0-9/_\-]*$/.test(p)) return { uri: cfg.redirectUri, variant: false };
+  return { uri: conf.origin + p, variant: true };
+}
 const refreshAccessToken = (cfg, refreshToken, fetchImpl) => _tokenRequest(cfg, { grant_type: 'refresh_token', refresh_token: refreshToken }, fetchImpl);
 
 // Does Snap accept the configured app credentials? One token request with a
@@ -397,7 +416,7 @@ function ctaFor(text, goal) {
 
 module.exports = {
   AUTH_BASE, API, SCOPE, PROVIDER, PROD_REDIRECT, DEV_REDIRECT, MICRO, LIMITS, WEB_VIEW_CTAS, GOAL_CONFIG,
-  config, authorizeUrl, exchangeCode, refreshAccessToken, checkCredentials, oauthReason, cleanText, request, items, created, listAll, subError, redact, SnapError,
+  config, authorizeUrl, exchangeCode, exchangeRedirectUri, refreshAccessToken, checkCredentials, oauthReason, cleanText, request, items, created, listAll, subError, redact, SnapError,
   discoverAccounts, getCampaign, getAdSquad, getAd, updateCampaign, updateAdSquad, updateAd, remove,
   topSnapImage, uploadMedia, zonedMidnight, addDays, campaignStats, dailySeries, ctaFor,
 };

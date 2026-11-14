@@ -29,7 +29,7 @@ const uuid = () => { n++; const h = n.toString(16).padStart(12, '0'); return 'aa
 let P;
 function reset() {
   P = {
-    valid: { 'snap-access-1': true }, tokenCalls: [], basicOnly: false, secret: 'snap-secret-value', redeemed: {}, singleUse: false, codeOk: 'good-code', refreshOk: true, refreshReturnsNew: true,
+    valid: { 'snap-access-1': true }, tokenCalls: [], basicOnly: false, secret: 'snap-secret-value', redeemed: {}, singleUse: false, registered: null, codeOk: 'good-code', refreshOk: true, refreshReturnsNew: true,
     camps: {}, squads: {}, ads: {}, creatives: {}, media: {}, uploads: [], puts: [], deletes: [], posts: [], gets: [],
     failAdCreate: false, failStats: false, statsAuth: [],
   };
@@ -52,6 +52,7 @@ H.net.handler = async (url, opts) => {
     if (!secretOk) return json({ error: 'invalid_client', error_description: 'Invalid client.', state: '' }, 400);
     if (f.get('grant_type') === 'authorization_code') {
       const cd = f.get('code');
+      if (P.registered && f.get('redirect_uri') !== P.registered) return json({ error: 'invalid_grant', error_description: 'Invalid code.', state: '' }, 400);
       if (cd === 'expired-code') return json({ error: 'invalid_grant', error_description: 'Authorization code has expired.', state: '' }, 400);
       if (P.redeemed[cd]) return json({ error: 'invalid_grant', error_description: 'Authorization code already redeemed: ' + 'A'.repeat(30), state: '' }, 400);
       if (cd !== P.codeOk && cd !== 'good+code') return json({ error: 'invalid_grant' }, 400);
@@ -466,6 +467,37 @@ const future = () => new Date(Date.now() + 3600e3).toISOString();
     P.tokenCalls.length = 0;
     await raw('/auth/snapchat/callback?code=good-code&state=' + au.searchParams.get('state'));
     check('N.7 token request redirect_uri === authorize redirect_uri', P.tokenCalls[0] && P.tokenCalls[0].redirect_uri === au.searchParams.get('redirect_uri'), { auth: au.searchParams.get('redirect_uri'), tok: P.tokenCalls[0] && P.tokenCalls[0].redirect_uri });
+  }
+
+  log('\nO. redirect_uri identical to the one Snap redirected to ("Invalid code." at 4 s)');
+  {
+    const freshState = async () => new URL((await H.call('GET', '/api/snapchat/auth-url', TA)).body.url).searchParams.get('state');
+    const loc = (r) => r.headers.get('location') || '';
+    const BASEURI = 'http://localhost:5500/auth/snapchat/callback';
+    // The Snap app's registered URI has a trailing slash; Snap returns there.
+    P.registered = BASEURI + '/'; P.tokenCalls.length = 0;
+    let r = await raw('/auth/snapchat/callback/?code=good-code&state=' + await freshState());
+    check('O.1 callback at …/callback/ → exchange sends …/callback/ → connected', /snapchat_connected=1/.test(loc(r)) && P.tokenCalls.length === 1 && P.tokenCalls[0].redirect_uri === BASEURI + '/', { loc: loc(r), sent: P.tokenCalls.map((x) => x.redirect_uri) });
+    // Before the fix this is exactly the production failure:
+    P.tokenCalls.length = 0;
+    r = await raw('/auth/snapchat/callback?code=good-code&state=' + await freshState());
+    const q = new URL(loc(r)).searchParams;
+    check('O.2 a URI Snap didn’t issue the code for → invalid_grant "Invalid code." with the callback path reported', q.get('snapchat_reason') === 'invalid_grant' && q.get('snapchat_detail') === 'Invalid code.' && q.get('snapchat_cb_path') === '/auth/snapchat/callback' && !q.get('snapchat_redirect_variant'), loc(r));
+    P.registered = null;
+    // Normal case unchanged: the configured URI, byte for byte.
+    P.tokenCalls.length = 0;
+    r = await raw('/auth/snapchat/callback?code=good-code&state=' + await freshState());
+    check('O.3 normal callback: the configured redirect URI is sent unchanged', /snapchat_connected=1/.test(loc(r)) && P.tokenCalls[0].redirect_uri === BASEURI);
+    // Letter case variant
+    P.registered = 'http://localhost:5500/auth/Snapchat/Callback'; P.tokenCalls.length = 0;
+    r = await raw('/auth/Snapchat/Callback?code=good-code&state=' + await freshState());
+    check('O.4 callback with different letter case → that exact path is sent', /snapchat_connected=1/.test(loc(r)) && P.tokenCalls[0].redirect_uri === P.registered, P.tokenCalls.map((x) => x.redirect_uri));
+    P.registered = null;
+    // Only variants of the configured callback are honoured; host is always the configured one.
+    const S2 = require('../services/snapchatAds');
+    const cfg = { redirectUri: 'https://oriven-backand-clean.onrender.com/auth/snapchat/callback' };
+    check('O.5 other paths never change the redirect URI', S2.exchangeRedirectUri(cfg, '/auth/pinterest/callback').uri === cfg.redirectUri && S2.exchangeRedirectUri(cfg, '/auth/snapchat/callback/../x').uri === cfg.redirectUri && S2.exchangeRedirectUri(cfg, '').uri === cfg.redirectUri);
+    check('O.6 a variant keeps the configured host (https://oriven-backand-clean…)', S2.exchangeRedirectUri(cfg, '/auth/snapchat/callback/').uri === 'https://oriven-backand-clean.onrender.com/auth/snapchat/callback/');
   }
 
   if (quiet) [console.log, console.warn, console.error] = quiet;

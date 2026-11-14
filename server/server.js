@@ -12060,8 +12060,13 @@ app.get('/auth/snapchat/callback', async (req, res) => {
   const alreadySent = _snapSentCodes.has(fp);
   _snapSentCodes.set(fp, Date.now());
 
+  // The URI Snapchat actually redirected to (path only; host is the configured one).
+  const cbPath = String(req.path || '').slice(0, 120);
+  const redir = SNAP.exchangeRedirectUri(cfg, cbPath);
+  if (redir.variant) console.warn('[Snapchat OAuth] callback arrived at a variant of the configured redirect URI | path:', cbPath, '| configured:', cfg.redirectUri);
+
   let tokens;
-  try { tokens = await SNAP.exchangeCode(cfg, codeStr); }
+  try { tokens = await SNAP.exchangeCode(cfg, codeStr, undefined, redir.uri); }
   catch (err) {
     // err.reason is Snap's OAuth error code (invalid_client, invalid_grant, …)
     // from a fixed list; err.diag is Snap's cleaned answer (status,
@@ -12070,13 +12075,16 @@ app.get('/auth/snapchat/callback', async (req, res) => {
     const d = err.diag || {};
     console.error('[Snapchat OAuth] token exchange failed', JSON.stringify({ user: st.userId, reason, status: d.status || null, description: d.description || null,
       contentType: d.contentType || null, headers: d.headers || {}, request: d.request || null, redirectUri: cfg.redirectUri,
-      codeLength: codeStr.length, codeHadSpace, codeAgeSeconds: codeAgeS, codeSentBefore: alreadySent, callbackInvocation: 1 }));
+      codeLength: codeStr.length, codeHadSpace, codeAgeSeconds: codeAgeS, codeSentBefore: alreadySent, callbackInvocation: 1,
+      callbackPath: cbPath, exchangeRedirectUri: redir.uri, redirectVariant: redir.variant }));
     const q = ['snapchat_error=' + (err.code === 'NETWORK' ? 'network' : 'token_exchange'), 'snapchat_reason=' + encodeURIComponent(reason)];
     if (d.status) q.push('snapchat_status=' + encodeURIComponent(String(d.status)));
     if (d.description) q.push('snapchat_detail=' + encodeURIComponent(d.description));
     q.push('snapchat_code_age=' + codeAgeS, 'snapchat_code_len=' + codeStr.length);
     if (codeHadSpace) q.push('snapchat_code_space=1');
     if (alreadySent) q.push('snapchat_code_reused=1');
+    q.push('snapchat_cb_path=' + encodeURIComponent(cbPath.replace(/[^A-Za-z0-9/_\-]/g, '')));
+    if (redir.variant) q.push('snapchat_redirect_variant=1');
     return back(q.join('&'));
   }
   const disc = await SNAP.discoverAccounts(tokens.accessToken);
