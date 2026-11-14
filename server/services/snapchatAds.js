@@ -69,22 +69,67 @@ function redact(s) {
     .replace(/\bBearer\s+[A-Za-z0-9._~+/=-]+/gi, 'Bearer [redacted]');
 }
 
-async function _tokenRequest(cfg, fields, fetchImpl) {
+// Snap's OAuth error field (RFC 6749 §5.2) reduced to a fixed set of safe
+// codes — the only part of a token-endpoint error that is logged or shown.
+const OAUTH_ERRORS = ['invalid_client', 'invalid_grant', 'invalid_request', 'unauthorized_client', 'unsupported_grant_type', 'invalid_scope', 'access_denied', 'server_error', 'temporarily_unavailable'];
+function oauthReason(status, j) {
+  const e = String((j && j.error) || '').toLowerCase();
+  if (OAUTH_ERRORS.includes(e)) return e;
+  if (status >= 500) return 'server_error';
+  if (status && status !== 200) return 'http_' + status;
+  return 'no_access_token';
+}
+
+// One POST to the token endpoint. Client authentication: Snap's Marketing
+// API docs send client_id + client_secret in the form body; RFC 6749 §2.3.1
+// also allows HTTP Basic, which every OAuth server must support. Body first
+// (the documented way); 'basic' is used only as the fallback below.
+async function _tokenPost(cfg, fields, fetchImpl, auth) {
   const f = fetchImpl || fetch;
+  const headers = { 'Content-Type': 'application/x-www-form-urlencoded', Accept: 'application/json' };
+  const form = Object.assign({}, fields);
+  if (auth === 'basic') {
+    headers.Authorization = 'Basic ' + Buffer.from(encodeURIComponent(cfg.clientId) + ':' + encodeURIComponent(cfg.clientSecret)).toString('base64');
+    form.client_id = cfg.clientId;
+  } else Object.assign(form, { client_id: cfg.clientId, client_secret: cfg.clientSecret });
   let r;
-  try {
-    r = await f(AUTH_BASE + '/access_token', { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: new URLSearchParams(Object.assign({ client_id: cfg.clientId, client_secret: cfg.clientSecret }, fields)).toString() });
-  } catch (e) { throw new SnapError('Could not reach Snapchat to sign in (' + redact(e.message) + ').', 502, { code: 'NETWORK' }); }
+  try { r = await f(AUTH_BASE + '/access_token', { method: 'POST', headers, body: new URLSearchParams(form).toString() }); }
+  catch (e) { throw new SnapError('Could not reach Snapchat to sign in (' + redact(e.message) + ').', 502, { code: 'NETWORK', reason: 'network' }); }
   let j = {};
   try { j = await r.json(); } catch (_) { j = {}; }
-  if (!r.ok || !j.access_token) {
-    const grant = /invalid_grant|invalid_client|unauthorized_client/i.test(String(j.error || ''));
-    throw new SnapError('Snapchat refused the sign-in' + (j.error ? ' (' + String(j.error).slice(0, 60) + ')' : '') + '.', grant || r.status === 400 || r.status === 401 ? 401 : 502, { code: grant ? 'RECONNECT_REQUIRED' : 'TOKEN_FAILED' });
+  return { ok: r.ok && !!j.access_token, status: r.status, j };
+}
+async function _tokenRequest(cfg, fields, fetchImpl) {
+  let res = await _tokenPost(cfg, fields, fetchImpl, 'body');
+  // invalid_client on in-body credentials: authentication failed before the
+  // grant was looked at (the code isn't consumed), so try HTTP Basic once.
+  if (!res.ok && oauthReason(res.status, res.j) === 'invalid_client') res = await _tokenPost(cfg, fields, fetchImpl, 'basic');
+  if (!res.ok) {
+    const reason = oauthReason(res.status, res.j);
+    const reconnect = ['invalid_grant', 'invalid_client', 'unauthorized_client'].includes(reason);
+    throw new SnapError('Snapchat refused the sign-in (' + reason + ').', reconnect || res.status === 400 || res.status === 401 ? 401 : 502, { code: reconnect ? 'RECONNECT_REQUIRED' : 'TOKEN_FAILED', reason });
   }
+  const j = res.j;
   return { accessToken: j.access_token, refreshToken: j.refresh_token || null, expiresIn: Number(j.expires_in) || 3600 };
 }
 const exchangeCode = (cfg, code, fetchImpl) => _tokenRequest(cfg, { grant_type: 'authorization_code', code, redirect_uri: cfg.redirectUri }, fetchImpl);
 const refreshAccessToken = (cfg, refreshToken, fetchImpl) => _tokenRequest(cfg, { grant_type: 'refresh_token', refresh_token: refreshToken }, fetchImpl);
+
+// Does Snap accept the configured app credentials? One token request with a
+// code that can't exist: Snap answers invalid_grant when the client
+// authenticated (credentials right) and invalid_client when it didn't.
+// Nothing is created; no secret or token is returned.
+async function checkCredentials(cfg, fetchImpl) {
+  if (!cfg.configured) return { credentials: 'not_configured' };
+  const fields = { grant_type: 'authorization_code', code: 'orivenai-credential-check', redirect_uri: cfg.redirectUri };
+  const probe = async (auth) => { const r = await _tokenPost(cfg, fields, fetchImpl, auth); return oauthReason(r.status, r.j); };
+  try {
+    const body = await probe('body');
+    if (body !== 'invalid_client') return { credentials: body === 'invalid_grant' ? 'accepted' : 'unknown', clientAuth: 'body', snapReason: body };
+    const basic = await probe('basic');
+    return basic === 'invalid_client' ? { credentials: 'rejected', snapReason: 'invalid_client' } : { credentials: basic === 'invalid_grant' ? 'accepted' : 'unknown', clientAuth: 'basic', snapReason: basic };
+  } catch (e) { return { credentials: 'unknown', snapReason: e.reason || 'network' }; }
+}
 
 // One Ads API call. Errors carry an HTTP-ish status the routes can return:
 // 401 token invalid/expired, 403 permission, 429 rate limited, 400 Snap
@@ -326,7 +371,7 @@ function ctaFor(text, goal) {
 
 module.exports = {
   AUTH_BASE, API, SCOPE, PROVIDER, PROD_REDIRECT, DEV_REDIRECT, MICRO, LIMITS, WEB_VIEW_CTAS, GOAL_CONFIG,
-  config, authorizeUrl, exchangeCode, refreshAccessToken, request, items, created, listAll, subError, redact, SnapError,
+  config, authorizeUrl, exchangeCode, refreshAccessToken, checkCredentials, oauthReason, request, items, created, listAll, subError, redact, SnapError,
   discoverAccounts, getCampaign, getAdSquad, getAd, updateCampaign, updateAdSquad, updateAd, remove,
   topSnapImage, uploadMedia, zonedMidnight, addDays, campaignStats, dailySeries, ctaFor,
 };

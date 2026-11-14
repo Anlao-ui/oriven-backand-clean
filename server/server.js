@@ -12031,8 +12031,12 @@ app.get('/auth/snapchat/callback', async (req, res) => {
   let tokens;
   try { tokens = await SNAP.exchangeCode(cfg, String(code)); }
   catch (err) {
-    console.error('[Snapchat OAuth] token exchange failed:', err.code || '-', SNAP.redact(err.message));
-    return back('snapchat_error=' + (err.code === 'NETWORK' ? 'network' : 'token_exchange'));
+    // err.reason is Snap's OAuth error code (invalid_client, invalid_grant, …)
+    // from a fixed list — never a token, code or secret. Logged and passed to
+    // the app so the user (and support) can see why the sign-in failed.
+    const reason = /^[a-z0-9_]{1,40}$/.test(String(err.reason || '')) ? err.reason : 'unknown';
+    console.error('[Snapchat OAuth] token exchange failed | user:', st.userId, '| reason:', reason, '| redirect_uri:', cfg.redirectUri);
+    return back('snapchat_error=' + (err.code === 'NETWORK' ? 'network' : 'token_exchange') + '&snapchat_reason=' + encodeURIComponent(reason));
   }
   const disc = await SNAP.discoverAccounts(tokens.accessToken);
 
@@ -12057,6 +12061,24 @@ app.get('/auth/snapchat/callback', async (req, res) => {
 function _snapActive(a, profileId) {
   return { platform: SNAP.PROVIDER, account_id: String(a.id), account_name: String(a.name || a.id), currency: a.currency || null, timezone: a.timezone || null, organization_id: a.organization_id || null, profile_id: profileId || null };
 }
+
+// GET /api/snapchat/config-check — does Snapchat accept the configured app
+// credentials? No sign-in needed and nothing secret is returned: only
+// accepted / rejected / unknown, the client-auth method and Snap's error
+// code. Cached for 10 minutes, so it can't be used to hammer Snap.
+let _snapConfigCheck = null;
+app.get('/api/snapchat/config-check', async (req, res) => {
+  const cfg = _snapCfg();
+  // The key changes whenever the configuration does (secret only as an in-memory hash).
+  const key = crypto.createHash('sha256').update(cfg.clientId + '|' + cfg.redirectUri + '|' + cfg.clientSecret).digest('hex');
+  if (!_snapConfigCheck || _snapConfigCheck.key !== key || Date.now() - _snapConfigCheck.at > 10 * 60 * 1000) {
+    const result = await SNAP.checkCredentials(cfg);
+    _snapConfigCheck = { key, at: Date.now(), result };
+    console.log('[Snapchat] config check:', result.credentials, '| auth:', result.clientAuth || '-', '| snap:', result.snapReason || '-');
+  }
+  res.set('Cache-Control', 'no-store');
+  res.json(Object.assign({ configured: cfg.configured, redirectUri: cfg.redirectUri, checkedAt: new Date(_snapConfigCheck.at).toISOString() }, _snapConfigCheck.result));
+});
 
 // One refresh per user at a time (two requests must not race to refresh).
 const _snapRefreshing = new Map();
