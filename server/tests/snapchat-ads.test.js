@@ -29,7 +29,7 @@ const uuid = () => { n++; const h = n.toString(16).padStart(12, '0'); return 'aa
 let P;
 function reset() {
   P = {
-    valid: { 'snap-access-1': true }, tokenCalls: [], basicOnly: false, secret: 'snap-secret-value', codeOk: 'good-code', refreshOk: true, refreshReturnsNew: true,
+    valid: { 'snap-access-1': true }, tokenCalls: [], basicOnly: false, secret: 'snap-secret-value', redeemed: {}, singleUse: false, codeOk: 'good-code', refreshOk: true, refreshReturnsNew: true,
     camps: {}, squads: {}, ads: {}, creatives: {}, media: {}, uploads: [], puts: [], deletes: [], posts: [], gets: [],
     failAdCreate: false, failStats: false, statsAuth: [],
   };
@@ -51,7 +51,11 @@ H.net.handler = async (url, opts) => {
     const secretOk = P.basicOnly ? basicOk : (basicOk || bodyOk);
     if (!secretOk) return json({ error: 'invalid_client', error_description: 'Invalid client.', state: '' }, 400);
     if (f.get('grant_type') === 'authorization_code') {
-      if (f.get('code') !== P.codeOk) return json({ error: 'invalid_grant' }, 400);
+      const cd = f.get('code');
+      if (cd === 'expired-code') return json({ error: 'invalid_grant', error_description: 'Authorization code has expired.', state: '' }, 400);
+      if (P.redeemed[cd]) return json({ error: 'invalid_grant', error_description: 'Authorization code already redeemed: ' + 'A'.repeat(30), state: '' }, 400);
+      if (cd !== P.codeOk && cd !== 'good+code') return json({ error: 'invalid_grant' }, 400);
+      if (P.singleUse) P.redeemed[cd] = true;
       P.valid['snap-access-1'] = true;
       return json({ access_token: 'snap-access-1', refresh_token: 'snap-refresh-1', expires_in: 3600, token_type: 'Bearer' });
     }
@@ -423,6 +427,45 @@ const future = () => new Date(Date.now() + 3600e3).toISOString();
     P.tokenCalls.length = 0;
     await H.call('GET', '/api/snapchat/config-check'); await H.call('GET', '/api/snapchat/config-check');
     check('M.11 config-check is cached (no Snap request for repeated checks)', P.tokenCalls.length <= 1, P.tokenCalls.length);
+  }
+
+  log('\nN. invalid_grant diagnostics (production: snapchat_reason=invalid_grant)');
+  {
+    const freshState = async () => new URL((await H.call('GET', '/api/snapchat/auth-url', TA)).body.url).searchParams.get('state');
+    const loc = (r) => r.headers.get('location') || '';
+    const qp = (r) => new URL(loc(r)).searchParams;
+    // N.1 expired code: Snap's own description reaches the app, with the code's age and length.
+    P.tokenCalls.length = 0;
+    let r = await raw('/auth/snapchat/callback?code=expired-code&state=' + await freshState());
+    let q = qp(r);
+    check('N.1 expired code → invalid_grant with status 400, Snap’s description, code age + length', q.get('snapchat_reason') === 'invalid_grant' && q.get('snapchat_status') === '400' && q.get('snapchat_detail') === 'Authorization code has expired.' && /^\d+$/.test(q.get('snapchat_code_age')) && q.get('snapchat_code_len') === '12' && P.tokenCalls.length === 1, loc(r));
+    check('N.2 the return URL never contains the code, a token or the secret', !/expired-code|snap-access|snap-refresh|snap-secret/.test(loc(r)));
+    // N.3 a code Snap already redeemed: description cleaned (long token-like run removed)
+    P.singleUse = true; P.redeemed = { 'good-code': true };
+    r = await raw('/auth/snapchat/callback?code=good-code&state=' + await freshState());
+    q = qp(r);
+    check('N.3 already-used code → invalid_grant; long token-like text in Snap’s description is removed', q.get('snapchat_reason') === 'invalid_grant' && /already redeemed/.test(q.get('snapchat_detail') || '') && !/A{24}/.test(q.get('snapchat_detail') || ''), q.get('snapchat_detail'));
+    // N.4 the same code arriving at this server twice is flagged
+    const s1 = await freshState();
+    await raw('/auth/snapchat/callback?code=fresh-x&state=' + s1);
+    r = await raw('/auth/snapchat/callback?code=fresh-x&state=' + await freshState());
+    check('N.4 a code this server already sent to Snap is flagged (snapchat_code_reused=1)', qp(r).get('snapchat_code_reused') === '1', loc(r));
+    P.singleUse = false; P.redeemed = {};
+    // N.5 the callback invoked twice with the same state: the second is refused, Snap is not called again
+    const s2 = await freshState();
+    P.tokenCalls.length = 0;
+    const first = await raw('/auth/snapchat/callback?code=good-code&state=' + s2);
+    const second = await raw('/auth/snapchat/callback?code=good-code&state=' + s2);
+    check('N.5 double callback: first connects, second → state_already_used (attempt 2), one token request', /snapchat_connected=1/.test(loc(first)) && qp(second).get('snapchat_reason') === 'state_already_used' && qp(second).get('snapchat_attempt') === '2' && P.tokenCalls.length === 1, { a: loc(first), b: loc(second), n: P.tokenCalls.length });
+    // N.6 a code with a '+' that query decoding turned into a space is sent to Snap exactly
+    P.tokenCalls.length = 0;
+    r = await raw('/auth/snapchat/callback?code=good+code&state=' + await freshState());
+    check('N.6 a "+" in the code (decoded to a space) is restored before the exchange', /snapchat_connected=1/.test(loc(r)) && P.tokenCalls[0] && P.tokenCalls[0].code === 'good+code', { loc: loc(r), sent: P.tokenCalls[0] && P.tokenCalls[0].code });
+    // N.7 the exchange uses the same redirect_uri as the authorize URL
+    const au = new URL((await H.call('GET', '/api/snapchat/auth-url', TA)).body.url);
+    P.tokenCalls.length = 0;
+    await raw('/auth/snapchat/callback?code=good-code&state=' + au.searchParams.get('state'));
+    check('N.7 token request redirect_uri === authorize redirect_uri', P.tokenCalls[0] && P.tokenCalls[0].redirect_uri === au.searchParams.get('redirect_uri'), { auth: au.searchParams.get('redirect_uri'), tok: P.tokenCalls[0] && P.tokenCalls[0].redirect_uri });
   }
 
   if (quiet) [console.log, console.warn, console.error] = quiet;
