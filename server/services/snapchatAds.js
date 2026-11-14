@@ -168,9 +168,20 @@ async function checkCredentials(cfg, fetchImpl) {
   if (!cfg.configured) return { credentials: 'not_configured' };
   const fields = { grant_type: 'authorization_code', code: 'orivenai-credential-check', redirect_uri: cfg.redirectUri };
   const probe = async (auth) => { const r = await _tokenPost(cfg, fields, fetchImpl, auth); return oauthReason(r.status, r.j); };
+  // Does Snap verify the client SECRET before the code? The same request
+  // with a deliberately wrong secret: invalid_client means it does (so the
+  // configured secret is proven right); invalid_grant means Snap rejects the
+  // code first, and "accepted" above says nothing about the secret.
+  const secretOrder = async () => {
+    const wrong = Object.assign({}, cfg, { clientSecret: cfg.clientSecret + '-orivenai-wrong' });
+    const r = await _tokenPost(wrong, fields, fetchImpl, 'body');
+    const reason = oauthReason(r.status, r.j);
+    return { wrongSecretReason: reason, secretVerified: reason === 'invalid_client' ? true : reason === 'invalid_grant' ? 'not_checked_before_code' : 'unknown' };
+  };
+  const clientIdHint = cfg.clientId.length > 8 ? cfg.clientId.slice(0, 4) + '…' + cfg.clientId.slice(-4) : '(short)';
   try {
     const body = await probe('body');
-    if (body !== 'invalid_client') return { credentials: body === 'invalid_grant' ? 'accepted' : 'unknown', clientAuth: 'body', snapReason: body };
+    if (body !== 'invalid_client') return Object.assign({ credentials: body === 'invalid_grant' ? 'accepted' : 'unknown', clientAuth: 'body', snapReason: body, clientIdHint, clientIdLength: cfg.clientId.length }, body === 'invalid_grant' ? await secretOrder() : {});
     const basic = await probe('basic');
     return basic === 'invalid_client' ? { credentials: 'rejected', snapReason: 'invalid_client' } : { credentials: basic === 'invalid_grant' ? 'accepted' : 'unknown', clientAuth: 'basic', snapReason: basic };
   } catch (e) { return { credentials: 'unknown', snapReason: e.reason || 'network' }; }
