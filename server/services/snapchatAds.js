@@ -204,6 +204,14 @@ async function request(token, method, path, body, opts) {
   const url = /^https?:\/\//.test(path) ? path : API + path;
   let r;
   try { r = await f(url, init); } catch (e) { throw new SnapError('Snapchat could not be reached (' + redact(e.message) + ').', 502, { code: 'NETWORK' }); }
+  // Rate limited (Snap: ~10 requests/s per token): a READ is retried once
+  // after Retry-After (max 5 s). Writes are never retried here — a create
+  // that may have gone through must not be sent twice.
+  if (r.status === 429 && (init.method || 'GET') === 'GET' && !opts._retried) {
+    const ra = Number(r.headers && r.headers.get ? r.headers.get('retry-after') : 0);
+    await new Promise((ok) => setTimeout(ok, Math.min(5000, Math.max(500, (isFinite(ra) && ra > 0 ? ra : 1) * 1000))));
+    return request(token, method, path, body, Object.assign({}, opts, { _retried: true }));
+  }
   const text = await r.text();
   let j = {};
   try { j = text ? JSON.parse(text) : {}; } catch (_) { j = { raw: text.slice(0, 200) }; }
@@ -332,13 +340,23 @@ async function topSnapImage(buf) {
 
 // Creates the media entity and uploads the file (single request, ≤ 32 MB).
 async function uploadMedia(token, adAccountId, { type, name, buffer, fileName, contentType }, opts) {
+  opts = opts || {};
   if (type === 'VIDEO' && buffer.length > LIMITS.VIDEO_BYTES) throw new SnapError('The video is larger than 32 MB, Snapchat’s limit for a direct upload. Use a shorter or smaller video.', 422, { code: 'MEDIA_TOO_LARGE' });
   const media = created(await request(token, 'POST', '/adaccounts/' + encodeURIComponent(adAccountId) + '/media', { media: [{ name: String(name || 'OrivenAI media').slice(0, LIMITS.NAME), type, ad_account_id: String(adAccountId) }] }, opts), 'media', 'media');
   const form = new FormData();
   form.append('file', new Blob([buffer], { type: contentType }), fileName);
   const up = await request(token, 'POST', '/media/' + encodeURIComponent(media.id) + '/upload', undefined, Object.assign({}, opts, { form }));
-  const st = up && up.result && up.result.media_status;
-  if (st && !/READY|PENDING/i.test(String(st))) throw new SnapError('Snapchat could not process the uploaded ' + type.toLowerCase() + ' (' + st + ').', 400, { code: 'MEDIA_FAILED' });
+  let st = String((up && up.result && up.result.media_status) || '').toUpperCase();
+  // Snap processes media after the upload (media_status PENDING_UPLOAD →
+  // READY). A creative is only built on READY media: poll GET /media/{id}.
+  const deadline = Date.now() + (opts.mediaTimeoutMs || 90000);
+  while (st !== 'READY') {
+    if (st && !/PENDING|PROCESS|UPLOAD/.test(st)) throw new SnapError('Snapchat could not process the uploaded ' + type.toLowerCase() + ' (' + st + ').', 400, { code: 'MEDIA_FAILED' });
+    if (Date.now() > deadline) throw new SnapError('Snapchat is still processing the ' + type.toLowerCase() + '. Nothing else was created; try publishing again in a few minutes.', 504, { code: 'MEDIA_NOT_READY' });
+    await new Promise((ok) => setTimeout(ok, opts.mediaPollMs || 2000));
+    const m = items(await request(token, 'GET', '/media/' + encodeURIComponent(media.id), undefined, opts), 'media', 'media')[0];
+    st = String((m && m.media_status) || '').toUpperCase();
+  }
   return String(media.id);
 }
 

@@ -31,7 +31,7 @@ const STAGES = ['setup', 'research', 'audience', 'strategy', 'creative', 'build'
 
 const ACTIONS = {
   connect_platform:   { label: 'Connect an ad platform',            page: 'ad-platforms',        button: 'Open Ad Platforms',         stage: 'setup',    verify: { kind: 'integration' },
-    mode: 'platform', needs: "Access to the ad account you use (Google, Meta, TikTok or Pinterest)", result: "A connected ad account OrivenAI can publish to and read results from" },
+    mode: 'platform', needs: "Access to the ad account you use (Google, Meta, TikTok, Pinterest or Snapchat)", result: "A connected ad account OrivenAI can publish to and read results from" },
   complete_business:  { label: 'Complete your business details',    page: 'control-center',      button: 'Open Control Center',       stage: 'setup',    verify: null,
     mode: 'done', needs: "Your business name, offer and goals", result: "Business details every OrivenAI tool uses" },
   add_products:       { label: 'Add your products or services',     page: 'control-center',      button: 'Open Control Center',       stage: 'setup',    verify: { kind: 'table', table: 'business_products' },

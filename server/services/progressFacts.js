@@ -15,7 +15,7 @@
 // Read-only. A table that doesn't exist (or a failed read) counts as 0 —
 // a task then simply isn't completed yet.
 // ════════════════════════════════════════════════════════════════
-const AD_PROVIDERS = ['google_ads', 'meta_ads', 'tiktok_ads', 'pinterest_ads'];
+const AD_PROVIDERS = ['google_ads', 'meta_ads', 'tiktok_ads', 'pinterest_ads', 'snapchat_ads'];
 const IMAGE_KINDS = ['image', 'poster', 'infographic', 'logo', 'product_shoot', 'product_photo', 'ad_image', 'lifestyle'];
 
 function classifyAsset(a) {

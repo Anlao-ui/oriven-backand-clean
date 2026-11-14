@@ -7231,7 +7231,7 @@ app.post('/api/ai/chat', requireSubIfAuthed, paidActions.laneGuard('chat'), asyn
   const agentDef = agentInfo ? agents.AGENTS[agentInfo.id] : null;
   const assistantName = agentDef ? agentDef.name : 'Oriven';
 
-  const systemPrompt = `${agentDef ? `You are ${agentDef.name}, the user's personal assistant inside OrivenAI.` : "You are Oriven, ORIVEN's AI marketing co-pilot."} ORIVEN is organized as six steps — 01 Control Center (the start page: the user's business context — business, brand, audiences, competitors, connected accounts and knowledge — plus an overview of their advertising, what needs attention, and Planning: dated advertising plans, a monthly budget plan, briefs and naming/UTM templates), 02 Research (investigate a market, competitors, audiences and opportunities; results become a Market Map with sources, and chosen findings can go into Create), 03 Create (turn a brief into platform-ready ad creative and campaign structure; drafts go to Launch), 04 Launch (review drafts by platform with their readiness — ready, ready with warnings or blocked — and publish when the user chooses), 05 Campaigns (follow live campaign performance by platform, campaign and date range: spend, delivery, traffic and conversion metrics, with spend over time where the platform provides it), and 06 Automations (rules and schedules on Google, Meta, TikTok and Pinterest campaigns that pause, resume, adjust budgets, notify or ask for approval first — never acting on missing data — plus their activity; creating an automation costs ${pricing.FEATURE_COSTS.automation} credits once, checks and actions are free). There is no separate Home or Business page; both live in Control Center. You help the user across all of them with their Google, Meta, TikTok and Pinterest ad campaigns. ORIVEN does not publish campaigns on a schedule: a planned start date is the user's plan, and launching is a manual step in Launch.${supportSection}${hasBrand ? `\n\nBRAND CONTEXT (draw on this when relevant):\n${brandSection}` : ''}${businessSection}${accountsSection}${pageSection}${campaignSection}${researchSection}${reviewSection}${launchSection}${autopilotSection}${businessSignalsSection}${workspaceSection}${opsSection}${researchFollowup ? '' : toolsSection}
+  const systemPrompt = `${agentDef ? `You are ${agentDef.name}, the user's personal assistant inside OrivenAI.` : "You are Oriven, ORIVEN's AI marketing co-pilot."} ORIVEN is organized as six steps — 01 Control Center (the start page: the user's business context — business, brand, audiences, competitors, connected accounts and knowledge — plus an overview of their advertising, what needs attention, and Planning: dated advertising plans, a monthly budget plan, briefs and naming/UTM templates), 02 Research (investigate a market, competitors, audiences and opportunities; results become a Market Map with sources, and chosen findings can go into Create), 03 Create (turn a brief into platform-ready ad creative and campaign structure; drafts go to Launch), 04 Launch (review drafts by platform with their readiness — ready, ready with warnings or blocked — and publish when the user chooses), 05 Campaigns (follow live campaign performance by platform, campaign and date range: spend, delivery, traffic and conversion metrics, with spend over time where the platform provides it), and 06 Automations (rules and schedules on Google, Meta, TikTok, Pinterest and Snapchat campaigns that pause, resume, adjust budgets, notify or ask for approval first — never acting on missing data — plus their activity; creating an automation costs ${pricing.FEATURE_COSTS.automation} credits once, checks and actions are free). There is no separate Home or Business page; both live in Control Center. You help the user across all of them with their Google, Meta, TikTok, Pinterest and Snapchat ad campaigns. ORIVEN does not publish campaigns on a schedule: a planned start date is the user's plan, and launching is a manual step in Launch.${supportSection}${hasBrand ? `\n\nBRAND CONTEXT (draw on this when relevant):\n${brandSection}` : ''}${businessSection}${accountsSection}${pageSection}${campaignSection}${researchSection}${reviewSection}${launchSection}${autopilotSection}${businessSignalsSection}${workspaceSection}${opsSection}${researchFollowup ? '' : toolsSection}
 
 Be conversational and natural. Match the energy of the message — brief for casual small talk, thorough for strategic or campaign questions. Think like a knowledgeable colleague, not a branded bot. Never start with hollow affirmations like "Great!" or "Absolutely!". Be direct. Never mention that you are powered by any specific AI provider or model — you are simply ${assistantName}.${businessContext ? ' When it is relevant, reference specific business knowledge by name (a real product, audience, or competitor) instead of speaking in generalities — it shows the user you actually remember their business. If competitor information is present, use it only for strategic positioning advice, never to copy or replicate a competitor\'s messaging or content.' : ''}
 
@@ -12305,8 +12305,7 @@ app.get('/api/snapchat/campaigns', async (req, res) => {
     const user = await getUserFromToken(req);
     if (!user) return res.status(401).json({ error: 'Authentication required' });
     const a = await _getSnapchatAccess(user);
-    const j = await a.request('GET', '/adaccounts/' + encodeURIComponent(a.adAccountId) + '/campaigns?limit=500');
-    const campaigns = SNAP.items(j, 'campaigns', 'campaign').filter((c) => c.status !== 'DELETED').map(_snapCampaignRow);
+    const campaigns = (await _snapClient(a).call((t) => SNAP.listAll(t, '/adaccounts/' + encodeURIComponent(a.adAccountId) + '/campaigns', 'campaigns', 'campaign'))).filter((c) => c.status !== 'DELETED').map(_snapCampaignRow);
     res.json({ account: { id: a.adAccountId, name: a.accountName, currency: a.currency }, campaigns });
   } catch (err) { _snapError(res, 'campaigns', err); }
 });
@@ -12327,8 +12326,8 @@ app.get('/api/snapchat/overview', async (req, res) => {
     const until = new Date().toISOString().slice(0, 10);
     const since = SNAP.addDays(until, -(days - 1));
     const account = { id: a.adAccountId, timezone: a.timezone };
-    const camps = SNAP.items(await a.request('GET', '/adaccounts/' + encodeURIComponent(a.adAccountId) + '/campaigns?limit=500'), 'campaigns', 'campaign').filter((c) => c.status !== 'DELETED');
     const client = _snapClient(a);
+    const camps = (await client.call((t) => SNAP.listAll(t, '/adaccounts/' + encodeURIComponent(a.adAccountId) + '/campaigns', 'campaigns', 'campaign'))).filter((c) => c.status !== 'DELETED');
     let stats = null, statsError = null;
     try { stats = await client.call((t) => SNAP.campaignStats(t, account, since, until)); }
     catch (e) { statsError = e.message; console.warn('[Snapchat Overview] stats unavailable:', e.status || '-', SNAP.redact(e.message)); }
@@ -12348,6 +12347,45 @@ app.get('/api/snapchat/overview', async (req, res) => {
     }
     res.json({ account: { id: a.adAccountId, name: a.accountName, currency: a.currency }, date_range: { since, until, days, clamped: wanted > 90 }, overview, statsError: statsError ? 'Snapchat didn’t return performance data right now.' : null, campaigns, series });
   } catch (err) { _snapError(res, 'overview', err); }
+});
+
+// GET /api/snapchat/ad-squads, /api/snapchat/ads — every ad squad / ad in the
+// selected ad account (Campaign Overview's Ad Sets / Ads level), with the
+// campaign they belong to. Read-only; deleted objects left out.
+app.get('/api/snapchat/ad-squads', async (req, res) => {
+  try {
+    const user = await getUserFromToken(req);
+    if (!user) return res.status(401).json({ error: 'Authentication required' });
+    const a = await _getSnapchatAccess(user);
+    const list = await _snapClient(a).call((t) => SNAP.listAll(t, '/adaccounts/' + encodeURIComponent(a.adAccountId) + '/adsquads', 'adsquads', 'adsquad'));
+    const ad_squads = list.filter((s) => s.status !== 'DELETED').map((s) => ({
+      ad_squad_id: String(s.id), ad_squad_name: s.name || 'Unnamed', campaign_id: String(s.campaign_id || ''), status: s.status || 'UNKNOWN',
+      delivery_status: Array.isArray(s.delivery_status) ? s.delivery_status : null,
+      daily_budget: s.daily_budget_micro != null ? Number(s.daily_budget_micro) / SNAP.MICRO : null,
+      lifetime_budget: s.lifetime_budget_micro != null ? Number(s.lifetime_budget_micro) / SNAP.MICRO : null,
+      optimization_goal: s.optimization_goal || null, bid_strategy: s.bid_strategy || null,
+      start_time: s.start_time || null, end_time: s.end_time || null,
+    }));
+    res.json({ ad_squads, ad_account_id: a.adAccountId });
+  } catch (err) { _snapError(res, 'ad-squads', err); }
+});
+app.get('/api/snapchat/ads', async (req, res) => {
+  try {
+    const user = await getUserFromToken(req);
+    if (!user) return res.status(401).json({ error: 'Authentication required' });
+    const a = await _getSnapchatAccess(user);
+    const client = _snapClient(a);
+    const [ads, squads] = await Promise.all([
+      client.call((t) => SNAP.listAll(t, '/adaccounts/' + encodeURIComponent(a.adAccountId) + '/ads', 'ads', 'ad')),
+      client.call((t) => SNAP.listAll(t, '/adaccounts/' + encodeURIComponent(a.adAccountId) + '/adsquads', 'adsquads', 'adsquad')),
+    ]);
+    const campaignOf = {}; squads.forEach((s) => { campaignOf[String(s.id)] = String(s.campaign_id || ''); });
+    res.json({ ads: ads.filter((x) => x.status !== 'DELETED').map((x) => ({
+      ad_id: String(x.id), ad_name: x.name || 'Unnamed', ad_squad_id: String(x.ad_squad_id || ''), campaign_id: campaignOf[String(x.ad_squad_id)] || null,
+      status: x.status || 'UNKNOWN', type: x.type || null, review_status: x.review_status || null,
+      review_status_reasons: Array.isArray(x.review_status_reasons) ? x.review_status_reasons.slice(0, 5) : null,
+    })), ad_account_id: a.adAccountId });
+  } catch (err) { _snapError(res, 'ads', err); }
 });
 
 // The campaign must belong to the selected ad account before anything changes.

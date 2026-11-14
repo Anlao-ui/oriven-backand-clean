@@ -29,7 +29,7 @@ const uuid = () => { n++; const h = n.toString(16).padStart(12, '0'); return 'aa
 let P;
 function reset() {
   P = {
-    valid: { 'snap-access-1': true }, tokenCalls: [], basicOnly: false, secret: 'snap-secret-value', redeemed: {}, singleUse: false, registered: null, codeFirst: false, codeOk: 'good-code', refreshOk: true, refreshReturnsNew: true,
+    valid: { 'snap-access-1': true }, tokenCalls: [], basicOnly: false, secret: 'snap-secret-value', redeemed: {}, singleUse: false, rateLimitOnce: null, rateLimited: 0, pageSize: 0, mediaAfterUpload: null, mediaPolls: 0, mediaFinal: null, mediaGets: 0, registered: null, codeFirst: false, codeOk: 'good-code', refreshOk: true, refreshReturnsNew: true,
     camps: {}, squads: {}, ads: {}, creatives: {}, media: {}, uploads: [], puts: [], deletes: [], posts: [], gets: [],
     failAdCreate: false, failStats: false, statsAuth: [],
   };
@@ -78,13 +78,21 @@ H.net.handler = async (url, opts) => {
   const body = opts.body && typeof opts.body === 'string' ? JSON.parse(opts.body) : null;
   let m;
   if (method === 'GET') P.gets.push(p);
+  if (P.rateLimitOnce && method === 'GET' && p === P.rateLimitOnce) { P.rateLimitOnce = null; P.rateLimited++; return new Response(JSON.stringify({ request_status: 'ERROR', display_message: 'Too many requests' }), { status: 429, headers: { 'Content-Type': 'application/json', 'Retry-After': '1' } }); }
   if (p === '/me/organizations') return ok('organizations', 'organization', [{ id: ORG, name: 'Amber Org', ad_accounts: [
     { id: ACC1, name: 'Amber & Clay Snap', currency: 'EUR', timezone: 'Europe/Amsterdam', status: 'ACTIVE', type: 'DIRECT' },
     { id: ACC2, name: 'Second Snap', currency: 'USD', timezone: 'America/Los_Angeles', status: 'ACTIVE', type: 'DIRECT' }] }]);
   if (p === '/me') return json({ me: { id: 'me1' } });
   if ((m = /^\/adaccounts\/([^/]+)$/.exec(p))) return ok('adaccounts', 'adaccount', [{ id: m[1], currency: 'EUR', timezone: 'Europe/Amsterdam' }]);
   if ((m = /^\/adaccounts\/([^/]+)\/campaigns$/.exec(p))) {
-    if (method === 'GET') return ok('campaigns', 'campaign', Object.values(P.camps).filter((c) => c.ad_account_id === m[1]));
+    if (method === 'GET') {
+      const all = Object.values(P.camps).filter((c) => c.ad_account_id === m[1]);
+      if (!P.pageSize) return ok('campaigns', 'campaign', all);
+      const from = Number(u.searchParams.get('cursor') || 0), page = all.slice(from, from + P.pageSize);
+      const j = { request_status: 'SUCCESS', campaigns: page.map((x) => ({ sub_request_status: 'SUCCESS', campaign: x })) };
+      if (from + P.pageSize < all.length) j.paging = { next_link: 'https://adsapi.snapchat.com/v1/adaccounts/' + m[1] + '/campaigns?cursor=' + (from + P.pageSize) };
+      return json(j);
+    }
     if (method === 'POST') { P.posts.push(['campaign', body]); const c = Object.assign({ id: uuid(), created_at: new Date().toISOString() }, body.campaigns[0]); P.camps[c.id] = c; return ok('campaigns', 'campaign', [c]); }
     if (method === 'PUT') { P.puts.push(['campaign', body.campaigns[0]]); const c = body.campaigns[0]; P.camps[c.id] = Object.assign(P.camps[c.id] || {}, c); return ok('campaigns', 'campaign', [P.camps[c.id]]); }
   }
@@ -101,8 +109,17 @@ H.net.handler = async (url, opts) => {
     const buf = file ? Buffer.from(await file.arrayBuffer()) : null;
     let meta = null; try { meta = buf ? await sharp(buf).metadata() : null; } catch (_) {}
     P.uploads.push({ id: m[1], type: file && file.type, size: buf ? buf.length : 0, width: meta && meta.width, height: meta && meta.height });
-    return json({ request_status: 'SUCCESS', result: { id: m[1], media_status: 'READY' } });
+    P.media[m[1]].media_status = P.mediaAfterUpload || 'READY';
+    if (P.mediaPolls) P.media[m[1]].pollsLeft = P.mediaPolls;
+    return json({ request_status: 'SUCCESS', result: { id: m[1], media_status: P.media[m[1]].media_status } });
   }
+  if ((m = /^\/media\/([^/]+)$/.exec(p)) && method === 'GET') {
+    const md = P.media[m[1]]; if (!md) return json({ request_status: 'ERROR', display_message: 'not found' }, 404);
+    P.mediaGets++;
+    if (md.pollsLeft > 0 && --md.pollsLeft === 0) md.media_status = P.mediaFinal || 'READY';
+    return ok('media', 'media', [md]);
+  }
+  if ((m = /^\/adaccounts\/([^/]+)\/ads$/.exec(p)) && method === 'GET') return ok('ads', 'ad', Object.values(P.ads).filter((a) => P.squads[a.ad_squad_id] && P.camps[P.squads[a.ad_squad_id].campaign_id] && P.camps[P.squads[a.ad_squad_id].campaign_id].ad_account_id === m[1]));
   if ((m = /^\/adaccounts\/([^/]+)\/creatives$/.exec(p)) && method === 'POST') { P.posts.push(['creative', body]); const cr = Object.assign({ id: uuid() }, body.creatives[0]); P.creatives[cr.id] = cr; return ok('creatives', 'creative', [cr]); }
   if ((m = /^\/campaigns\/([^/]+)\/adsquads$/.exec(p))) {
     if (method === 'POST') { P.posts.push(['adsquad', body]); const s = Object.assign({ id: uuid() }, body.adsquads[0]); P.squads[s.id] = s; return ok('adsquads', 'adsquad', [s]); }
@@ -361,6 +378,39 @@ const future = () => new Date(Date.now() + 3600e3).toISOString();
     check('J.5 a non-UUID campaign id is not looked up', (await ad.getCampaign(A, '12345')) === null);
     const M = require('../services/automations/metrics');
     check('J.6 rules can’t use conversion metrics on Snapchat (not reported)', !M.PLATFORM_METRICS.snapchat.includes('conversions') && M.PLATFORM_METRICS.snapchat.includes('spend'));
+  }
+
+  log('\nP. Media processing, rate limits, pagination, ad squads and ads');
+  {
+    const pkgP = { campaignName: 'Media check', strategy: { goal: 'Awareness', landingPageUrl: 'https://amberclay.example/m' }, snapchatAds: { budget: 10, headline: 'Candles for cosy evenings', cta: 'Shop now' }, visualConcepts: [{ generatedImageUrl: 'https://img.example/m.png' }] };
+    // media still processing after upload → polled until READY, then the creative is created
+    P.mediaAfterUpload = 'PENDING_UPLOAD'; P.mediaPolls = 1; P.mediaFinal = 'READY'; P.mediaGets = 0; P.posts.length = 0;
+    let r = await H.call('POST', '/api/publish/snapchat', TA, { pkg: pkgP, campId: 'camp-media-1' });
+    const crAfter = P.posts.findIndex((x) => x[0] === 'creative');
+    check('P.1 media processing: polled until Snapchat says READY, only then the creative is created', r.status === 200 && r.body.ok && P.mediaGets >= 1 && crAfter >= 0, { status: r.status, gets: P.mediaGets, body: r.body.error });
+    // media failed → nothing else created, clear error
+    P.mediaAfterUpload = 'PENDING_UPLOAD'; P.mediaPolls = 1; P.mediaFinal = 'FAILED'; P.posts.length = 0;
+    r = await H.call('POST', '/api/publish/snapchat', TA, { pkg: pkgP, campId: 'camp-media-2' });
+    check('P.2 media Snapchat couldn’t process → PUBLISH_FAILED, no campaign/ad squad/ad created', r.body.code === 'PUBLISH_FAILED' && /couldn|could not process/i.test(r.body.error) && !P.posts.some((x) => ['campaign', 'adsquad', 'ad'].includes(x[0])), { body: r.body, posts: P.posts.map((x) => x[0]) });
+    P.mediaAfterUpload = null; P.mediaPolls = 0; P.mediaFinal = null;
+    // 429 on a read → one retry after Retry-After
+    P.rateLimitOnce = '/adaccounts/' + ACC1 + '/campaigns'; P.rateLimited = 0;
+    r = await H.call('GET', '/api/snapchat/campaigns', TA);
+    check('P.3 rate limited read (429) → retried once after Retry-After → success', r.status === 200 && P.rateLimited === 1 && Array.isArray(r.body.campaigns), { status: r.status, n: P.rateLimited });
+    // pagination: every page read
+    const total = Object.values(P.camps).filter((x) => x.ad_account_id === ACC1 && x.status !== 'DELETED').length;
+    P.pageSize = 2;
+    r = await H.call('GET', '/api/snapchat/campaigns', TA);
+    P.pageSize = 0;
+    check('P.4 campaign list follows paging.next_link (all ' + total + ' campaigns, 2 per page)', r.status === 200 && r.body.campaigns.length === total && total > 2, { got: r.body.campaigns && r.body.campaigns.length, total });
+    // ad squads and ads of the selected account
+    const sq = await H.call('GET', '/api/snapchat/ad-squads', TA);
+    const ads = await H.call('GET', '/api/snapchat/ads', TA);
+    const ownSquads = Object.values(P.squads).filter((s) => P.camps[s.campaign_id] && P.camps[s.campaign_id].ad_account_id === ACC1);
+    check('P.5 ad squads: the selected account’s, with campaign, status, daily budget in units, optimisation goal', sq.status === 200 && sq.body.ad_squads.length === ownSquads.length && sq.body.ad_squads.every((s) => s.campaign_id && s.status && (s.daily_budget == null || s.daily_budget < 1000)) && sq.body.ad_squads.some((s) => s.optimization_goal), sq.body.ad_squads && sq.body.ad_squads[0]);
+    check('P.6 ads: with ad squad, campaign and Snapchat review status', ads.status === 200 && ads.body.ads.length > 0 && ads.body.ads.every((a) => a.ad_squad_id && a.campaign_id && 'review_status' in a), ads.body.ads && ads.body.ads[0]);
+    const sqB = await H.call('GET', '/api/snapchat/ad-squads', TB);
+    check('P.7 user B (not connected) gets no ad squads', sqB.status === 400 && sqB.body.code === 'NOT_CONNECTED');
   }
 
   log('\nK. Disconnect');
