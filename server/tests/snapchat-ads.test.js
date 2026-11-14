@@ -29,7 +29,7 @@ const uuid = () => { n++; const h = n.toString(16).padStart(12, '0'); return 'aa
 let P;
 function reset() {
   P = {
-    valid: { 'snap-access-1': true }, tokenCalls: [], codeOk: 'good-code', refreshOk: true, refreshReturnsNew: true,
+    valid: { 'snap-access-1': true }, tokenCalls: [], basicOnly: false, secret: 'snap-secret-value', codeOk: 'good-code', refreshOk: true, refreshReturnsNew: true,
     camps: {}, squads: {}, ads: {}, creatives: {}, media: {}, uploads: [], puts: [], deletes: [], posts: [], gets: [],
     failAdCreate: false, failStats: false, statsAuth: [],
   };
@@ -42,8 +42,14 @@ H.net.handler = async (url, opts) => {
   if (u.host === 'img.example') return new Response(PNG, { status: 200, headers: { 'Content-Type': 'image/png' } });
   if (u.host === 'accounts.snapchat.com' && u.pathname === '/login/oauth2/access_token') {
     const f = new URLSearchParams(String(opts.body || ''));
-    P.tokenCalls.push(Object.fromEntries(f));
-    if (f.get('client_id') !== 'snap-client-id' || f.get('client_secret') !== 'snap-secret-value') return json({ error: 'invalid_client' }, 401);
+    const basic = String((opts.headers && opts.headers.Authorization) || '').replace(/^Basic /, '');
+    const [bid, bsec] = basic ? Buffer.from(basic, 'base64').toString().split(':').map(decodeURIComponent) : [];
+    P.tokenCalls.push(Object.assign(Object.fromEntries(f), { auth: basic ? 'basic' : 'body' }));
+    // P.secret = the secret Snap has for the app; the server sends SNAPCHAT_CLIENT_SECRET.
+    const basicOk = !!basic && bid === 'snap-client-id' && bsec === P.secret;
+    const bodyOk = !basic && f.get('client_id') === 'snap-client-id' && f.get('client_secret') === P.secret;
+    const secretOk = P.basicOnly ? basicOk : (basicOk || bodyOk);
+    if (!secretOk) return json({ error: 'invalid_client', error_description: 'Invalid client.', state: '' }, 400);
     if (f.get('grant_type') === 'authorization_code') {
       if (f.get('code') !== P.codeOk) return json({ error: 'invalid_grant' }, 400);
       P.valid['snap-access-1'] = true;
@@ -373,6 +379,50 @@ const future = () => new Date(Date.now() + 3600e3).toISOString();
     const sel = await H.call('POST', '/api/snapchat/active-account', TA, { account_id: ACC2 });
     check('L.3 selecting an ad account works without the columns', sel.status === 200 && integ(A.id).active_ad_account.account_id === ACC2, sel.body);
     delete H.MISSING.integrations;
+  }
+
+  log('\nM. Token exchange failures (the production "Connection failed")');
+  {
+    const freshState = async () => new URL((await H.call('GET', '/api/snapchat/auth-url', TA)).body.url).searchParams.get('state');
+    const loc = (r) => r.headers.get('location') || '';
+    // M.1 Snap rejects the app credentials (wrong SNAPCHAT_CLIENT_SECRET): the
+    // user sees why, nothing is stored, the existing connection is untouched.
+    const before = JSON.stringify(integ(A.id));
+    P.secret = 'the-real-secret-on-snap'; P.tokenCalls.length = 0;
+    let r = await raw('/auth/snapchat/callback?code=good-code&state=' + await freshState());
+    check('M.1 wrong client secret → token_exchange with reason invalid_client (body tried, then Basic)', /snapchat_error=token_exchange&snapchat_reason=invalid_client/.test(loc(r)) && P.tokenCalls.map((c) => c.auth).join(',') === 'body,basic', { loc: loc(r), calls: P.tokenCalls.map((c) => c.auth) });
+    check('M.2 a failed exchange stores nothing and keeps the existing connection as it was', JSON.stringify(integ(A.id)) === before);
+    check('M.3 the redirect never carries the code, a token or the secret', !/good-code|snap-access|snap-refresh|snap-secret|the-real-secret/.test(loc(r)));
+    // M.4 Snap only accepts HTTP Basic client authentication: the fallback connects.
+    P.secret = 'snap-secret-value'; P.basicOnly = true; P.tokenCalls.length = 0;
+    r = await raw('/auth/snapchat/callback?code=good-code&state=' + await freshState());
+    check('M.4 Snap requiring HTTP Basic: body refused (invalid_client) → Basic → connected', /snapchat_connected=1/.test(loc(r)) && P.tokenCalls.map((c) => c.auth).join(',') === 'body,basic' && P.tokenCalls[1].code === 'good-code' && !('client_secret' in P.tokenCalls[1]), { loc: loc(r), calls: P.tokenCalls });
+    // refresh uses the same fallback
+    integ(A.id).token_expiry = new Date(Date.now() - 1000).toISOString(); P.tokenCalls.length = 0;
+    const camps = await H.call('GET', '/api/snapchat/campaigns', TA);
+    check('M.5 token refresh uses the same client-auth fallback', camps.status === 200 && P.tokenCalls.some((c) => c.grant_type === 'refresh_token' && c.auth === 'basic'), { status: camps.status, calls: P.tokenCalls.map((c) => c.grant_type + ':' + c.auth) });
+    P.basicOnly = false;
+    // M.6 an expired / reused code: invalid_grant, no Basic retry (client authenticated fine)
+    P.tokenCalls.length = 0;
+    r = await raw('/auth/snapchat/callback?code=used-code&state=' + await freshState());
+    check('M.6 expired or reused code → reason invalid_grant, one request only', /snapchat_error=token_exchange&snapchat_reason=invalid_grant/.test(loc(r)) && P.tokenCalls.length === 1, { loc: loc(r), n: P.tokenCalls.length });
+    // M.7 the documented request shape (body auth) is what's sent first
+    const c0 = P.tokenCalls[0];
+    check('M.7 first request: grant_type, code, client_id, client_secret, redirect_uri in the form body', c0.auth === 'body' && c0.grant_type === 'authorization_code' && c0.client_id === 'snap-client-id' && c0.client_secret === 'snap-secret-value' && c0.redirect_uri === 'http://localhost:5500/auth/snapchat/callback');
+    // M.8 invalid state is still refused before any token request
+    P.tokenCalls.length = 0;
+    r = await raw('/auth/snapchat/callback?code=good-code&state=0123456789abcdef0123456789abcdef');
+    check('M.8 invalid state still refused, no token request made', /snapchat_error=invalid_state/.test(loc(r)) && P.tokenCalls.length === 0);
+    // M.9 config check
+    const ok = await H.call('GET', '/api/snapchat/config-check');
+    check('M.9 config-check (no sign-in needed): credentials accepted, body auth, nothing secret in the answer', ok.status === 200 && ok.body.credentials === 'accepted' && ok.body.clientAuth === 'body' && !/snap-secret|snap-access/.test(JSON.stringify(ok.body)), ok.body);
+    process.env.SNAPCHAT_CLIENT_SECRET = 'snap-secret-wrong';
+    const bad = await H.call('GET', '/api/snapchat/config-check');
+    process.env.SNAPCHAT_CLIENT_SECRET = 'snap-secret-value';
+    check('M.10 config-check with a wrong secret: rejected (invalid_client)', bad.body.credentials === 'rejected' && bad.body.snapReason === 'invalid_client', bad.body);
+    P.tokenCalls.length = 0;
+    await H.call('GET', '/api/snapchat/config-check'); await H.call('GET', '/api/snapchat/config-check');
+    check('M.11 config-check is cached (no Snap request for repeated checks)', P.tokenCalls.length <= 1, P.tokenCalls.length);
   }
 
   if (quiet) [console.log, console.warn, console.error] = quiet;
