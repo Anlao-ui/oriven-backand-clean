@@ -29,7 +29,7 @@ const uuid = () => { n++; const h = n.toString(16).padStart(12, '0'); return 'aa
 let P;
 function reset() {
   P = {
-    valid: { 'snap-access-1': true }, tokenCalls: [], basicOnly: false, secret: 'snap-secret-value', redeemed: {}, singleUse: false, registered: null, codeOk: 'good-code', refreshOk: true, refreshReturnsNew: true,
+    valid: { 'snap-access-1': true }, tokenCalls: [], basicOnly: false, secret: 'snap-secret-value', redeemed: {}, singleUse: false, registered: null, codeFirst: false, codeOk: 'good-code', refreshOk: true, refreshReturnsNew: true,
     camps: {}, squads: {}, ads: {}, creatives: {}, media: {}, uploads: [], puts: [], deletes: [], posts: [], gets: [],
     failAdCreate: false, failStats: false, statsAuth: [],
   };
@@ -49,6 +49,7 @@ H.net.handler = async (url, opts) => {
     const basicOk = !!basic && bid === 'snap-client-id' && bsec === P.secret;
     const bodyOk = !basic && f.get('client_id') === 'snap-client-id' && f.get('client_secret') === P.secret;
     const secretOk = P.basicOnly ? basicOk : (basicOk || bodyOk);
+    if (P.codeFirst && f.get('code') === 'orivenai-credential-check' && f.get('client_id') === 'snap-client-id') return json({ error: 'invalid_grant', error_description: 'Invalid code.', state: '' }, 400);
     if (!secretOk) return json({ error: 'invalid_client', error_description: 'Invalid client.', state: '' }, 400);
     if (f.get('grant_type') === 'authorization_code') {
       const cd = f.get('code');
@@ -430,6 +431,11 @@ const future = () => new Date(Date.now() + 3600e3).toISOString();
     check('M.11 config-check is cached (one check = 2 Snap requests at most, repeated checks add none)', P.tokenCalls.length <= 2, P.tokenCalls.length);
     const sv = await H.call('GET', '/api/snapchat/config-check');
     check('M.12 config-check proves the secret: a deliberately wrong secret gets invalid_client (Snap checks the secret before the code)', sv.body.secretVerified === true && sv.body.wrongSecretReason === 'invalid_client' && /^snap…t-id$/.test(sv.body.clientIdHint) && !/snap-secret/.test(JSON.stringify(sv.body)), sv.body);
+    // A Snap that checks the code before the secret (production behaviour, 2026-11-14): no claim about the secret.
+    P.codeFirst = true; process.env.SNAPCHAT_CLIENT_SECRET = 'snap-secret-other-x';
+    const cf = await H.call('GET', '/api/snapchat/config-check');
+    process.env.SNAPCHAT_CLIENT_SECRET = 'snap-secret-value'; P.codeFirst = false;
+    check('M.13 Snap checking the code first → credentials NOT reported as accepted (client_id_known_secret_unverified)', cf.body.credentials === 'client_id_known_secret_unverified' && cf.body.secretVerified === 'not_checked_before_code', cf.body);
   }
 
   log('\nN. invalid_grant diagnostics (production: snapchat_reason=invalid_grant)');
