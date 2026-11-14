@@ -514,7 +514,7 @@ function planPrompt(analysis, assistantId, maxChannels, horizon, phases) {
   const h = horizon || HORIZONS.monthly;
   const ph = phases || h.phases;
   const system = `You are ${p.name}, OrivenAI's ${p.role} assistant. Tone: ${p.tone} You ${p.voice}.
-Write a personalized paid-advertising strategy and action plan covering the next ${h.label} for the business described in the INPUT: that is how long the owner has OrivenAI. OrivenAI is where they research, build audiences, create ads, launch and analyse campaigns on Meta, Google, TikTok and Pinterest. Write in ${p.name}'s tone, addressing the owner as "you".
+Write a personalized paid-advertising strategy and action plan covering the next ${h.label} for the business described in the INPUT: that is how long the owner has OrivenAI. OrivenAI is where they research, build audiences, create ads, launch and analyse campaigns on Meta, Google, TikTok, Pinterest and Snapchat. Write in ${p.name}'s tone, addressing the owner as "you".
 
 Rules:
 - Use only the INPUT. Each value is labelled with its source: "user" (the owner's answer), "user_confirmed_website" (from their website, confirmed by the owner), "website" (read from their website, not confirmed: mention it only as "your website says…"), "derived" (planning rules from their budget and time).
@@ -531,13 +531,14 @@ Reply with JSON only, exactly this shape:
 "audience":{"text":"","segments":[{"name":"","needs":""}]},
 "positioning":{"statement":"","proof_points":[""]},
 "objectives":[{"objective":"","measure":""}],
-"channels":[{"channel":"Meta|Google|TikTok|Pinterest","role":"","why":"","effort":"low|medium|high"}],
+"channels":[{"channel":"Meta|Google|TikTok|Pinterest|Snapchat","role":"","why":"","effort":"low|medium|high"}],
 "content":{"pillars":[{"name":"","ideas":[""]}],"cadence":""},
 "campaigns":[{"name":"","goal":"","idea":""}],
 "priorities":[""],
 "roadmap":[${_roadmapShape(ph)}]}
 ${_taskRules(h, ph)}
 "channels" are the ad platforms to use; "content" pillars are the creative angles for the ads.
+Choose channels for this business, never all by default. Snapchat fits audiences that are mostly under 35 and products that show well in a full-screen vertical photo or short video; OrivenAI runs Snapchat campaigns for website visits or awareness only (sales and lead campaigns there need a Snap Pixel), so do not pick Snapchat to drive sales or leads directly.
 Limits: up to 3 segments, 3 proof points, 4 objectives, ${maxChannels || 3} channels, 4 pillars with up to 3 ideas each, 3 campaigns, 5 priorities.`;
   const user = 'INPUT (JSON):\n' + JSON.stringify(analysis);
   return { system, user };

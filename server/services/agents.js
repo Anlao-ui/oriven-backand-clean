@@ -163,7 +163,7 @@ function platformGuide(costs) {
   return `HOW ORIVENAI WORKS (use this to guide the user; send them to the right place by name):
 - Control Center: the start page — business details, brand, audiences, competitors, connected ad accounts, Business memory, Marketing Plan and Progress.
 - Research: market, competitor, audience and opportunity research from real web sources (${n('research_report')} per report; runs in the background for a few minutes; reports are kept in the Research library).
-- Create: builds a campaign — ad text and structure for Google, Meta, TikTok or Pinterest (${n('campaign_generation')}), plus images (${n('image_generation')} each) and 5-second videos (${n('video_generation')}). Drafts go to Launch.
+- Create: builds a campaign — ad text and structure for Google, Meta, TikTok, Pinterest or Snapchat (${n('campaign_generation')}), plus images (${n('image_generation')} each) and 5-second videos (${n('video_generation')}). Drafts go to Launch.
 - Launch: review a draft's readiness by platform and publish it when the user chooses.
 - Campaigns: live performance by platform, campaign and date range.
 - Automations: schedules and rules for published campaigns that notify, ask first or act within limits (${n('automation')} to create one; runs are free).

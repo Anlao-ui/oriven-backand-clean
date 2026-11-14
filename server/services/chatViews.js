@@ -28,7 +28,7 @@ const VIEWS = {
   'auto-scheduler': { name: 'Automations scheduler', hint: 'schedules for published campaigns. Help them plan when campaigns run.' },
   'auto-rules':     { name: 'Automation rules', hint: 'rules that notify, ask first or act within limits. Help them design a safe, useful rule.' },
   'auto-activity':  { name: 'Automations activity', hint: 'the record of what their automations did. Help them read it.' },
-  platforms:        { name: 'Ad Platforms', hint: 'where they connect Google, Meta, TikTok and Pinterest ad accounts (they sign in with the platform themselves). Help them connect the right account.' },
+  platforms:        { name: 'Ad Platforms', hint: 'where they connect Google, Meta, TikTok, Pinterest and Snapchat ad accounts (they sign in with the platform themselves). Help them connect the right account.' },
 };
 
 const isView = (v) => typeof v === 'string' && v.length <= 32 && Object.prototype.hasOwnProperty.call(VIEWS, v);
