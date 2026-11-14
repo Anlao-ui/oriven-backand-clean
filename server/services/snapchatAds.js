@@ -181,7 +181,12 @@ async function checkCredentials(cfg, fetchImpl) {
   const clientIdHint = cfg.clientId.length > 8 ? cfg.clientId.slice(0, 4) + '…' + cfg.clientId.slice(-4) : '(short)';
   try {
     const body = await probe('body');
-    if (body !== 'invalid_client') return Object.assign({ credentials: body === 'invalid_grant' ? 'accepted' : 'unknown', clientAuth: 'body', snapReason: body, clientIdHint, clientIdLength: cfg.clientId.length }, body === 'invalid_grant' ? await secretOrder() : {});
+    if (body !== 'invalid_client') {
+      const order = body === 'invalid_grant' ? await secretOrder() : {};
+      // Only call the credentials accepted when Snap provably checked the secret.
+      const credentials = body !== 'invalid_grant' ? 'unknown' : order.secretVerified === true ? 'accepted' : 'client_id_known_secret_unverified';
+      return Object.assign({ credentials, clientAuth: 'body', snapReason: body, clientIdHint, clientIdLength: cfg.clientId.length }, order);
+    }
     const basic = await probe('basic');
     return basic === 'invalid_client' ? { credentials: 'rejected', snapReason: 'invalid_client' } : { credentials: basic === 'invalid_grant' ? 'accepted' : 'unknown', clientAuth: 'basic', snapReason: basic };
   } catch (e) { return { credentials: 'unknown', snapReason: e.reason || 'network' }; }
