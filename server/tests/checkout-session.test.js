@@ -284,6 +284,8 @@ H.STRIPE['checkout.sessions.expire'] = async (id) => ({ id });
     let o = await open('flex');
     check('J1. a new customer’s Flex checkout gets the promotion code automatically (no code field), with the offer in the session and payment metadata',
       o.r.status === 200 && hasIntro(o.c) && !o.c.params.allow_promotion_codes && o.c.params.metadata.introPromotionCode === PROMO && o.c.params.metadata.introDiscountCents === '1600' && o.c.params.payment_intent_data.metadata.introPromotionCode === PROMO && o.c.params.line_items[0].price === pricing.PLANS.flex.stripePriceId, o.c && o.c.params);
+    const ver = async () => (await call('GET', '/api/version', null)).body.introOffer;
+    check('J1b. GET /api/version reports introOffer "ready" (no ids or amounts in the answer)', (await ver()) === 'ready' && !/promo_|coupon|1600/.test(JSON.stringify((await call('GET', '/api/version', null)).body)));
     check('J2. the promotion code and its coupon are read from Stripe (coupon with its product restriction)', promoReads >= 1 && couponOpts && JSON.stringify(couponOpts.expand) === JSON.stringify(['applies_to']), { promoReads, couponOpts });
     for (const plan of ['monthly', 'quarterly', 'semiannual', 'annual']) {
       o = await open(plan);
@@ -300,6 +302,7 @@ H.STRIPE['checkout.sessions.expire'] = async (id) => ({ id });
 
     const refusedPromo = async (label, change) => { reset(); change(); const x = await open('flex'); check(label + ' → the checkout opens at the normal Flex price, without a discount', x.r.status === 200 && !!x.c && !x.c.params.discounts && !x.c.params.metadata.introPromotionCode && x.c.params.line_items[0].price === pricing.PLANS.flex.stripePriceId, x.c && x.c.params); };
     await refusedPromo('J8. coupon amount is not (Flex price − €1)', () => { C = couponObj({ amount_off: 1500 }); });
+    check('J8b. /api/version: introOffer "mismatch" after a coupon that does not fit', (await ver()) === 'mismatch');
     await refusedPromo('J9. coupon is a percentage', () => { C = couponObj({ amount_off: null, percent_off: 50 }); });
     await refusedPromo('J10. coupon is not restricted to the Flex product', () => { C = couponObj({ applies_to: { products: ['prod_other'] } }); });
     await refusedPromo('J11. coupon applies to everything', () => { C = couponObj({ applies_to: undefined }); });
@@ -313,8 +316,10 @@ H.STRIPE['checkout.sessions.expire'] = async (id) => ({ id });
     await refusedPromo('J19. STRIPE_FLEX_PROMO_ID is not a promo_… id', () => { process.env.STRIPE_FLEX_PROMO_ID = 'FLEX1EURO'; });
     process.env.STRIPE_FLEX_PROMO_ID = PROMO;
     await refusedPromo('J20. STRIPE_FLEX_PROMO_ID not set', () => { delete process.env.STRIPE_FLEX_PROMO_ID; });
+    check('J20b. /api/version: introOffer "not_configured" without STRIPE_FLEX_PROMO_ID', (await ver()) === 'not_configured');
     process.env.STRIPE_FLEX_PROMO_ID = PROMO;
     await refusedPromo('J21. INTRO_OFFER.enabled false', () => { pricing.INTRO_OFFER.enabled = false; });
+    check('J21b. /api/version: introOffer "off" when INTRO_OFFER.enabled is false', (await ver()) === 'off');
     pricing.INTRO_OFFER.enabled = true;
 
     // Stripe refuses the session with the code (e.g. the customer has a prior payment in Stripe)

@@ -43,6 +43,13 @@ function init({ stripe, db }) {
   // plans can be sold — and if not, exactly why.
   if ((process.env.RENDER || process.env.NODE_ENV === 'production') && mode !== 'unknown' && process.env.STRIPE_PRICE_STARTUP_CHECK !== 'false') {
     setTimeout(() => { checkStripePrices().then(_logPriceCheck, (err) => console.warn('[Purchases] Stripe price check failed:', err.code || err.message)); }, 3000).unref();
+    // The introductory offer's promotion code, checked once after start (read-only).
+    if (pricing.INTRO_OFFER.enabled && pricing.introPromotionCodeId()) {
+      setTimeout(() => {
+        const plan = pricing.PLANS[pricing.INTRO_OFFER.planId];
+        verifiedStripePrice(plan).then((p) => introDiscountFor(plan, p.productId), (err) => { _setIntroState('unavailable'); console.warn('[Purchases] intro offer check skipped: Flex price not available (' + (err.code || err.message) + ')'); });
+      }, 4000).unref();
+    }
   }
 }
 
@@ -246,6 +253,17 @@ function _logPriceCheck(r) {
 //             the promotion code (our own session metadata), the plan is
 //             Flex, and the discount is exactly the verified amount.
 const INTRO_UNVERIFIED = null;
+// The offer's last known state, for GET /api/version (no ids, no amounts):
+// off | not_configured | unchecked | ready | mismatch | unavailable.
+let _introState = { state: 'unchecked', at: null };
+function _setIntroState(state) { _introState = { state, at: new Date().toISOString() }; }
+function introStatus() {
+  const o = pricing.INTRO_OFFER;
+  if (!o || !o.enabled) return { state: 'off' };
+  if (!String(process.env[pricing.INTRO_PROMO_ENV] || '').trim()) return { state: 'not_configured' };
+  if (!pricing.introPromotionCodeId()) return { state: 'mismatch', reason: 'not a promo_… id' };
+  return Object.assign({}, _introState);
+}
 const _introVerified = new Map(); // promoId|productId -> { at, value }
 function introCents() { return Math.round(pricing.INTRO_OFFER.priceInclVat * 100); }
 
@@ -282,6 +300,7 @@ async function introDiscountFor(plan, productId) {
   const promoId = pricing.introPromotionCodeId();
   if (!promoId) {
     if (raw) alert('intro_promo_not_configured', { env: pricing.INTRO_PROMO_ENV, problem: 'not a promo_… id' });
+    _setIntroState(raw ? 'mismatch' : 'not_configured');
     return INTRO_UNVERIFIED;
   }
   const key = promoId + '|' + productId;
@@ -295,11 +314,14 @@ async function introDiscountFor(plan, productId) {
     coupon = couponId ? await _stripe.coupons.retrieve(couponId, { expand: ['applies_to'] }) : null;
   } catch (err) {
     alert('intro_promo_unavailable', { promo: promoId, env: pricing.INTRO_PROMO_ENV, mode, error: err.code || err.type || err.message, status: err.statusCode || null });
+    _setIntroState('unavailable');
     return INTRO_UNVERIFIED; // not remembered: try again on the next checkout
   }
   const problems = introPromoProblems(promo, coupon, { promoId, plan, productId, mode });
   const value = problems.length ? INTRO_UNVERIFIED : { promotionCode: promoId, couponId: coupon.id, discountCents: coupon.amount_off };
   if (problems.length) alert('intro_promo_mismatch', { promo: promoId, env: pricing.INTRO_PROMO_ENV, problems });
+  else console.log('[Purchases] intro offer ready: first Flex purchase €' + pricing.INTRO_OFFER.priceInclVat + ' (promotion code verified with Stripe)');
+  _setIntroState(problems.length ? 'mismatch' : 'ready');
   _introVerified.set(key, { at: Date.now(), value });
   return value;
 }
@@ -619,8 +641,8 @@ async function historyFor(userId) {
 
 module.exports = {
   init, PurchaseError, createCheckout, checkoutReturnUrls, fulfillFromSession, verifiedStripePrice, priceProblems, checkStripePrices,
-  introPromoProblems, introDiscountFor, introEligible,
-  _resetForTests() { _verified.clear(); _introVerified.clear(); _taxDefault = null; },
+  introPromoProblems, introDiscountFor, introEligible, introStatus,
+  _resetForTests() { _verified.clear(); _introVerified.clear(); _taxDefault = null; _introState = { state: 'unchecked', at: null }; },
   onCheckoutCompleted, onAsyncPaymentSucceeded, onAsyncPaymentFailed, onCheckoutExpired,
   onChargeRefunded, onDisputeCreated, onDisputeClosed,
   grantDueInstalments, refreshLegacyEntitlements, expireAccess, historyFor,
