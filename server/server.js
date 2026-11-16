@@ -7534,7 +7534,10 @@ if (process.env.ORIVEN_TEST_HOOKS === '1') global.__orivenTestHooks = { automati
 const _BOOTED_AT = new Date().toISOString();
 app.get('/api/version', function(req, res) {
   res.set('Cache-Control', 'no-store');
-  res.json({ commit: (process.env.RENDER_GIT_COMMIT || 'local').slice(0, 40), startedAt: _BOOTED_AT });
+  // introOffer: the first-Flex-€1 offer's state (off | not_configured | unchecked |
+  // ready | mismatch | unavailable) — no ids or amounts.
+  let introOffer = null; try { introOffer = require('./services/purchases').introStatus().state; } catch (_) {}
+  res.json({ commit: (process.env.RENDER_GIT_COMMIT || 'local').slice(0, 40), startedAt: _BOOTED_AT, introOffer });
 });
 app.get('/signup',     function(req, res) { res.sendFile(path.resolve(LOCAL_FRONTEND_DIR, 'index.html')); });
 app.get('/login',      function(req, res) { res.sendFile(path.resolve(LOCAL_FRONTEND_DIR, 'index.html')); });

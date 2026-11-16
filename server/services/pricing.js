@@ -226,7 +226,22 @@ function publicPlans() {
   });
 }
 
+// Introductory offer: the FIRST Flex purchase costs €1 (before VAT). Mirrors
+// js/plans.js ORIVEN_INTRO_OFFER in the frontend (tests/pricing.test.js
+// fails when they differ). The discount is a Stripe promotion code, made by
+// the owner in Stripe (coupon "amount off = Flex price − €1", duration once,
+// restricted to the Flex product; promotion code "first-time order only").
+// Its id comes from STRIPE_FLEX_PROMO_ID (promo_…); without it, or with
+// enabled false, every Flex checkout is at the normal price.
+const INTRO_OFFER = { enabled: true, planId: 'flex', priceInclVat: 1 };
+const INTRO_PROMO_ENV = 'STRIPE_FLEX_PROMO_ID';
+function introPromotionCodeId(env) {
+  const v = String((env || process.env)[INTRO_PROMO_ENV] || '').trim();
+  return /^promo_[A-Za-z0-9]+$/.test(v) ? v : null;
+}
+
 module.exports = {
+  INTRO_OFFER, INTRO_PROMO_ENV, introPromotionCodeId,
   VAT_RATE, CURRENCY, AI_COST_SHARE, PLANNING_COST_PER_CREDIT_EUR,
   PLANS, PLAN_ORDER, FEATURE_COSTS, CHAT_LIMITS,
   PAID_STATUSES, LEGACY_PLANS, LEGACY_ALLOWANCES, LEGACY_GRACE_DAYS,
