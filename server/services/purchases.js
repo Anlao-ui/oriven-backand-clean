@@ -229,6 +229,98 @@ function _logPriceCheck(r) {
   (r.allOk ? console.log : console.warn)(head + (r.allOk ? 'all five plans can be sold. ' : 'checkout is refused for some plans. ') + r.plans.map(line).join(' | '));
 }
 
+// ── Introductory offer: the first Flex purchase for €1 ──────────────
+// services/pricing.js INTRO_OFFER + STRIPE_FLEX_PROMO_ID (a promotion code
+// the owner made in Stripe). Applied automatically to an ELIGIBLE customer's
+// Flex checkout, never typed in by the customer (Checkout has no promotion
+// code field). Every failure falls back to the normal Flex price: the offer
+// can never block a purchase.
+//   eligible  no earlier paid purchase of any plan (paid, refunded or
+//             disputed) and no legacy subscription — and Stripe itself
+//             enforces "first-time order only" on the promotion code.
+//   verified  the promotion code and its coupon, read from Stripe: active,
+//             first-time only, not tied to one customer, coupon valid, EUR,
+//             amount off exactly (Flex price − €1), duration once, and
+//             restricted to the Flex product. Remembered for 10 minutes.
+//   paid      _paidAmounts accepts a discount only when this checkout carried
+//             the promotion code (our own session metadata), the plan is
+//             Flex, and the discount is exactly the verified amount.
+const INTRO_UNVERIFIED = null;
+const _introVerified = new Map(); // promoId|productId -> { at, value }
+function introCents() { return Math.round(pricing.INTRO_OFFER.priceInclVat * 100); }
+
+// Pure: what's wrong with the promotion code + coupon for the plan ([] = right).
+function introPromoProblems(promo, coupon, { promoId, plan, productId, mode, now }) {
+  const cents = pricing.priceInclVatCents(plan);
+  const want = cents - introCents();
+  const p = [];
+  if (!promo || promo.id !== promoId) return ['different promotion code returned'];
+  if (promo.active === false) p.push('promotion code is inactive');
+  if (promo.expires_at && promo.expires_at * 1000 <= (now || Date.now())) p.push('promotion code has expired');
+  if (promo.max_redemptions != null && promo.times_redeemed >= promo.max_redemptions) p.push('promotion code is used up (max redemptions)');
+  if (promo.customer) p.push('promotion code is limited to one customer');
+  const r = promo.restrictions || {};
+  if (r.first_time_transaction !== true) p.push('promotion code is not "first-time order only"');
+  if (r.minimum_amount && r.minimum_amount > cents) p.push('promotion code needs a minimum amount above the Flex price');
+  if (typeof promo.livemode === 'boolean' && mode !== 'unknown' && promo.livemode !== (mode === 'live')) p.push((promo.livemode ? 'Live' : 'Test') + ' Mode promotion code used with a ' + mode + ' key');
+  if (!coupon) { p.push('coupon not readable'); return p; }
+  if (coupon.valid === false) p.push('coupon is no longer valid');
+  if (coupon.percent_off != null) p.push('coupon is a percentage, not an amount off');
+  if (coupon.amount_off !== want) p.push('coupon amount off ' + coupon.amount_off + ' instead of ' + want + ' (Flex price − €' + pricing.INTRO_OFFER.priceInclVat + ')');
+  if (String(coupon.currency || '').toLowerCase() !== pricing.CURRENCY) p.push('coupon currency ' + coupon.currency + ' instead of ' + pricing.CURRENCY);
+  if (coupon.duration !== 'once') p.push('coupon duration ' + coupon.duration + ' instead of once');
+  const products = (coupon.applies_to && coupon.applies_to.products) || [];
+  if (!productId || !products.includes(productId)) p.push('coupon is not restricted to the Flex product' + (products.length ? ' (applies to ' + products.join(', ') + ')' : ' (applies to everything)'));
+  return p;
+}
+
+// The verified offer for this plan, or null (= normal price).
+async function introDiscountFor(plan, productId) {
+  const o = pricing.INTRO_OFFER;
+  if (!o || !o.enabled || plan.id !== o.planId) return INTRO_UNVERIFIED;
+  const raw = String(process.env[pricing.INTRO_PROMO_ENV] || '').trim();
+  const promoId = pricing.introPromotionCodeId();
+  if (!promoId) {
+    if (raw) alert('intro_promo_not_configured', { env: pricing.INTRO_PROMO_ENV, problem: 'not a promo_… id' });
+    return INTRO_UNVERIFIED;
+  }
+  const key = promoId + '|' + productId;
+  const hit = _introVerified.get(key);
+  if (hit && Date.now() - hit.at < 10 * 60e3) return hit.value;
+  const mode = pricing.stripeMode();
+  let promo, coupon;
+  try {
+    promo = await _stripe.promotionCodes.retrieve(promoId);
+    const couponId = idOf(promo && promo.coupon) || idOf(promo && promo.promotion && promo.promotion.coupon);
+    coupon = couponId ? await _stripe.coupons.retrieve(couponId, { expand: ['applies_to'] }) : null;
+  } catch (err) {
+    alert('intro_promo_unavailable', { promo: promoId, env: pricing.INTRO_PROMO_ENV, mode, error: err.code || err.type || err.message, status: err.statusCode || null });
+    return INTRO_UNVERIFIED; // not remembered: try again on the next checkout
+  }
+  const problems = introPromoProblems(promo, coupon, { promoId, plan, productId, mode });
+  const value = problems.length ? INTRO_UNVERIFIED : { promotionCode: promoId, couponId: coupon.id, discountCents: coupon.amount_off };
+  if (problems.length) alert('intro_promo_mismatch', { promo: promoId, env: pricing.INTRO_PROMO_ENV, problems });
+  _introVerified.set(key, { at: Date.now(), value });
+  return value;
+}
+
+// One introductory offer per account: never after a paid purchase or a
+// legacy subscription. (Stripe adds its own "first-time order" check.)
+async function introEligible(userId, profile) {
+  if (profile && (profile.stripe_subscription_id || pricing.LEGACY_PLANS.includes(profile.subscription_status))) return false;
+  const { data, error } = await _db.from('purchases').select('id').eq('user_id', userId).in('status', _DONE).limit(1);
+  if (error) { alert('intro_eligibility_unreadable', { user: userId, error: error.message }); return false; }
+  return !(data && data.length);
+}
+
+// Stripe refused a checkout that carried the offer (the customer already has
+// a prior payment, the code was switched off in the meantime, …): retry once
+// at the normal price. A refusal that has nothing to do with the discount
+// fails again on the retry and is handled as before.
+function _isRequestRefusal(err) {
+  return !!err && (String(err.type || '') === 'StripeInvalidRequestError' || err.statusCode === 400);
+}
+
 async function createCheckout({ user, planId, successUrl, cancelUrl, source }) {
   const plan = pricing.planById(planId);
   if (!plan) throw new PurchaseError('UNKNOWN_PLAN', 'Choose one of the plans.', 400);
@@ -254,6 +346,13 @@ async function createCheckout({ user, planId, successUrl, cancelUrl, source }) {
   if (insErr) throw insErr;
 
   const meta = { userId: user.id, purchaseId: id, planId: plan.id, priceId: stripePrice.priceId };
+  // The €1 first Flex purchase, for an eligible customer, when the promotion
+  // code checks out with Stripe. Otherwise null: the normal price.
+  let intro = null;
+  if (pricing.INTRO_OFFER.enabled && plan.id === pricing.INTRO_OFFER.planId && pricing.introPromotionCodeId() && await introEligible(user.id, profile)) {
+    intro = await introDiscountFor(plan, stripePrice.productId);
+  }
+  if (intro) { meta.introPromotionCode = intro.promotionCode; meta.introDiscountCents = String(intro.discountCents); }
   const params = {
     mode: 'payment',
     // The plan's own Stripe Price (verified above): Checkout shows its
@@ -275,9 +374,21 @@ async function createCheckout({ user, planId, successUrl, cancelUrl, source }) {
     params.customer_email = user.email || undefined;
     params.customer_creation = 'always';
   }
+  if (intro) params.discounts = [{ promotion_code: intro.promotionCode }];
   let session;
   try {
-    session = await _stripe.checkout.sessions.create(params, { idempotencyKey: 'purchase-' + id });
+    try {
+      session = await _stripe.checkout.sessions.create(params, { idempotencyKey: 'purchase-' + id });
+    } catch (err) {
+      if (!intro || !_isRequestRefusal(err)) throw err;
+      // The offer was refused: the same checkout at the normal Flex price.
+      alert('intro_promo_refused', { purchase: id, promo: intro.promotionCode, error: err.code || err.message });
+      const plain = Object.assign({}, meta); delete plain.introPromotionCode; delete plain.introDiscountCents;
+      const regular = Object.assign({}, params, { metadata: plain, payment_intent_data: Object.assign({}, params.payment_intent_data, { metadata: plain }) });
+      delete regular.discounts;
+      intro = null;
+      session = await _stripe.checkout.sessions.create(regular, { idempotencyKey: 'purchase-' + id + '-regular' });
+    }
   } catch (err) {
     await _db.from('purchases').update({ status: 'failed', failure_reason: 'checkout could not be created', updated_at: new Date().toISOString() }).eq('id', id);
     throw err;
@@ -289,8 +400,8 @@ async function createCheckout({ user, planId, successUrl, cancelUrl, source }) {
     alert('stripe_checkout_without_url', { purchase: id, session: session && session.id });
     throw new PurchaseError('CHECKOUT_UNAVAILABLE', 'Secure checkout couldn’t be opened. Nothing was charged — please try again.', 502);
   }
-  console.log('[Purchases] checkout', JSON.stringify({ user: user.id, purchase: id, plan: plan.id, source: source || null }));
-  return { url: session.url, purchaseId: id, plan: plan.id };
+  console.log('[Purchases] checkout', JSON.stringify({ user: user.id, purchase: id, plan: plan.id, source: source || null, intro: !!intro }));
+  return { url: session.url, purchaseId: id, plan: plan.id, intro: !!intro };
 }
 
 // ── Fulfilment ──────────────────────────────────────────────────
@@ -349,11 +460,30 @@ async function _paidAmounts(session, purchase) {
   if (item.quantity !== 1) problems.push('quantity ' + item.quantity);
   if (item.amount_subtotal !== base) problems.push('plan price ' + item.amount_subtotal + ' instead of ' + base);
   if (session.amount_subtotal != null && session.amount_subtotal !== base) problems.push('subtotal ' + session.amount_subtotal + ' instead of ' + base);
-  if (discount) problems.push('discount ' + discount);
+  // A discount is accepted ONLY as the introductory offer this server put on
+  // this checkout (session metadata is written by the server alone), on the
+  // offer's plan, exactly (plan price − €1), with that promotion code. Any
+  // other discount refuses the payment, as before.
+  const meta = session.metadata || {};
+  const introPromo = meta.introPromotionCode || null;
+  if (discount) {
+    const want = base - introCents();
+    const applied = Array.isArray(session.discounts) ? session.discounts.map((d) => idOf(d && d.promotion_code)).filter(Boolean) : null;
+    if (!introPromo) problems.push('discount ' + discount);
+    else {
+      if (purchase.plan_id !== pricing.INTRO_OFFER.planId) problems.push('introductory discount on plan ' + purchase.plan_id);
+      if (discount !== want || String(discount) !== String(meta.introDiscountCents)) problems.push('discount ' + discount + ' instead of the introductory ' + want);
+      if (applied && !(applied.length === 1 && applied[0] === introPromo)) problems.push('discount from ' + (applied.join(',') || 'no promotion code') + ' instead of ' + introPromo);
+      if (typeof item.amount_discount === 'number' && item.amount_discount !== discount) problems.push('discount ' + discount + ' on the session but ' + item.amount_discount + ' on the line item');
+    }
+  }
   if (!Number.isInteger(tax) || tax < 0) problems.push('tax ' + tax + ' is not a valid amount');
   else if (typeof item.amount_tax === 'number' && item.amount_tax !== tax) problems.push('tax ' + tax + ' on the session but ' + item.amount_tax + ' on the line item');
-  if (!(total === base + tax || total === base)) problems.push('total ' + total + ' is not price ' + base + ' + tax ' + tax);
-  return problems.length ? { problem: problems.join('; ') } : { base, tax, total };
+  const net = base - discount;
+  if (!(total === net + tax || total === net)) problems.push('total ' + total + ' is not price ' + base + (discount ? ' − discount ' + discount : '') + ' + tax ' + tax);
+  // fulfill_purchase() still receives the plan price (base): it checks the
+  // purchase's plan terms; the discount was verified here.
+  return problems.length ? { problem: problems.join('; ') } : { base, tax, total, discount };
 }
 
 const _DONE = ['paid', 'refunded', 'partially_refunded', 'disputed', 'dispute_won'];
@@ -489,7 +619,8 @@ async function historyFor(userId) {
 
 module.exports = {
   init, PurchaseError, createCheckout, checkoutReturnUrls, fulfillFromSession, verifiedStripePrice, priceProblems, checkStripePrices,
-  _resetForTests() { _verified.clear(); _taxDefault = null; },
+  introPromoProblems, introDiscountFor, introEligible,
+  _resetForTests() { _verified.clear(); _introVerified.clear(); _taxDefault = null; },
   onCheckoutCompleted, onAsyncPaymentSucceeded, onAsyncPaymentFailed, onCheckoutExpired,
   onChargeRefunded, onDisputeCreated, onDisputeClosed,
   grantDueInstalments, refreshLegacyEntitlements, expireAccess, historyFor,

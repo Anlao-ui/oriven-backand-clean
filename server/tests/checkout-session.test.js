@@ -265,6 +265,108 @@ H.STRIPE['checkout.sessions.expire'] = async (id) => ({ id });
     check('I11. …Stripe\'s retry of that same event then grants 1,600 credits once', res2.status === 200 && prof(uid).credits_balance === 1600, { status: res2.status, bal: prof(uid).credits_balance });
   }
 
+  // ── J. Introductory offer: the first Flex purchase for €1 ──────
+  log('\nJ. First Flex purchase for €1 (promotion code from STRIPE_FLEX_PROMO_ID)');
+  {
+    const PROMO = 'promo_TESTflex1';
+    const FLEX_PRODUCT = TEST_PRICES[pricing.PLANS.flex.stripePriceId].product;
+    const promoObj = (o) => Object.assign({ id: PROMO, object: 'promotion_code', active: true, livemode: false, customer: null, max_redemptions: null, times_redeemed: 0, expires_at: null, restrictions: { first_time_transaction: true, minimum_amount: null }, coupon: 'coupon_flex' }, o || {});
+    const couponObj = (o) => Object.assign({ id: 'coupon_flex', object: 'coupon', valid: true, amount_off: 1600, percent_off: null, currency: 'eur', duration: 'once', applies_to: { products: [FLEX_PRODUCT] } }, o || {});
+    let P = promoObj(), C = couponObj(), promoReads = 0, couponOpts = null;
+    H.STRIPE['promotionCodes.retrieve'] = async (id) => { promoReads++; if (P instanceof Error) throw P; if (id !== P.id) throw Object.assign(new Error('No such promotion code'), { statusCode: 404 }); return Object.assign({}, P); };
+    H.STRIPE['coupons.retrieve'] = async (id, opts) => { couponOpts = opts; return Object.assign({}, C); };
+    const reset = () => { purchases._resetForTests(); P = promoObj(); C = couponObj(); };
+    process.env.STRIPE_FLEX_PROMO_ID = PROMO;
+    const open = async (plan, setup) => { const tok = user(); const uid = tok.slice(4); if (setup) setup(uid); const k = CREATED.length; const r = await call('POST', '/api/create-checkout-session', tok, { plan }); return { r, uid, tok, c: CREATED[CREATED.length - 1], made: CREATED.slice(k) }; };
+    const hasIntro = (c) => !!(c && c.params.discounts && c.params.discounts.length === 1 && c.params.discounts[0].promotion_code === PROMO);
+
+    reset();
+    let o = await open('flex');
+    check('J1. a new customer’s Flex checkout gets the promotion code automatically (no code field), with the offer in the session and payment metadata',
+      o.r.status === 200 && hasIntro(o.c) && !o.c.params.allow_promotion_codes && o.c.params.metadata.introPromotionCode === PROMO && o.c.params.metadata.introDiscountCents === '1600' && o.c.params.payment_intent_data.metadata.introPromotionCode === PROMO && o.c.params.line_items[0].price === pricing.PLANS.flex.stripePriceId, o.c && o.c.params);
+    check('J2. the promotion code and its coupon are read from Stripe (coupon with its product restriction)', promoReads >= 1 && couponOpts && JSON.stringify(couponOpts.expand) === JSON.stringify(['applies_to']), { promoReads, couponOpts });
+    for (const plan of ['monthly', 'quarterly', 'semiannual', 'annual']) {
+      o = await open(plan);
+      check('J3.' + plan + ' no offer on ' + plan + ' (normal price, no discount)', o.r.status === 200 && !o.c.params.discounts && !o.c.params.metadata.introPromotionCode, o.c && o.c.params.discounts);
+    }
+    o = await open('flex', (uid) => H.rows('purchases').push({ id: 'p-prev-' + uid, user_id: uid, plan_id: 'flex', status: 'paid', created_at: NEW }));
+    check('J4. a customer who already paid once (even for Flex) buys Flex at the normal price', o.r.status === 200 && !hasIntro(o.c) && !o.c.params.metadata.introPromotionCode, o.c && o.c.params.discounts);
+    o = await open('flex', (uid) => H.rows('purchases').push({ id: 'p-ref-' + uid, user_id: uid, plan_id: 'monthly', status: 'refunded', created_at: NEW }));
+    check('J5. …also after a refunded purchase', o.r.status === 200 && !hasIntro(o.c), o.c && o.c.params.discounts);
+    o = await open('flex', (uid) => { const pr = H.rows('profiles').find((x) => x.id === uid); pr.subscription_status = 'free'; pr.stripe_subscription_id = 'sub_legacy1'; });
+    check('J6. …and for an account that had a legacy subscription', o.r.status === 200 && !hasIntro(o.c), o.c && o.c.params.discounts);
+    o = await open('flex', (uid) => H.rows('purchases').push({ id: 'p-exp-' + uid, user_id: uid, plan_id: 'flex', status: 'expired', created_at: NEW }));
+    check('J7. an earlier checkout that was never paid (expired) does not use up the offer', o.r.status === 200 && hasIntro(o.c), o.c && o.c.params.discounts);
+
+    const refusedPromo = async (label, change) => { reset(); change(); const x = await open('flex'); check(label + ' → the checkout opens at the normal Flex price, without a discount', x.r.status === 200 && !!x.c && !x.c.params.discounts && !x.c.params.metadata.introPromotionCode && x.c.params.line_items[0].price === pricing.PLANS.flex.stripePriceId, x.c && x.c.params); };
+    await refusedPromo('J8. coupon amount is not (Flex price − €1)', () => { C = couponObj({ amount_off: 1500 }); });
+    await refusedPromo('J9. coupon is a percentage', () => { C = couponObj({ amount_off: null, percent_off: 50 }); });
+    await refusedPromo('J10. coupon is not restricted to the Flex product', () => { C = couponObj({ applies_to: { products: ['prod_other'] } }); });
+    await refusedPromo('J11. coupon applies to everything', () => { C = couponObj({ applies_to: undefined }); });
+    await refusedPromo('J12. coupon duration is not "once"', () => { C = couponObj({ duration: 'forever' }); });
+    await refusedPromo('J13. coupon no longer valid', () => { C = couponObj({ valid: false }); });
+    await refusedPromo('J14. promotion code not "first-time order only"', () => { P = promoObj({ restrictions: { first_time_transaction: false } }); });
+    await refusedPromo('J15. promotion code inactive', () => { P = promoObj({ active: false }); });
+    await refusedPromo('J16. promotion code tied to one customer', () => { P = promoObj({ customer: 'cus_someone' }); });
+    await refusedPromo('J17. Live Mode promotion code with a test key', () => { P = promoObj({ livemode: true }); });
+    await refusedPromo('J18. Stripe cannot return the promotion code', () => { P = Object.assign(new Error('No such promotion code'), { statusCode: 404, type: 'StripeInvalidRequestError' }); });
+    await refusedPromo('J19. STRIPE_FLEX_PROMO_ID is not a promo_… id', () => { process.env.STRIPE_FLEX_PROMO_ID = 'FLEX1EURO'; });
+    process.env.STRIPE_FLEX_PROMO_ID = PROMO;
+    await refusedPromo('J20. STRIPE_FLEX_PROMO_ID not set', () => { delete process.env.STRIPE_FLEX_PROMO_ID; });
+    process.env.STRIPE_FLEX_PROMO_ID = PROMO;
+    await refusedPromo('J21. INTRO_OFFER.enabled false', () => { pricing.INTRO_OFFER.enabled = false; });
+    pricing.INTRO_OFFER.enabled = true;
+
+    // Stripe refuses the session with the code (e.g. the customer has a prior payment in Stripe)
+    reset();
+    const origCreate = H.STRIPE['checkout.sessions.create'];
+    H.STRIPE['checkout.sessions.create'] = async (params, opts) => { if (params.discounts) throw Object.assign(new Error('This promotion code cannot be redeemed because the associated customer has prior transactions.'), { type: 'StripeInvalidRequestError', statusCode: 400, code: 'promotion_code_customer_not_first_time' }); return origCreate(params, opts); };
+    o = await open('flex');
+    check('J22. Stripe refuses the code → the same checkout opens at the normal Flex price (no error for the customer, new idempotency key, no offer metadata)',
+      o.r.status === 200 && o.made.length === 1 && !o.c.params.discounts && !o.c.params.metadata.introPromotionCode && !o.c.params.payment_intent_data.metadata.introPromotionCode && /-regular$/.test(o.c.opts.idempotencyKey) && /^https:\/\/checkout\.stripe\.com\//.test(o.r.body.url), { status: o.r.status, made: o.made.length, params: o.c && o.c.params });
+    H.STRIPE['checkout.sessions.create'] = async () => { throw Object.assign(new Error('boom'), { type: 'StripeAPIError' }); };
+    o = await open('flex');
+    check('J23. a Stripe outage (not a refusal) is not retried: 500 "Nothing was charged", as before', o.r.status === 500 && /Nothing was charged/.test(o.r.body.error || ''), o.r);
+    H.STRIPE['checkout.sessions.create'] = origCreate;
+
+    // After payment: exactly the introductory discount is accepted
+    reset();
+    const introPaid = (c, over, lineOver) => {
+      const tax = 21, total = 100 + tax; // €1.00 + 21 % VAT
+      LINES[c.id] = { object: 'list', data: [Object.assign({ object: 'item', price: Object.assign({}, TEST_PRICES[c.params.line_items[0].price]), quantity: 1, currency: 'eur', amount_subtotal: 1700, amount_discount: 1600, amount_tax: tax, amount_total: total }, lineOver || {})] };
+      return paidSession(c, Object.assign({ amount_subtotal: 1700, amount_total: total, total_details: { amount_tax: tax, amount_discount: 1600, amount_shipping: 0 }, discounts: [{ coupon: 'coupon_flex', promotion_code: PROMO }] }, over || {}));
+    };
+    o = await open('flex');
+    await hook('evt_' + (++evN), 'checkout.session.completed', introPaid(o.c));
+    check('J24. paid €1.00 + €0.21 VAT with the code → Flex access and 1,050 credits; the purchase records the €1.21 actually paid', prof(o.uid).access_plan === 'flex' && prof(o.uid).credits_balance === 1050 && purch(o.c).status === 'paid' && purch(o.c).amount_total_cents === 121 && purch(o.c).amount_tax_cents === 21, { prof: prof(o.uid), purch: purch(o.c) });
+    const again = await call('POST', '/api/create-checkout-session', o.tok, { plan: 'flex' });
+    const c2 = CREATED[CREATED.length - 1];
+    check('J25. the same customer’s next Flex checkout: normal price, no code', again.status === 200 && c2 !== o.c && !hasIntro(c2), c2 && c2.params.discounts);
+
+    const refusedPaid = async (label, mk) => { reset(); const x = await open('flex'); const s = mk(x.c); await hook('evt_' + (++evN), 'checkout.session.completed', s); check(label + ' → no access, no credits', prof(x.uid).credits_balance === 0 && purch(x.c).status !== 'paid', { prof: prof(x.uid), purch: purch(x.c) }); };
+    await refusedPaid('J26. a bigger discount than the offer (€17 off)', (c) => introPaid(c, { amount_total: 0, total_details: { amount_tax: 0, amount_discount: 1700, amount_shipping: 0 } }, { amount_discount: 1700, amount_tax: 0, amount_total: 0 }));
+    await refusedPaid('J27. the discount came from another promotion code', (c) => introPaid(c, { discounts: [{ coupon: 'coupon_x', promotion_code: 'promo_OTHER' }] }));
+    await refusedPaid('J28. line item and session disagree on the discount', (c) => introPaid(c, {}, { amount_discount: 1500 }));
+    await refusedPaid('J29. total does not add up (€1.00 − discount + VAT)', (c) => introPaid(c, { amount_total: 99 }));
+    {
+      // A checkout WITHOUT the offer metadata (normal price) paid with a discount → refused, as before.
+      reset();
+      const x = await open('monthly');
+      LINES[x.c.id] = PG.lineItemsFor(x.c.params, TEST_PRICES);
+      await hook('evt_' + (++evN), 'checkout.session.completed', paidSession(x.c, { amount_total: 2509, total_details: { amount_tax: 609, amount_discount: 1000 } }));
+      check('J30. a discount on a checkout that carried no offer (Monthly) → refused, no credits', prof(x.uid).credits_balance === 0, purch(x.c));
+    }
+    {
+      // The offer metadata but the discount did not apply (Stripe charged the normal price) → accepted at €17.
+      reset();
+      const x = await open('flex');
+      LINES[x.c.id] = PG.lineItemsFor(x.c.params, TEST_PRICES);
+      await hook('evt_' + (++evN), 'checkout.session.completed', paidSession(x.c));
+      check('J31. checkout with the offer but paid at the full €17 + VAT → accepted, 1,050 credits', prof(x.uid).credits_balance === 1050 && purch(x.c).amount_total_cents === 2057, purch(x.c));
+    }
+    delete process.env.STRIPE_FLEX_PROMO_ID;
+  }
+
   check('Z. no outbound network', H.net.blocked.length === 0, H.net.blocked);
   if (quiet) [console.log, console.warn, console.error] = quiet;
   done();

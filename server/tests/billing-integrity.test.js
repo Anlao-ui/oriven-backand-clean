@@ -126,10 +126,13 @@ class StripeMock {
     if (/^sk_live/.test(key)) throw new Error('LIVE KEY USED IN TEST');
     this.webhooks = new RealStripe('sk_test_mock_only').webhooks;
     this.checkout = { sessions: {
-      create: async (p) => { S.calls.push(['checkout.create', p]); maybeFail('checkout'); return { id: 'cs_' + S.calls.length, url: 'https://checkout.stripe.test/cs' }; },
+      create: async (p) => { S.calls.push(['checkout.create', p]); maybeFail('checkout'); if (p.discounts && S.refuseDiscount) throw stripeErr('This promotion code cannot be redeemed because the associated customer has prior transactions.', { statusCode: 400 }); return { id: 'cs_' + S.calls.length, url: 'https://checkout.stripe.test/cs' }; },
       retrieve: async (id) => { S.calls.push(['checkout.retrieve', id]); if (!S.sessions[id]) throw stripeErr('No such checkout session', { statusCode: 404 }); return clone(S.sessions[id]); },
     } };
     this.prices = { retrieve: async (id) => { S.calls.push(['price.retrieve', id]); if (!TEST_PRICES[id]) throw stripeErr('No such price', { statusCode: 404, code: 'resource_missing' }); return clone(TEST_PRICES[id]); } };
+    // The introductory Flex offer (STRIPE_FLEX_PROMO_ID): promotion code + its coupon.
+    this.promotionCodes = { retrieve: async (id) => { S.calls.push(['promo.retrieve', id]); if (!S.promo || S.promo.id !== id) throw stripeErr('No such promotion code', { statusCode: 404 }); return clone(S.promo); } };
+    this.coupons = { retrieve: async (id) => { S.calls.push(['coupon.retrieve', id]); if (!S.coupon || S.coupon.id !== id) throw stripeErr('No such coupon', { statusCode: 404 }); return clone(S.coupon); } };
     this.billingPortal = { sessions: { create: async (p) => { S.calls.push(['portal.create', p]); return { url: 'https://billing.stripe.test/' + p.customer }; } } };
     this.subscriptions = {
       retrieve: async (id) => { S.calls.push(['sub.retrieve', id]); maybeFail('retrieve'); if (!S.subs[id]) throw stripeErr('No such subscription', { statusCode: 404, code: 'resource_missing' }); return clone(S.subs[id]); },
@@ -438,6 +441,37 @@ const invoice = (sub, reason, extra) => Object.assign({ id: 'in_' + Math.random(
   check('get-subscription after the end date: has_access false (even before the expiry job ran)', r.status === 200 && r.body.has_access === false, r.body);
   r = await call('POST', '/api/select-free-plan', 'tok_uA', {});
   check('POST /api/select-free-plan → 410 FREE_PLAN_RETIRED', r.status === 410 && r.body.code === 'FREE_PLAN_RETIRED');
+
+  out('\nIntroductory offer: the first Flex purchase for €1');
+  {
+    reset();
+    require(path.join(SERVER_DIR, 'services/purchases.js'))._resetForTests();
+    const flexPrice = TEST_PRICES[PRICING.PLANS.flex.stripePriceId];
+    S.promo = { id: 'promo_BIflex', object: 'promotion_code', active: true, livemode: false, customer: null, max_redemptions: null, times_redeemed: 0, restrictions: { first_time_transaction: true }, coupon: 'coupon_BIflex' };
+    S.coupon = { id: 'coupon_BIflex', object: 'coupon', valid: true, amount_off: 1600, percent_off: null, currency: 'eur', duration: 'once', applies_to: { products: [flexPrice.product] } };
+    process.env.STRIPE_FLEX_PROMO_ID = 'promo_BIflex';
+    const last = () => (stripeCalls('checkout.create').slice(-1)[0] || [])[1] || {};
+    let ri = await call('POST', '/api/create-checkout-session', 'tok_uA', { plan: 'flex' });
+    check('a free account’s first Flex checkout carries the verified promotion code (automatic) and the offer in its metadata', ri.status === 200 && JSON.stringify(last().discounts) === JSON.stringify([{ promotion_code: 'promo_BIflex' }]) && last().metadata.introPromotionCode === 'promo_BIflex' && last().metadata.introDiscountCents === '1600' && last().line_items[0].price === PRICING.PLANS.flex.stripePriceId, last());
+    ri = await call('POST', '/api/create-checkout-session', 'tok_uA', { plan: 'monthly' });
+    check('…Monthly for the same account: no discount', ri.status === 200 && !last().discounts && !last().metadata.introPromotionCode, last());
+    ri = await call('POST', '/api/create-checkout-session', 'tok_uM', { plan: 'flex' });
+    check('…a legacy (manually granted Creator) account: Flex at the normal price', ri.status === 200 && !last().discounts, last());
+    rows('purchases').push({ id: 'pBI-paid', user_id: 'uA', plan_id: 'flex', status: 'paid', created_at: new Date().toISOString() });
+    ri = await call('POST', '/api/create-checkout-session', 'tok_uA', { plan: 'flex' });
+    check('…once the account has a paid purchase, Flex is at the normal price', ri.status === 200 && !last().discounts, last());
+    rows('purchases').splice(rows('purchases').findIndex((x) => x.id === 'pBI-paid'), 1);
+    S.refuseDiscount = true;
+    const before = stripeCalls('checkout.create').length;
+    // (a fresh free account: uA has reached the per-minute checkout limit)
+    rows('profiles').push(P('uI', 'free')); TOKENS.tok_uI = { id: 'uI', email: 'uI@example.invalid' };
+    ri = await call('POST', '/api/create-checkout-session', 'tok_uI', { plan: 'flex' });
+    const made = stripeCalls('checkout.create').slice(before).map((c) => c[1]);
+    check('Stripe refuses the code → retried once without it: checkout opens at the normal Flex price', ri.status === 200 && made.length === 2 && !!made[0].discounts && !made[1].discounts && !made[1].metadata.introPromotionCode, { status: ri.status, body: ri.body, made: made.map((m) => !!m.discounts) });
+    S.refuseDiscount = false;
+    delete process.env.STRIPE_FLEX_PROMO_ID;
+    S.promo = null; S.coupon = null;
+  }
 
   out('\nPreserved behaviour');
   const cm = require(path.join(SERVER_DIR, 'services/creditManager.js'));

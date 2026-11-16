@@ -66,7 +66,8 @@ check('public plan list (GET /api/pricing) carries the price BEFORE VAT (VAT add
 check('public prices before VAT: Flex 17, Monthly 29, Quarterly 78, Semi-Annual 143, Annual 245', pricing.publicPlans().map((p) => p.price).join() === '17,29,78,143,245');
 
 console.log('\nE. Frontend copy (oriven-frontend/js/plans.js) matches');
-const FE = path.resolve(__dirname, '..', '..', '..', 'oriven-frontend', 'js', 'plans.js');
+// FRONTEND_DIR points at another frontend checkout (e.g. a feature worktree).
+const FE = process.env.FRONTEND_DIR ? path.resolve(process.env.FRONTEND_DIR, 'js', 'plans.js') : path.resolve(__dirname, '..', '..', '..', 'oriven-frontend', 'js', 'plans.js');
 if (!fs.existsSync(FE)) {
   console.log('  SKIP — ' + FE + ' not found (frontend repo not next to the backend)');
 } else {
@@ -81,6 +82,8 @@ if (!fs.existsSync(FE)) {
   check('the same action costs', JSON.stringify(P.featureCosts) === JSON.stringify(FEATURE_COSTS), { fe: P.featureCosts, be: FEATURE_COSTS });
   check('renewal manual, credits expire with access', P.renewal === 'manual' && P.creditsExpireWithAccess === true);
   check('frontend complete-ad totals are the sum of the real server steps', fe.CREDIT_COSTS.imageAdComplete === FEATURE_COSTS.campaign_generation + FEATURE_COSTS.image_generation && fe.CREDIT_COSTS.videoAdComplete === FEATURE_COSTS.campaign_generation + FEATURE_COSTS.video_generation);
+  if (fe.ORIVEN_INTRO_OFFER) check('introductory offer: the same switch, plan and price as services/pricing.js INTRO_OFFER', fe.ORIVEN_INTRO_OFFER.enabled === pricing.INTRO_OFFER.enabled && fe.ORIVEN_INTRO_OFFER.planId === pricing.INTRO_OFFER.planId && fe.ORIVEN_INTRO_OFFER.price === pricing.INTRO_OFFER.priceInclVat, { fe: fe.ORIVEN_INTRO_OFFER, be: pricing.INTRO_OFFER });
+  else console.log('  SKIP — this frontend copy has no ORIVEN_INTRO_OFFER yet');
   check('frontend entitlements: every paying status gets everything, free nothing', fe.ORIVEN_PAID_STATUSES.join() === pricing.PAID_STATUSES.join() && pricing.PAID_STATUSES.every((s) => ['research', 'autopilot', 'orivenChat', 'notifications', 'prioritySupport', 'weeklyReport'].every((k) => fe.orvPlanHas(s, k))) && !fe.orvPlanHas('free', 'research'));
 }
 
