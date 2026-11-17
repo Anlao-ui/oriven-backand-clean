@@ -14875,6 +14875,18 @@ app.get('/api/intelligence/kpi-series', requireSubIfAuthed, async (req, res) => 
   }
 });
 
+// Daily performance per platform over an exact window (Campaign Overview tiles,
+// Platform Comparison): routes/analyticsSeries.js.
+require('./routes/analyticsSeries')(app, {
+  requireSubIfAuthed,
+  getGadsAccess: _getGadsAccess, gadsQuery: _gadsQuery,
+  getMetaAccess: _getMetaAccess, metaFetch: _metaFetch, metaConversions: _metaConversions,
+  metaPurchaseValue: (values) => _metaSumActionType(values, _META_ACTION_TYPES.purchase),
+  getTikTokAccess: _getTikTokAccess, tiktokFetch: _tiktokFetch,
+  getPinterestAccess: _getPinterestAccess, pinterestApiRequest: _pinterestApiRequest,
+  getSnapchatAccess: _getSnapchatAccess, snapClient: _snapClient, SNAP,
+});
+
 // ── V6 Final Phase â€” Intelligence Event Log â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 // One table (`intelligence_events`), one write helper (shared with
 // services/toolRouter.js via services/eventLog.js), one read endpoint,
