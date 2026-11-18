@@ -1,0 +1,103 @@
+{
+  "cities": [
+    {
+      "name": "Amersfoort",
+      "admin_level": 8,
+      "country": "NL"
+    },
+    {
+      "name": "Utrecht",
+      "admin_level": 8,
+      "country": "NL"
+    },
+    {
+      "name": "Haarlem",
+      "admin_level": 8,
+      "country": "NL"
+    },
+    {
+      "name": "Eindhoven",
+      "admin_level": 8,
+      "country": "NL"
+    },
+    {
+      "name": "Groningen",
+      "admin_level": 8,
+      "country": "NL"
+    },
+    {
+      "name": "Rotterdam",
+      "admin_level": 8,
+      "country": "NL"
+    },
+    {
+      "name": "Amsterdam",
+      "admin_level": 8,
+      "country": "NL"
+    }
+  ],
+  "cities_per_week": 1,
+  "crawler": {
+    "delay_seconds": 2.0,
+    "timeout_seconds": 12,
+    "max_extra_pages": 2,
+    "max_bytes": 2000000,
+    "contact_url": "https://orivenai.com"
+  },
+  "enrich_per_week": 300,
+  "scoring": {
+    "min_score_for_draft": 55
+  },
+  "outreach": {
+    "sender_name": "Alec",
+    "company": "OrivenAI",
+    "signature": "Alec\nOrivenAI · orivenai.com",
+    "demo_url": "https://orivenai.com/demo",
+    "trial_text": "2 weken Flex voor €1, met 14 dagen geld-terug",
+    "drafts_per_week": 40,
+    "daily_cap": 20,
+    "followup_business_days": [
+      3,
+      7
+    ],
+    "smtp_host": "smtp.zoho.eu",
+    "smtp_port": 465,
+    "imap_host": "imap.zoho.eu",
+    "imap_port": 993,
+    "max_words": 90
+  },
+  "llm": {
+    "ollama_url": "http://127.0.0.1:11434",
+    "base_model": "qwen2.5:7b-instruct",
+    "finetuned_model": "orivenai-writer",
+    "min_examples_for_finetune": 50,
+    "few_shot_examples": 4,
+    "temperature": 0.6
+  },
+  "content": {
+    "instagram_days": [
+      "mon",
+      "tue",
+      "wed"
+    ],
+    "linkedin_days": [
+      "mon",
+      "tue",
+      "thu",
+      "fri"
+    ],
+    "post_hour": 12,
+    "fps": 30,
+    "crf": 18,
+    "demo_url": "https://orivenai.com/demo",
+    "media_public_base_url": ""
+  },
+  "dashboard": {
+    "host": "127.0.0.1",
+    "port": 8765
+  },
+  "overpass_urls": [
+    "https://maps.mail.ru/osm/tools/overpass/api/interpreter",
+    "https://overpass-api.de/api/interpreter"
+  ]
+}

@@ -1,0 +1,6 @@
+requests>=2.31
+beautifulsoup4>=4.12
+flask>=3.0
+numpy>=1.26
+playwright>=1.44
+pytest>=8.0

@@ -1,0 +1,14 @@
+.venv/
+.venv-gpu/
+__pycache__/
+*.pyc
+.pytest_cache/
+.env
+data/*.db
+data/*.db-*
+data/logs/
+data/training/
+output/
+models/*
+!models/README.md
+!models/Modelfile.template
