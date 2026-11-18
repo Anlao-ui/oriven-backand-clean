@@ -10,6 +10,19 @@ import requests
 from .config import user_agent
 
 
+def decode_html(raw: bytes, header_encoding: str | None) -> str:
+    """Header charset (ignoring requests' iso-8859-1 default), else <meta charset>, else utf-8."""
+    import re
+    enc = header_encoding if header_encoding and header_encoding.lower() != "iso-8859-1" else None
+    if not enc:
+        m = re.search(rb"<meta[^>]+charset=[\"']?([A-Za-z0-9_\-]+)", raw[:4096], re.I)
+        enc = m.group(1).decode("ascii") if m else "utf-8"
+    try:
+        return raw.decode(enc, errors="replace")
+    except LookupError:
+        return raw.decode("utf-8", errors="replace")
+
+
 class PoliteFetcher:
     def __init__(self, cfg: dict):
         c = cfg["crawler"]
@@ -69,8 +82,7 @@ class PoliteFetcher:
                     if size > self.max_bytes:
                         break
                 raw = b"".join(chunks)
-                enc = r.encoding if r.encoding and r.encoding.lower() != "iso-8859-1" else None
-                html = raw.decode(enc or r.apparent_encoding or "utf-8", errors="replace")
+                html = decode_html(raw, r.encoding)
                 return r.url, html
         except requests.RequestException as exc:
             return None, type(exc).__name__

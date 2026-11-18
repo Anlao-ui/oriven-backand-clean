@@ -111,3 +111,11 @@ def test_analyze_pages_combines(fixture_html):
     assert sig["is_legal_entity"] and sig["kvk"] == "12345678"
     assert set(sig["socials"]) == {"instagram", "facebook", "linkedin"}
     assert sig["best_email"] == "info@bloemenhuisflora.nl"
+
+
+def test_decode_html_charset():
+    from growth_engine.fetch import decode_html
+    raw = '<meta charset="windows-1252"><p>Caf\xe9</p>'.encode("cp1252")
+    assert "Café" in decode_html(raw, None)
+    assert "Café" in decode_html("<p>Café</p>".encode("utf-8"), "ISO-8859-1")
+    assert "Café" in decode_html("<p>Café</p>".encode("utf-8"), "utf-8")

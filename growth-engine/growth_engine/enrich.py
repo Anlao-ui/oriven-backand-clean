@@ -49,19 +49,32 @@ def apply_signals(conn, lead_id: int, status: str, sig: dict | None) -> None:
 
 
 def enrich(conn, cfg: dict, limit: int = 100, refresh: bool = False) -> int:
-    fetcher = PoliteFetcher(cfg)
+    """Visit sites in parallel across *different* hosts; per-host delay and robots.txt still apply."""
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+    import threading
+
     where = "1=1" if refresh else "enriched_at IS NULL"
     rows = conn.execute(f"SELECT * FROM leads WHERE {where} AND status != 'deleted' ORDER BY id LIMIT ?",
                         (limit,)).fetchall()
-    done = 0
-    for i, row in enumerate(rows, 1):
-        lead = dict(row)
+    workers = int(cfg["crawler"].get("workers", 8))
+    local = threading.local()
+    max_extra = cfg["crawler"].get("max_extra_pages", 2)
+
+    def work(lead):
+        if not hasattr(local, "fetcher"):
+            local.fetcher = PoliteFetcher(cfg)
         try:
-            status, sig = enrich_lead(fetcher, lead, cfg["crawler"].get("max_extra_pages", 2))
+            return lead, *enrich_lead(local.fetcher, lead, max_extra)
         except Exception as exc:  # one broken site must never stop the run
-            status, sig = f"error:{type(exc).__name__}", None
-        apply_signals(conn, lead["id"], status, sig)
-        ads = ",".join(sig["ad_platforms"]) if sig else "-"
-        print(f"[{i}/{len(rows)}] {lead['name'][:40]:40} {status:12} ads={ads}")
-        done += 1
+            return lead, f"error:{type(exc).__name__}", None
+
+    done = 0
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        futures = [pool.submit(work, dict(r)) for r in rows]
+        for fut in as_completed(futures):
+            lead, status, sig = fut.result()
+            apply_signals(conn, lead["id"], status, sig)  # DB writes stay on this thread
+            done += 1
+            ads = ",".join(sig["ad_platforms"]) if sig else "-"
+            print(f"[{done}/{len(rows)}] {lead['name'][:40]:40} {status:12} ads={ads}", flush=True)
     return done

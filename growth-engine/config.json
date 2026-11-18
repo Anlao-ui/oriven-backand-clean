@@ -42,7 +42,8 @@
     "timeout_seconds": 12,
     "max_extra_pages": 2,
     "max_bytes": 2000000,
-    "contact_url": "https://orivenai.com"
+    "contact_url": "https://orivenai.com",
+    "workers": 8
   },
   "enrich_per_week": 300,
   "scoring": {
