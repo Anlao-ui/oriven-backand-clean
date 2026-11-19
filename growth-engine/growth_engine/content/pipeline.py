@@ -114,8 +114,14 @@ def render_many(conn, cfg: dict, ids: list[int]) -> None:
         b.close()
 
 
-def render_post(conn, cfg: dict, post_id: int) -> None:
-    render_many(conn, cfg, [post_id])
+def render_post(conn, cfg: dict, post_id: int | None = None) -> None:
+    """Render one post, or (without id) every post that has no media yet, e.g. after an interruption."""
+    ids = [post_id] if post_id else [r["id"] for r in conn.execute(
+        "SELECT id FROM posts WHERE media IS NULL AND status IN ('draft','approved') ORDER BY date")]
+    if not ids:
+        print("Niets te renderen.")
+        return
+    render_many(conn, cfg, ids)
 
 
 def publish_due(conn, cfg: dict) -> None:
