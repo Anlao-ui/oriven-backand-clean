@@ -1,9 +1,0 @@
-{"elements": [
- {"type": "node", "id": 1, "tags": {"name": "Bloemenhuis Flora", "shop": "florist", "website": "https://www.bloemenhuisflora.nl/", "email": "info@bloemenhuisflora.nl"}},
- {"type": "node", "id": 1, "tags": {"name": "Bloemenhuis Flora", "shop": "florist", "website": "https://www.bloemenhuisflora.nl/"}},
- {"type": "way", "id": 2, "center": {"lat": 1, "lon": 2}, "tags": {"name": "Flora tweede vestiging", "shop": "florist", "contact:website": "bloemenhuisflora.nl"}},
- {"type": "node", "id": 3, "tags": {"name": "Albert Heijn", "shop": "supermarket", "website": "https://www.ah.nl/winkel/1234", "brand:wikidata": "Q1653985"}},
- {"type": "node", "id": 4, "tags": {"name": "Tandarts De Linde", "amenity": "dentist", "website": "tandartsdelinde.nl", "phone": "+31 33 123 4567"}},
- {"type": "node", "id": 5, "tags": {"name": "Sportschool Fit", "leisure": "fitness_centre", "website": "https://fit.example.nl; https://other.nl", "contact:instagram": "https://instagram.com/fit"}},
- {"type": "node", "id": 6, "tags": {"name": "Geen site", "shop": "bakery"}}
-]}
