@@ -12,3 +12,4 @@ output/
 models/*
 !models/README.md
 !models/Modelfile.template
+leads.csv
