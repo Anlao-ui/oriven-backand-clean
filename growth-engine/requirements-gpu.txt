@@ -1,9 +1,0 @@
-# Only for the QLoRA fine-tune on the NVIDIA GPU (separate venv: .venv-gpu).
-# Install torch first with the CUDA wheel that matches your driver, e.g.:
-#   pip install torch --index-url https://download.pytorch.org/whl/cu121
-transformers>=4.44
-peft>=0.12
-trl>=0.10
-datasets>=2.20
-accelerate>=0.33
-bitsandbytes>=0.43
