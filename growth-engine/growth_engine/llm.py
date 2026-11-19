@@ -18,7 +18,9 @@ EMOJI_RE = re.compile("[\U0001F300-\U0001FAFF☀-➿]")
 class LocalLLM:
     def __init__(self, cfg: dict):
         c = cfg["llm"]
-        self.url = c["ollama_url"].rstrip("/")
+        self.backend = c.get("backend", "ollama")  # "ollama" or "llamacpp" (OpenAI-compatible server)
+        self.url = (c.get("llamacpp_url", "http://127.0.0.1:8080") if self.backend == "llamacpp"
+                    else c["ollama_url"]).rstrip("/")
         self.base_model = c["base_model"]
         self.ft_model = c.get("finetuned_model")
         self.temperature = c.get("temperature", 0.6)
@@ -27,6 +29,13 @@ class LocalLLM:
     def model(self) -> str | None:
         """Our fine-tune if Ollama has it, else the base model, else None (Ollama not running)."""
         if self._model is not None:
+            return self._model or None
+        if self.backend == "llamacpp":
+            try:
+                data = requests.get(self.url + "/v1/models", timeout=3).json().get("data", [])
+                self._model = data[0]["id"] if data else ""
+            except (requests.RequestException, ValueError, KeyError, IndexError):
+                self._model = ""
             return self._model or None
         try:
             tags = requests.get(self.url + "/api/tags", timeout=3).json().get("models", [])
@@ -46,6 +55,15 @@ class LocalLLM:
         model = self.model()
         if not model:
             return None
+        if self.backend == "llamacpp":
+            try:
+                r = requests.post(self.url + "/v1/chat/completions", timeout=300, json={
+                    "model": model, "messages": messages, "temperature": self.temperature,
+                    "max_tokens": max_tokens})
+                r.raise_for_status()
+                return r.json()["choices"][0]["message"]["content"].strip()
+            except (requests.RequestException, KeyError, IndexError, ValueError):
+                return None
         try:
             r = requests.post(self.url + "/api/chat", timeout=180, json={
                 "model": model, "messages": messages, "stream": False,

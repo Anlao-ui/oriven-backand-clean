@@ -59,7 +59,7 @@ def test_train_score_reasons_and_active_learning(conn, tmp_path, monkeypatch):
     assert scoring.train(conn) is not None
     scoring.score_all(conn)
     rows = {r["name"]: r for r in conn.execute("SELECT * FROM leads")}
-    assert rows["Shop A"]["score"] > 70 > rows["Cafe C"]["score"]
+    assert rows["Shop A"]["score"] > 55 > rows["Cafe C"]["score"]
     reasons = json.loads(rows["Shop A"]["reasons"])
     assert 2 <= len(reasons) <= 3
     assert any("Meta en Google Ads" in r for r in reasons)

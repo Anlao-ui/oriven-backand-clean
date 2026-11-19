@@ -18,6 +18,7 @@ FEATURES = (["n_ad_platforms", "meta", "google_ads", "tiktok", "pinterest", "sna
              "n_socials", "linkedin", "instagram", "fetch_ok", "lang_nl"]
             + [f"cat_{c}" for c in CATEGORIES])
 # Sample weights per label source.
+SOFT = {0: 0.15, 1: 0.85}
 WEIGHTS = {"weak": 0.3, "human": 1.0, "replied": 1.5, "negative": 1.5, "demo": 2.5, "bought": 4.0}
 
 
@@ -78,19 +79,21 @@ def training_set(conn):
             labels[r["lead_id"]] = (int(r["label"]), w)
     ids = list(labels)
     X = np.array([features(by_id[i]) for i in ids]) if ids else np.zeros((0, len(FEATURES)))
-    y = np.array([labels[i][0] for i in ids])
+    # Weak labels are only rules of thumb: soft targets keep the model from becoming 100% sure,
+    # so scores stay spread out and human labels/outcomes (hard 0/1) decide the fine ranking.
+    y = np.array([SOFT[labels[i][0]] if labels[i][1] == WEIGHTS["weak"] else labels[i][0] for i in ids], float)
     w = np.array([labels[i][1] for i in ids])
     return X, y, w
 
 
 def train(conn) -> LogisticRegression | None:
     X, y, w = training_set(conn)
-    if len(y) < 4 or len(set(y.tolist())) < 2:
+    if len(y) < 4 or len({round(v) for v in y.tolist()}) < 2:
         print("Nog te weinig gelabelde leads (beide klassen nodig). Score valt terug op regels.")
         return None
-    m = LogisticRegression(l2=2.0).fit(X, y, sample_weight=w, feature_names=FEATURES)
+    m = LogisticRegression(l2=max(5.0, 0.02 * len(y))).fit(X, y, sample_weight=w, feature_names=FEATURES)
     save(m, MODEL_PATH)
-    acc = ((m.predict_proba(X) > 0.5) == y).mean()
+    acc = ((m.predict_proba(X) > 0.5) == (y > 0.5)).mean()
     n_human = int((w >= 1.0).sum())
     print(f"Model getraind op {len(y)} leads ({n_human} met menselijk label/uitkomst), "
           f"train-accuracy {acc:.0%}")
@@ -122,6 +125,9 @@ def explain(lead: dict, x: np.ndarray, contrib: np.ndarray | None, score: float)
                                    if n > 1 else f"Adverteert al via {plats[0]} (pixel op de site)")
     else:
         texts["n_ad_platforms"] = "Geen advertentiepixels gevonden op de site"
+    via = [PLATFORM_NAMES[p] for p in sig.get("pixels_via_gtm", [])]
+    if plats and via:
+        texts["n_ad_platforms"] += f"; {_join(via)} geladen via Google Tag Manager"
     if f["gtm"]:
         texts["gtm"] = "Gebruikt Google Tag Manager (daar zitten vaak extra advertentietags in)"
     if f["ga4"]:

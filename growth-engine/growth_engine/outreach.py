@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import re
 
 from . import db
 from .channel import EMAIL, MANUAL
@@ -14,7 +15,7 @@ op één plek, met AI die advertenties maakt, onderzoek doet, alles in één ove
 Aanbod: {trial}. Gratis demo zonder account: {demo}.
 
 Regels:
-- Maximaal {max_words} woorden, platte tekst, je/jij-vorm, begin met "Hoi" of "Hallo {{bedrijf}}".
+- Maximaal {max_words} woorden, platte tekst, je/jij-vorm, begin met "Hoi" gevolgd door de bedrijfsnaam.
 - Precies één concrete observatie over hun bedrijf (gebruik alleen de feiten die je krijgt, verzin niets).
 - Eén zin over wat OrivenAI voor hén oplost.
 - Eén duidelijke vraag of call-to-action naar de demo of de €1-proef.
@@ -83,6 +84,33 @@ def finalize_email(body: str, cfg: dict) -> str:
     return f"{body}\n\n{sig}\n\n{optout_line()}"
 
 
+# Seed examples in the house style, used until there are approved messages of your own.
+SEED_EXAMPLES = [
+    ("Bedrijf: Fietsenwinkel De Spaak\nPlaats: Utrecht\nBranche: winkel:bicycle\nWebsite: https://despaak.nl\n"
+     "Titel site: Fietsen en onderhoud in Utrecht\nObservatie: ze adverteren via Meta en Google Ads (pixels op de site); "
+     "hun webshop draait op Woocommerce",
+     "Hoi De Spaak,\n\nIk zag dat jullie zowel via Meta als Google adverteren voor de webshop. Dat betekent waarschijnlijk "
+     "twee dashboards, twee keer inloggen en zelf uitzoeken welke advertentie de fietsen verkoopt.\n\n"
+     "Met OrivenAI zie je alles op één scherm en maak je nieuwe advertenties voor beide kanalen tegelijk.\n\n"
+     "Kijk gerust in de demo, daar heb je geen account voor nodig: {demo}\n\n{first}"),
+    ("Bedrijf: Studio Noor\nPlaats: Haarlem\nBranche: winkel:beauty\nWebsite: https://studionoor.nl\n"
+     "Titel site: Huidverzorging in Haarlem\nObservatie: ze hebben de Meta-pixel op hun site staan; ze gebruiken Google Tag Manager",
+     "Hoi Studio Noor,\n\nJullie hebben de Meta-pixel op de site staan, dus ik neem aan dat er af en toe een campagne loopt.\n\n"
+     "OrivenAI schrijft die advertenties met AI en zet ze met één klik ook op Google of TikTok, zodat je kunt zien waar je "
+     "klanten echt vandaan komen.\n\nZin om het te proberen? {trial}: {demo}\n\n{first}"),
+]
+
+
+def seed_shots(cfg: dict) -> list[dict]:
+    o = cfg["outreach"]
+    out = []
+    for prompt, answer in SEED_EXAMPLES:
+        out += [{"role": "user", "content": prompt},
+                {"role": "assistant", "content": answer.format(demo=o["demo_url"], trial=o["trial_text"].capitalize(),
+                                                               first=o["sender_name"].split()[0])}]
+    return out
+
+
 def few_shot(conn, n: int, channel: str) -> list[dict]:
     rows = conn.execute(
         """SELECT m.prompt, m.body FROM messages m WHERE m.status IN ('approved','sent') AND m.step=0
@@ -108,16 +136,33 @@ def write_message(conn, cfg: dict, lead: dict, llm: LocalLLM | None = None, link
         system += "\nDit is een LinkedIn-bericht of contactformulier: nog korter (max 60 woorden)."
     prompt = lead_context(lead)
     channel = MANUAL if linkedin else EMAIL
-    messages = [{"role": "system", "content": system}] + few_shot(conn, cfg["llm"]["few_shot_examples"], channel) \
-        + [{"role": "user", "content": prompt}]
+    shots = few_shot(conn, cfg["llm"]["few_shot_examples"], channel) or seed_shots(cfg)
+    messages = [{"role": "system", "content": system}] + shots + [{"role": "user", "content": prompt}]
     for _ in range(3):
         out = llm.chat(messages)
         if out is None:
             break
         text = clean_text(out)
-        if not violations(text, 60 if linkedin else o["max_words"]):
+        problems = violations(text, 60 if linkedin else o["max_words"]) + structure_problems(text, lead, cfg)
+        if not problems:
             return prompt, text, llm.model()
     return prompt, template_email(lead, cfg), "template"
+
+
+def structure_problems(text: str, lead: dict, cfg: dict) -> list[str]:
+    """Hard checks a small model tends to fail: placeholders, missing CTA, misplaced name."""
+    o = cfg["outreach"]
+    first = o["sender_name"].split()[0]
+    out = []
+    if re.search(r"[{}\[\]<>]", text):
+        out.append("placeholder")
+    if o["demo_url"].replace("https://", "") not in text:
+        out.append("geen demo-link")
+    if not re.match(r"^(hoi|hallo|beste|goedemorgen|goedemiddag)\b", text, re.I):
+        out.append("geen begroeting")
+    if text.count(first) != 1 or not text.rstrip().endswith(first):
+        out.append("naam niet (alleen) onderaan")
+    return out
 
 
 def subject_for(lead: dict) -> str:

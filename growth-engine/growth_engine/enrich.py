@@ -10,6 +10,26 @@ from .fetch import PoliteFetcher
 from .signals import analyze_pages, find_contact_links
 
 
+_GTM_CACHE: dict[str, dict] = {}
+
+
+def scan_gtm(fetcher: PoliteFetcher, html: str, sig: dict) -> dict:
+    """Fetch the site's public GTM container(s) and merge ad pixels configured there."""
+    from .signals import gtm_ids, merge_gtm_pixels, scan_gtm_container
+    found = {k: False for k in sig["pixels"]}
+    for gid in gtm_ids(html):
+        if gid not in _GTM_CACHE:
+            try:
+                r = fetcher.session.get("https://www.googletagmanager.com/gtm.js", params={"id": gid},
+                                        timeout=fetcher.timeout)
+                _GTM_CACHE[gid] = scan_gtm_container(r.text) if r.status_code == 200 else {}
+            except Exception:
+                _GTM_CACHE[gid] = {}
+        for k, v in _GTM_CACHE[gid].items():
+            found[k] = found[k] or v
+    return merge_gtm_pixels(sig, found)
+
+
 def enrich_lead(fetcher: PoliteFetcher, lead: dict, max_extra: int = 2) -> tuple[str, dict | None]:
     url = lead["website"]
     final, html = fetcher.get(url)
@@ -24,6 +44,7 @@ def enrich_lead(fetcher: PoliteFetcher, lead: dict, max_extra: int = 2) -> tuple
             pages.append((u, h))
     domain = domain_of(final) or lead["domain"]
     sig = analyze_pages(pages, domain, lead.get("name") or "")
+    sig = scan_gtm(fetcher, html, sig)
     sig["final_url"] = final
     sig["pages"] = [u for u, _ in pages]
     if not sig["best_email"] and lead.get("osm_email"):

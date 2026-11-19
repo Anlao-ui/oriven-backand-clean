@@ -105,6 +105,13 @@ SKIP_DOMAINS = {
 }
 
 
+# Franchise/chain names that slip through without brand tags.
+SKIP_NAME_RE = __import__("re").compile(r"van der valk|fletcher|bastion hotel|ibis|mcdonald|burger king|"
+                                        r"domino|new york pizza|\bkfc\b|subway|kruidvat|\baction\b|\bhema\b|"
+                                        r"jumbo|albert heijn|lidl|aldi|basic-fit|anytime fitness|"
+                                        r"rabobank|ing bank|abn amro|postnl", 2)
+
+
 def category_of(tags: dict) -> str:
     import re
     for key, regex, cat in SELECTORS:
@@ -127,7 +134,7 @@ def parse_elements(data: dict, city: str, country: str = "NL", keep_other_cities
         dom = domain_of(website)
         if not dom or dom in SKIP_DOMAINS or any(dom.endswith("." + s) for s in SKIP_DOMAINS):
             continue
-        if tags.get("brand:wikidata") or tags.get("brand:wikipedia"):
+        if tags.get("brand:wikidata") or tags.get("brand:wikipedia") or SKIP_NAME_RE.search(tags.get("name", "")):
             continue  # chain store
         osm_id = f"{el.get('type')}/{el.get('id')}"
         city_tag = tags.get("addr:city")

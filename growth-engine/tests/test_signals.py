@@ -119,3 +119,19 @@ def test_decode_html_charset():
     assert "Café" in decode_html(raw, None)
     assert "Café" in decode_html("<p>Café</p>".encode("utf-8"), "ISO-8859-1")
     assert "Café" in decode_html("<p>Café</p>".encode("utf-8"), "utf-8")
+
+
+def test_gtm_container_scan_and_merge(fixture_html):
+    js = ('var data={"resource":{"tags":[{"function":"__awct","vtp_conversionId":"123456789"},'
+          '{"function":"__html","vtp_html":"<script src=\\"https:\\/\\/connect.facebook.net\\/en_US\\/fbevents.js\\"></script>"}]}}')
+    found = s.scan_gtm_container(js)
+    assert found == {"meta": True, "google_ads": True, "tiktok": False, "pinterest": False, "snapchat": False}
+    assert s.scan_gtm_container('var data={"resource":{"tags":[{"function":"__gaawc"}]}}') == \
+        {k: False for k in found}
+    html = fixture_html("woo_eenmanszaak.html") + "<script>(window,document,'script','dataLayer','GTM-ABC123');</script>"
+    assert s.gtm_ids(html) == ["GTM-ABC123"]
+    sig = s.analyze_pages([("https://x.nl/", html)], "x.nl")
+    assert sig["ad_platforms"] == ["meta"]
+    sig = s.merge_gtm_pixels(sig, found)
+    assert sig["ad_platforms"] == ["meta", "google_ads"] and sig["pixels_via_gtm"] == ["google_ads"]
+    assert sig["n_ad_platforms"] == 2

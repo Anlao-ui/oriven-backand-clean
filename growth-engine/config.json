@@ -68,6 +68,8 @@
     "max_words": 90
   },
   "llm": {
+    "backend": "ollama",
+    "llamacpp_url": "http://127.0.0.1:8080",
     "ollama_url": "http://127.0.0.1:11434",
     "base_model": "qwen2.5:7b-instruct",
     "finetuned_model": "orivenai-writer",

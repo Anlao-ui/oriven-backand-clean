@@ -65,6 +65,37 @@ def _any(patterns, text, flags=0) -> bool:
     return any(re.search(p, text, flags) for p in patterns)
 
 
+# Signatures inside a public GTM container (gtm.js). Slashes are escaped there ("\/").
+GTM_PIXELS = {
+    "meta": [r"fbevents\.js", r"connect\.facebook\.net", r"fbq\(\s*\\?['\"]init"],
+    "google_ads": [r'"__awct"', r'"__sp"', r"AW-\d{6,}", r"vtp_conversionId"],
+    "tiktok": [r"analytics\.tiktok\.com", r"ttq\.load"],
+    "pinterest": [r"pintrk\(", r"s\.pinimg\.com"],
+    "snapchat": [r"sc-static\.net", r"snaptr\("],
+}
+GTM_ID_RE = re.compile(r"GTM-[A-Z0-9]{4,10}\b")
+
+
+def gtm_ids(html: str) -> list[str]:
+    return sorted(set(GTM_ID_RE.findall(html)))[:3]
+
+
+def scan_gtm_container(js: str) -> dict:
+    """Ad platforms configured inside a GTM container (pixels you can't see in the page HTML)."""
+    return {name: _any(pats, js) for name, pats in GTM_PIXELS.items()}
+
+
+def merge_gtm_pixels(sig: dict, gtm_pixels: dict) -> dict:
+    """Add GTM-loaded pixels to the page signals and remember where each one came from."""
+    via = [k for k, v in gtm_pixels.items() if v and not sig["pixels"].get(k)]
+    for k in via:
+        sig["pixels"][k] = True
+    sig["pixels_via_gtm"] = via
+    sig["ad_platforms"] = [k for k, v in sig["pixels"].items() if v]
+    sig["n_ad_platforms"] = len(sig["ad_platforms"])
+    return sig
+
+
 def detect_pixels(html: str) -> dict:
     return {name: _any(pats, html) for name, pats in AD_PIXELS.items()}
 
