@@ -317,6 +317,12 @@ const LOCAL_FRONTEND_DIR = process.env.FRONTEND_DIR || (function () {
 })();
 // Local development: route the frontend's clean URLs (/about, /faq,
 // /blog/<post>, …) the way Netlify does in production (localFrontendRoutes.js).
+// Local development only: no caching, live reload, and /__dev/info naming the
+// folder, branch and commit being served (devLiveReload.js). Never on Render.
+if (!process.env.RENDER && process.env.NODE_ENV !== 'production') {
+  require('./devLiveReload')(app, LOCAL_FRONTEND_DIR);
+  console.log('[dev] Frontend served from ' + LOCAL_FRONTEND_DIR + ' — details: /__dev/info');
+}
 if (!process.env.RENDER) app.use(require('./localFrontendRoutes')(LOCAL_FRONTEND_DIR));
 // Local development only (never registered on Render, where production runs):
 // tells the app at localhost that it may open every page for inspection while

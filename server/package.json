@@ -29,6 +29,7 @@
     "test:setup-completion": "node tests/setup-completion-routes.test.js",
     "test:google-connections-debug": "node tests/google-connections-debug.test.js",
     "start": "node server.js",
+    "dev": "node --watch server.js",
     "dev:onboarding-preview": "node server.js --onboarding-preview"
   },
   "keywords": [],
