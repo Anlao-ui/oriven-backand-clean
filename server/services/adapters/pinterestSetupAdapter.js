@@ -56,9 +56,10 @@ async function ensureTag(apiClient, adAccountId, name) {
  */
 async function checkTagHealth(apiClient, adAccountId) {
   const tag = await findExistingTag(apiClient, adAccountId);
-  if (!tag) return { exists: false, receivingEvents: false, lastReceivedAt: null, status: null };
+  if (!tag) return { exists: false, receivingEvents: false, lastReceivedAt: null, status: null, tag: null };
   return {
     exists: true,
+    tag: { id: tag.id || null, name: tag.name || null },
     status: tag.status || null,
     receivingEvents: tag.status === 'ACTIVE' || !!tag.last_receive_time,
     lastReceivedAt: tag.last_receive_time || null,

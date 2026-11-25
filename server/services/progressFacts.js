@@ -20,7 +20,7 @@ const IMAGE_KINDS = ['image', 'poster', 'infographic', 'logo', 'product_shoot', 
 
 function classifyAsset(a) {
   const kind = String((a && a.kind) || ''), route = String((a && a.source_route) || '');
-  if (kind === 'research' || kind === 'audience_profile') return null; // research counts by type; a profile belongs to its audience
+  if (kind === 'research' || kind === 'audience_profile' || kind === 'simulation') return null; // research counts by type; a profile belongs to its audience
   if (kind === 'comparison') return 'comparison';
   if (route === '/api/creative/testing/pick') return 'picked';
   if (route === '/api/creative/variations') return 'variations';
