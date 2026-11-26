@@ -14894,6 +14894,16 @@ require('./routes/analyticsSeries')(app, {
   getSnapchatAccess: _getSnapchatAccess, snapClient: _snapClient, SNAP,
 });
 
+// Performance Overview → platform metrics (period totals, best effort): routes/analyticsExtras.js.
+require('./routes/analyticsExtras')(app, {
+  requireSubIfAuthed,
+  getGadsAccess: _getGadsAccess, gadsQuery: _gadsQuery,
+  getMetaAccess: _getMetaAccess, metaFetch: _metaFetch,
+  getTikTokAccess: _getTikTokAccess, tiktokFetch: _tiktokFetch,
+  getPinterestAccess: _getPinterestAccess, pinterestApiRequest: _pinterestApiRequest,
+  getSnapchatAccess: _getSnapchatAccess, snapClient: _snapClient, SNAP,
+});
+
 // ── V6 Final Phase â€” Intelligence Event Log â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 // One table (`intelligence_events`), one write helper (shared with
 // services/toolRouter.js via services/eventLog.js), one read endpoint,
