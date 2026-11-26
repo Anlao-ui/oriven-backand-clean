@@ -317,6 +317,12 @@ const LOCAL_FRONTEND_DIR = process.env.FRONTEND_DIR || (function () {
 })();
 // Local development: route the frontend's clean URLs (/about, /faq,
 // /blog/<post>, …) the way Netlify does in production (localFrontendRoutes.js).
+// Local development only: no caching, live reload, and /__dev/info naming the
+// folder, branch and commit being served (devLiveReload.js). Never on Render.
+if (!process.env.RENDER && process.env.NODE_ENV !== 'production') {
+  require('./devLiveReload')(app, LOCAL_FRONTEND_DIR);
+  console.log('[dev] Frontend served from ' + LOCAL_FRONTEND_DIR + ' — details: /__dev/info');
+}
 if (!process.env.RENDER) app.use(require('./localFrontendRoutes')(LOCAL_FRONTEND_DIR));
 // Local development only (never registered on Render, where production runs):
 // tells the app at localhost that it may open every page for inspection while
@@ -4332,7 +4338,7 @@ app.get('/api/creative/assets', async (req, res) => {
     let q = supabaseAdmin.from('creative_assets').select('*').eq('user_id', user.id);
     if (kind)         q = q.eq('kind', kind);
     // saved research, audience profiles and campaign comparisons have their own pages
-    else              q = q.neq('kind', 'research').neq('kind', 'audience_profile').neq('kind', 'comparison'); // research, audiences and comparisons have their own pages
+    else              q = q.neq('kind', 'research').neq('kind', 'audience_profile').neq('kind', 'comparison').neq('kind', 'simulation'); // research, audiences, comparisons and simulations have their own pages
     if (platform)     q = q.eq('platform', platform);
     if (product_name)  q = q.eq('product_name', product_name);
     if (campaign_name) q = q.eq('campaign_name', campaign_name);
@@ -4697,7 +4703,7 @@ app.get('/api/creative/search', async (req, res) => {
     const like = `%${q}%`;
 
     const [assets, products, audiences, competitors, memory, learnings] = await Promise.all([
-      supabaseAdmin.from('creative_assets').select('id,kind,title').eq('user_id', user.id).neq('kind', 'research').ilike('title', like).limit(10),
+      supabaseAdmin.from('creative_assets').select('id,kind,title').eq('user_id', user.id).neq('kind', 'research').neq('kind', 'simulation').ilike('title', like).limit(10),
       supabaseAdmin.from('business_products').select('id,name').eq('user_id', user.id).ilike('name', like).limit(10),
       supabaseAdmin.from('business_audiences').select('id,name').eq('user_id', user.id).ilike('name', like).limit(10),
       supabaseAdmin.from('business_competitors').select('id,company').eq('user_id', user.id).ilike('company', like).limit(10),
@@ -12690,9 +12696,10 @@ app.get('/api/setup/meta/tracking/health', async (req, res) => {
     const { accessToken, accountId } = await _getMetaAccess(user);
     const client = _metaClientFor(accessToken);
     const pixel = await metaSetupAdapter.findExistingPixel(client, accountId);
-    if (!pixel) return res.json({ exists: false, installed: false, receivingEvents: false, lastFiredAt: null });
+    if (!pixel) return res.json({ exists: false, installed: false, receivingEvents: false, lastFiredAt: null, pixel: null });
     const health = await metaSetupAdapter.checkPixelHealth(client, pixel.id);
-    res.json(health);
+    // the real pixel id/name Meta returned (Advertising Settings shows it)
+    res.json(Object.assign({ pixel: { id: pixel.id, name: pixel.name || null } }, health));
   } catch (err) {
     console.error('[setup/meta/tracking/health]', err.message);
     res.status(err.status || 500).json({ error: err.status ? err.message : 'Could not check Meta tracking right now.' });
@@ -15646,6 +15653,8 @@ app.put('/api/onboarding/goal', async (req, res) => {
 const onboardingFlow = require('./services/onboardingFlow');
 // Audience Builder, Creative Testing and Campaign Comparison (services/growthRoutes.js).
 require('./services/growthRoutes').register(app, { getUserFromToken, supabaseAdmin, creditManager, requireSubIfAuthed, aiText: _aimlText, onboardingFlow });
+// Ad Simulator: saved simulations (services/simulationRoutes.js). Calculations run in the browser, never charged.
+require('./services/simulationRoutes').register(app, { getUserFromToken, supabaseAdmin });
 onboardingFlow.init({
   db: supabaseAdmin,
   aiText: (task, system, user, opts) => _aimlText(task, system, user, opts),

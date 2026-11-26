@@ -422,6 +422,7 @@ async function getCreditStatus(userId) {
       .select('id', { count: 'exact', head: true })
       .eq('user_id', userId)
       .neq('kind', 'research') // research reports are not saved assets
+      .neq('kind', 'simulation') // nor are Ad Simulator simulations
       .eq('archived', false);
     if (assetErr) throw assetErr;
     savedAssets = assetCount || 0;
