@@ -297,7 +297,44 @@ module.exports = function registerPublishRoutes(app, d) {
       // Images → Meta's own storage (image_hash), so ads never depend on a
       // provider URL that may expire.
       const imageHashes = {};
-      const urls = Array.from(new Set(spec.adGroups.flatMap((g) => g.ads.map((a) => a.imageUrl)).concat([spec.creative.imageUrl]).filter(Boolean)));
+      const isVideo = spec.creative.format === 'VIDEO';
+      const urls = isVideo ? [] : Array.from(new Set(spec.adGroups.flatMap((g) => g.ads.map((a) => a.imageUrl)).concat([spec.creative.imageUrl]).filter(Boolean)));
+      // Videos → the ad account's video library (advideos, by URL), wait until
+      // Meta has processed them, then Meta's preferred thumbnail → image hash
+      // (video_data needs a thumbnail). All before anything is created, so a
+      // video Meta can't process leaves nothing behind.
+      const videoIds = {}, thumbHashes = {};
+      if (isVideo) {
+        const vurls = Array.from(new Set(spec.adGroups.flatMap((g) => g.ads.map((a) => a.videoUrl || spec.creative.videoUrl)).filter(Boolean)));
+        for (const u of vurls) {
+          if (!/^https?:\/\//i.test(u)) throw Object.assign(new Error('The video must be stored online before publishing to Meta. Upload it again.'), { status: 422 });
+          const up = await post(act + '/advideos', { file_url: u, name: spec.campaign.name + ' — video ' + (vurls.indexOf(u) + 1) });
+          if (!up || !up.id) throw new Error('Meta did not return a video id for the uploaded video.');
+          const pollMs = d.metaVideoPollMs != null ? d.metaVideoPollMs : 4000, tries = d.metaVideoPollTries || 45;
+          let st = null;
+          for (let t = 0; t < tries; t++) {
+            const info = await d.metaFetch('/' + up.id, access.accessToken, { fields: 'status' });
+            st = info && info.status ? info.status.video_status : null;
+            if (st === 'ready') break;
+            if (st === 'error') {
+              const phase = info.status.processing_phase || info.status.uploading_phase || {};
+              const why = (phase.errors && phase.errors[0] && phase.errors[0].message) || 'Meta couldn’t process this video.';
+              throw Object.assign(new Error('Meta couldn’t process the video: ' + why + ' Use an MP4 or MOV file and try again.'), { status: 422 });
+            }
+            await new Promise((r) => setTimeout(r, pollMs));
+          }
+          if (st !== 'ready') throw Object.assign(new Error('Meta is still processing the video. Nothing was created — try publishing again in a few minutes.'), { status: 409, code: 'VIDEO_PROCESSING' });
+          const th = await d.metaFetch('/' + up.id + '/thumbnails', access.accessToken, {});
+          const list = (th && th.data) || [];
+          const pick = list.find((x) => x.is_preferred) || list[0];
+          if (!pick || !pick.uri) throw Object.assign(new Error('Meta didn’t return a thumbnail for the video yet. Try publishing again in a minute.'), { status: 409 });
+          const tb = await img.fetchImage(pick.uri);
+          const tup = await post(act + '/adimages', { bytes: tb.toString('base64') });
+          const tfirst = tup && tup.images ? Object.values(tup.images)[0] : null;
+          if (!tfirst || !tfirst.hash) throw new Error('Meta did not return an image hash for the video thumbnail.');
+          videoIds[u] = up.id; thumbHashes[u] = tfirst.hash;
+        }
+      }
       for (const u of urls) {
         const bytes = await img.fetchImage(u);
         const up = await post(act + '/adimages', { bytes: bytes.toString('base64') });
@@ -316,7 +353,7 @@ module.exports = function registerPublishRoutes(app, d) {
         if (!pick) throw Object.assign(new Error('Meta has no language option for ' + name + '. Remove the language or choose another.'), { status: 422 });
         localeKeys.push(pick.key);
       }
-      const ids = { imageHashes, localeKeys };
+      const ids = { imageHashes, localeKeys, videoIds, thumbHashes };
 
       const campaign = await post(act + '/campaigns', S.payloads.meta.campaign(spec));
       created.campaignId = campaign.id;
@@ -355,7 +392,7 @@ module.exports = function registerPublishRoutes(app, d) {
   });
 
   // ════════════════════════════════════════════════════════════════
-  // GOOGLE ADS — REST v24 (Search, Performance Max, Demand Gen)
+  // GOOGLE ADS — REST v24 (Search, Performance Max, Demand Gen image + YouTube video, Display)
   // ════════════════════════════════════════════════════════════════
   app.post('/api/publish/google', d.requireSubOrFreeStrict, async (req, res) => {
     let prep = null, gads = null;
@@ -425,6 +462,64 @@ module.exports = function registerPublishRoutes(app, d) {
       const c = await gads.mutate('campaigns', [{ create: S.payloads.google.campaign(spec, budgetRn) }]);
       const campaignRn = c.results[0].resourceName;
       createdCampaign = campaignRn;
+
+      if (spec.campaignType === 'DEMAND_GEN' && spec.creative && spec.creative.format === 'YOUTUBE_VIDEO') {
+        // YouTube video ads: logo + one YouTube asset per video, then per ad group the
+        // location/language criteria (Demand Gen: ad group level) and a video responsive ad per ad.
+        const logo = await img.squareLogo(await img.fetchImage(spec.assets.logoUrl), 1200);
+        const vids = Array.from(new Set(spec.adGroups.flatMap((g) => g.ads.map((a) => a.youtubeVideoId)).filter(Boolean)));
+        const made = await gads.mutate('assets', [{ create: { name: spec.campaign.name + ' Logo', type: 'IMAGE', imageAsset: { data: logo.buffer.toString('base64') } } }].concat(vids.map((v) => ({ create: S.payloads.google.youtubeAsset(spec, v) }))));
+        const vIds = { logoAsset: made.results[0].resourceName, videos: {} };
+        vids.forEach((v, i) => { vIds.videos[v] = made.results[i + 1].resourceName; });
+        const groupsOut = [];
+        for (let i = 0; i < spec.adGroups.length; i++) {
+          const grp = spec.adGroups[i];
+          const ag = await gads.mutate('adGroups', [{ create: { name: grp.name, campaign: campaignRn, status: 'ENABLED' } }]);
+          const agRn = ag.results[0].resourceName;
+          const crit = S.payloads.google.targetingCriteria(spec, ids, 'adGroup', agRn);
+          if (crit.length) await gads.mutate('adGroupCriteria', crit.map((x) => ({ create: x })));
+          await gads.mutate('adGroupAds', grp.ads.map((ad) => ({ create: S.payloads.google.demandGenVideoAd(spec, ad, vIds, agRn) })));
+          groupsOut.push({ resourceName: agRn, name: grp.name, ads: grp.ads.length });
+        }
+        d.logCampaignEvent(user, { platform: 'google', campaignName: spec.campaign.name, title: `Published "${spec.campaign.name}" to Google Ads (Demand Gen video)`, detail: `${groupsOut.length} ad group(s) created, paused, ready for review.`, severity: 'low' });
+        const acctV = await succeed(prep, 'google', { campaignId: campaignRn.split('/').pop(), campaignResourceName: campaignRn, adSetIds: groupsOut.map((g) => g.resourceName) });
+        return res.json(Object.assign({ ok: true, platform: 'google', campaignType: 'DEMAND_GEN', format: 'youtube_video', status: 'paused', campaignId: campaignRn.split('/').pop(), campaignResourceName: campaignRn, adGroups: groupsOut, summary: S.summary(spec) }, acctV));
+      }
+
+      if (spec.campaignType === 'DISPLAY') {
+        // Location + language at campaign level; per ad group a DISPLAY_STANDARD group and
+        // a responsive display ad per ad, each with its own square and landscape image.
+        const crit = S.payloads.google.targetingCriteria(spec, ids, 'campaign', campaignRn);
+        if (crit.length) await gads.mutate('campaignCriteria', crit.map((x) => ({ create: x })));
+        let logoAsset = null;
+        if (spec.assets.logoUrl) {
+          const logo = await img.squareLogo(await img.fetchImage(spec.assets.logoUrl), 1200);
+          logoAsset = (await gads.mutate('assets', [{ create: { name: spec.campaign.name + ' Logo', type: 'IMAGE', imageAsset: { data: logo.buffer.toString('base64') } } }])).results[0].resourceName;
+        }
+        const imgAssets = {};
+        const imageAsset = async (url, kind) => {
+          const key = kind + '|' + url; if (imgAssets[key]) return imgAssets[key];
+          const buf = await img.fetchImage(url);
+          const out = kind === 'square' ? await img.square(buf, 1200) : await img.cropToRatio(buf, S.G.LANDSCAPE_RATIO, 1200);
+          if (kind === 'landscape' && (!img.withinRatio(out.info, S.G.LANDSCAPE_RATIO) || out.info.width < S.G_DISPLAY.LANDSCAPE_MIN_W)) throw Object.assign(new Error('A landscape image is too small for display ads (at least 600×314).'), { status: 422 });
+          if (kind === 'square' && out.info && out.info.width < S.G_DISPLAY.SQUARE_MIN) throw Object.assign(new Error('A square image is too small for display ads (at least 300×300).'), { status: 422 });
+          const rn = (await gads.mutate('assets', [{ create: { name: spec.campaign.name + ' ' + kind + ' ' + (Object.keys(imgAssets).length + 1), type: 'IMAGE', imageAsset: { data: out.buffer.toString('base64') } } }])).results[0].resourceName;
+          imgAssets[key] = rn; return rn;
+        };
+        const groupsOut = [];
+        for (let i = 0; i < spec.adGroups.length; i++) {
+          const grp = spec.adGroups[i];
+          const ag = await gads.mutate('adGroups', [{ create: S.payloads.google.displayAdGroup(spec, i, campaignRn) }]);
+          const agRn = ag.results[0].resourceName;
+          const ops = [];
+          for (const ad of grp.ads) ops.push({ create: S.payloads.google.responsiveDisplayAd(spec, ad, { square: await imageAsset(ad.squareImageUrl, 'square'), landscape: await imageAsset(ad.landscapeImageUrl, 'landscape'), logo: logoAsset }, agRn) });
+          await gads.mutate('adGroupAds', ops);
+          groupsOut.push({ resourceName: agRn, name: grp.name, ads: grp.ads.length });
+        }
+        d.logCampaignEvent(user, { platform: 'google', campaignName: spec.campaign.name, title: `Published "${spec.campaign.name}" to Google Ads (Display)`, detail: `${groupsOut.length} ad group(s) created, paused, ready for review.`, severity: 'low' });
+        const acctDi = await succeed(prep, 'google', { campaignId: campaignRn.split('/').pop(), campaignResourceName: campaignRn, adSetIds: groupsOut.map((g) => g.resourceName) });
+        return res.json(Object.assign({ ok: true, platform: 'google', campaignType: 'DISPLAY', status: 'paused', campaignId: campaignRn.split('/').pop(), campaignResourceName: campaignRn, adGroups: groupsOut, summary: S.summary(spec) }, acctDi));
+      }
 
       if (spec.campaignType === 'DEMAND_GEN') {
         const ag = await gads.mutate('adGroups', [{ create: { name: spec.adGroups[0].name, campaign: campaignRn, status: 'ENABLED' } }]);
@@ -521,28 +616,37 @@ module.exports = function registerPublishRoutes(app, d) {
       const tk = (path, body) => d.tiktokPost(path, access.accessToken, body);
       const httpUrl = (u, what) => { if (!/^https?:\/\//i.test(String(u || ''))) throw Object.assign(new Error('The ' + what + ' must be stored online before publishing to TikTok. Generate or upload it again.'), { status: 422 }); return u; };
 
-      const vid = await tk('/file/video/ad/upload/', { advertiser_id: adv, upload_type: 'UPLOAD_BY_URL', video_url: httpUrl(spec.creative.videoUrl, 'video') });
-      const videoId = (Array.isArray(vid) ? vid[0] : vid) && (Array.isArray(vid) ? vid[0] : vid).video_id;
-      if (!videoId) throw new Error('TikTok did not return a video_id for the uploaded video.');
+      // Every distinct video (an ad may have its own) is uploaded once, with its cover.
+      const vurls = Array.from(new Set(spec.adGroups.flatMap((g) => g.ads.map((a) => a.videoUrl || spec.creative.videoUrl)).filter(Boolean)));
+      if (!vurls.length) vurls.push(spec.creative.videoUrl);
+      const videoIds = {}, coverIds = {};
+      let videoId = null, coverImageId = null;
+      for (const vu of vurls) {
+      const vid = await tk('/file/video/ad/upload/', { advertiser_id: adv, upload_type: 'UPLOAD_BY_URL', video_url: httpUrl(vu, 'video') });
+      const oneVideo = (Array.isArray(vid) ? vid[0] : vid) && (Array.isArray(vid) ? vid[0] : vid).video_id;
+      if (!oneVideo) throw new Error('TikTok did not return a video_id for the uploaded video.');
       // Cover image: the campaign's own image when there is one; otherwise
       // the cover frame TikTok extracts from the uploaded video
       // (GET /file/video/ad/info/ → video_cover_url), re-uploaded as an ad
       // image. Create's video mode never generates an image, so without
       // this every Create-made TikTok campaign was blocked at Launch.
-      let coverUrl = spec.creative.coverImageUrl;
+      let coverUrl = vurls.length === 1 ? spec.creative.coverImageUrl : null;
       if (!coverUrl) {
         if (!d.tiktokGet) throw Object.assign(new Error('TikTok video ads need a cover image. Add an image to this campaign.'), { status: 422 });
-        const info = await d.tiktokGet('/file/video/ad/info/', access.accessToken, { advertiser_id: adv, video_ids: JSON.stringify([videoId]) });
+        const info = await d.tiktokGet('/file/video/ad/info/', access.accessToken, { advertiser_id: adv, video_ids: JSON.stringify([oneVideo]) });
         const list = (info && (info.list || info)) || [];
         const first = Array.isArray(list) ? list[0] : null;
         coverUrl = first && (first.video_cover_url || first.poster_url || first.preview_url_cover);
         if (!coverUrl) throw Object.assign(new Error('TikTok didn’t return a cover frame for this video yet. Add an image to this campaign as the cover, or try again in a minute.'), { status: 422 });
       }
       const cover = await tk('/file/image/ad/upload/', { advertiser_id: adv, upload_type: 'UPLOAD_BY_URL', image_url: httpUrl(coverUrl, 'cover image') });
-      const coverImageId = (Array.isArray(cover) ? cover[0] : cover) && (Array.isArray(cover) ? cover[0] : cover).image_id;
-      if (!coverImageId) throw new Error('TikTok did not return an image_id for the cover image.');
+      const oneCover = (Array.isArray(cover) ? cover[0] : cover) && (Array.isArray(cover) ? cover[0] : cover).image_id;
+      if (!oneCover) throw new Error('TikTok did not return an image_id for the cover image.');
+      videoIds[vu] = oneVideo; coverIds[vu] = oneCover;
+      if (!videoId) { videoId = oneVideo; coverImageId = oneCover; }
+      }
       const locationIds = spec.targeting.countries.map((c) => String(S.COUNTRY_BY_ISO[c].geo));
-      const ids = { videoId, coverImageId, locationIds };
+      const ids = { videoId, coverImageId, videoIds, coverIds, locationIds };
 
       const camp = await tk('/campaign/create/', S.payloads.tiktok.campaign(spec, adv));
       const campaignId = camp && camp.campaign_id;
@@ -604,7 +708,18 @@ module.exports = function registerPublishRoutes(app, d) {
       const boardId = await d.pinterestGetOrCreateAdsBoard(access.accessToken);
       const pinMeta = { title: spec.pin.title, description: spec.pin.description, altText: spec.pin.altText, link: S.withParams(spec.tracking.destinationUrl, spec.tracking.urlParams) };
       const pinIds = [];
-      if (spec.creative.format === 'VIDEO') {
+      const perAdPins = !!(spec.structure && spec.structure.explicit);
+      const pinFor = {};
+      if (perAdPins) {
+        // Manual Create: each ad is its own Pin (own title, description, alt text and media).
+        for (const grp of spec.adGroups) for (const ad of grp.ads) {
+          const meta = { title: ad.pin.title, description: ad.pin.description, altText: ad.pin.altText, link: pinMeta.link };
+          const media = spec.creative.format === 'VIDEO' ? (ad.videoUrl || spec.creative.videoUrl) : (ad.imageUrl || spec.creative.imageUrl);
+          if (!/^https?:\/\//i.test(String(media || ''))) throw Object.assign(new Error('Every Pin’s ' + (spec.creative.format === 'VIDEO' ? 'video' : 'image') + ' must be stored online before publishing to Pinterest. Upload it again.'), { status: 422 });
+          const id = spec.creative.format === 'VIDEO' ? await d.pinterestCreateVideoPin(access.accessToken, boardId, media, meta) : await d.pinterestCreateImagePin(access.accessToken, boardId, media, meta);
+          created.pinIds.push(id); pinIds.push(id); pinFor[ad.name] = id;
+        }
+      } else if (spec.creative.format === 'VIDEO') {
         const id = await d.pinterestCreateVideoPin(access.accessToken, boardId, spec.creative.videoUrl, pinMeta);
         created.pinIds.push(id); pinIds.push(id);
       } else {
@@ -623,7 +738,7 @@ module.exports = function registerPublishRoutes(app, d) {
         created.adGroupIds.push(ag.id);
         groupsOut.push({ id: ag.id, name: spec.adGroups[i].name });
         for (const ad of spec.adGroups[i].ads) {
-          const pinId = pinIds[n++ % pinIds.length];
+          const pinId = perAdPins ? pinFor[ad.name] : pinIds[n++ % pinIds.length];
           const a = await pr('POST', acct + '/ads', S.payloads.pinterest.ad(spec, ad, ag.id, pinId));
           if (!a || !a.id) throw new Error('Pinterest did not return an ad id');
           created.adIds.push(a.id);
@@ -683,9 +798,13 @@ module.exports = function registerPublishRoutes(app, d) {
       // 1. Media
       const mediaFor = {};
       if (spec.creative.format === 'VIDEO') {
-        const v = await snapVideoBytes(spec.creative.videoUrl);
-        const id = await SN.uploadMedia(tok(), acct, { type: 'VIDEO', name: spec.campaign.name + ' — video', buffer: v.buffer, fileName: v.fileName, contentType: v.contentType });
-        created.mediaIds.push(id); mediaFor.__video = id;
+        // Each distinct video once (an ad may carry its own).
+        const vurls = Array.from(new Set(spec.adGroups.flatMap((g) => g.ads.map((a) => a.videoUrl || spec.creative.videoUrl)).filter(Boolean)));
+        for (const vu of vurls) {
+          const v = await snapVideoBytes(vu);
+          const id = await SN.uploadMedia(tok(), acct, { type: 'VIDEO', name: spec.campaign.name + ' — video' + (vurls.length > 1 ? ' ' + (vurls.indexOf(vu) + 1) : ''), buffer: v.buffer, fileName: v.fileName, contentType: v.contentType });
+          created.mediaIds.push(id); mediaFor['video|' + vu] = id; if (!mediaFor.__video) mediaFor.__video = id;
+        }
       } else {
         const urls = Array.from(new Set(spec.adGroups.flatMap((g) => g.ads.map((a) => a.imageUrl)).concat([spec.creative.imageUrl]).filter(Boolean)));
         for (const u of urls) {
@@ -694,7 +813,7 @@ module.exports = function registerPublishRoutes(app, d) {
           created.mediaIds.push(id); mediaFor[u] = id;
         }
       }
-      const mediaOf = (ad) => mediaFor.__video || mediaFor[ad.imageUrl] || mediaFor[spec.creative.imageUrl];
+      const mediaOf = (ad) => (spec.creative.format === 'VIDEO' ? (mediaFor['video|' + (ad.videoUrl || spec.creative.videoUrl)] || mediaFor.__video) : (mediaFor[ad.imageUrl] || mediaFor[spec.creative.imageUrl]));
 
       // 2. Campaign, 3. ad squads → creative + ad per ad
       const start = new Date(Date.now() + 60 * 1000).toISOString();
