@@ -7233,7 +7233,13 @@ app.post('/api/ai/chat', requireSubIfAuthed, paidActions.laneGuard('chat'), asyn
   // The user's personal assistant (services/agents.js), resolved on the server
   // from the account's stored choice — never from the request. Accounts that
   // never chose get the default assistant (the same one the app shows them).
-  const agentInfo = (chatEntitled && req.user) ? await agents.resolveAgent(supabaseAdmin, req.user.id) : null;
+  // A lookup that fails answers as the neutral "Oriven", never as a different
+  // personal assistant than the one the account chose.
+  let agentInfo = null;
+  if (chatEntitled && req.user) {
+    try { agentInfo = await agents.resolveAgent(supabaseAdmin, req.user.id); }
+    catch (err) { console.warn('[chat] assistant lookup failed:', err.code || err.message); }
+  }
   const agentDef = agentInfo ? agents.AGENTS[agentInfo.id] : null;
   const assistantName = agentDef ? agentDef.name : 'Oriven';
 
@@ -15549,8 +15555,10 @@ app.get('/api/agent', async (req, res) => {
     res.set('Cache-Control', 'no-store');
     res.json({ agent: agents.publicAgent(r.id), assigned: r.assigned, agents: agents.list() });
   } catch (err) {
-    console.error('[agent GET]', err.message);
-    res.status(500).json({ error: 'Could not load your assistant.' });
+    // Never a default in place of the saved choice: the app keeps what it shows and retries.
+    console.error('[agent GET]', err.code || err.message);
+    res.set('Cache-Control', 'no-store');
+    res.status(503).json({ error: 'Could not load your assistant right now. Please try again.', code: 'AGENT_LOOKUP_FAILED' });
   }
 });
 // PUT { agentId }: the user picks (or changes) their own assistant. Only the
@@ -15567,7 +15575,8 @@ app.put('/api/agent', async (req, res) => {
     res.json({ agent: agents.publicAgent(id), assigned: true });
   } catch (err) {
     if (err.code === 'ASSISTANT_ALREADY_CHOSEN') return res.status(409).json({ error: err.message, code: err.code, agent: agents.publicAgent(err.current), assigned: true });
-    console.error('[agent PUT]', err.message);
+    if (err.code === 'AGENT_LOOKUP_FAILED') return res.status(503).json({ error: err.message, code: err.code });
+    console.error('[agent PUT]', err.code || err.message);
     res.status(500).json({ error: 'Could not save your assistant.' });
   }
 });
@@ -15695,6 +15704,7 @@ onboardingFlow.init({
 function _flowError(res, where, err) {
   if (err instanceof onboardingFlow.FlowError) return res.status(err.status).json({ error: err.message, code: err.code, missing: err.details || undefined });
   if (err && err.code === 'AI_SPEND_LIMIT') return res.status(503).json({ error: 'OrivenAI is busy right now. Please try again in a few minutes.', code: 'BUSY' });
+  if (err && err.code === 'AGENT_LOOKUP_FAILED') return res.status(503).json({ error: err.message, code: err.code });
   console.error('[onboarding/' + where + ']', err && (err.code || err.message));
   return res.status(500).json({ error: 'Something went wrong on our side. Your answers are saved — please try again.' });
 }
