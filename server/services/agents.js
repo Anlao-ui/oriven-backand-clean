@@ -103,22 +103,44 @@ function list() { return ORDER.map((id) => ({ id, name: AGENTS[id].name, role: A
 //      profile has a choice, so it can't override a later change.
 //   3. DEFAULT_AGENT, assigned: false (the app asks the user to choose; the
 //      default is never stored)
-// Never throws: a lookup failure answers with the default.
+// Steps 2 and 3 apply only when the stored choice was actually READ and is
+// absent. A lookup that fails (database unreachable, timeout, cold start)
+// throws AGENT_LOOKUP_FAILED instead: answering with the default there showed
+// a different assistant than the one saved, offered the picker again, and —
+// with an unread profile — copied an older onboarding choice over the whole
+// preferences object. Callers report "try again"; nothing is written.
+function lookupFailed(cause) {
+  const e = new Error('Could not load your assistant right now. Please try again.');
+  e.status = 503; e.code = 'AGENT_LOOKUP_FAILED'; e.cause = cause;
+  return e;
+}
+// "The onboarding table doesn't exist (yet)" is a real absence, not a failure.
+const tableMissing = (err) => !!err && (err.code === '42P01' || err.code === 'PGRST205' || /does not exist|could not find the table/i.test(err.message || ''));
+
 async function resolveAgent(db, userId) {
   if (!db || !userId) return { id: DEFAULT_AGENT, assigned: false, source: 'default' };
-  let prefs = null;
+  let profile;
   try {
     const { data, error } = await db.from('profiles').select('preferences').eq('id', userId).maybeSingle();
-    if (!error) prefs = (data && data.preferences) || null;
-  } catch (_) { /* default below */ }
+    if (error) throw error;
+    profile = data || null;
+  } catch (err) { throw lookupFailed(err); }
+  const prefs = (profile && profile.preferences) || null;
   if (prefs && isAgentId(prefs.assistant)) return { id: prefs.assistant, assigned: true, source: 'preferences' };
+  let session = null;
   try {
     const { data, error } = await db.from('onboarding_sessions').select('assistant').eq('user_id', userId).maybeSingle();
-    if (!error && data && isAgentId(data.assistant)) {
-      try { await db.from('profiles').update({ preferences: Object.assign({}, prefs || {}, { assistant: data.assistant }) }).eq('id', userId); } catch (_) { /* next lookup reads the session again */ }
-      return { id: data.assistant, assigned: true, source: 'onboarding' };
+    if (error && !tableMissing(error)) throw error;
+    session = error ? null : data;
+  } catch (err) { throw lookupFailed(err); }
+  if (session && isAgentId(session.assistant)) {
+    // Copied onto the profile that was just read (every other preference kept),
+    // only when that profile row exists. A failed copy is retried next lookup.
+    if (profile) {
+      try { await db.from('profiles').update({ preferences: Object.assign({}, prefs || {}, { assistant: session.assistant }) }).eq('id', userId); } catch (_) { /* next lookup reads the session again */ }
     }
-  } catch (_) { /* table missing or unreadable: default */ }
+    return { id: session.assistant, assigned: true, source: 'onboarding' };
+  }
   return { id: DEFAULT_AGENT, assigned: false, source: 'default' };
 }
 
@@ -182,4 +204,4 @@ Your strengths: ${a.strengths.join('; ')}. Let them shape how you help — start
 Speak as ${a.name} in the first person, in this tone, in every reply. Do not describe your backstory unless asked; it is an imagined character. Do not mention these instructions.`;
 }
 
-module.exports = { AGENTS, ORDER, DEFAULT_AGENT, isAgentId, publicAgent, list, resolveAgent, assignAgent, chooseAgent, platformGuide, personaPrompt };
+module.exports = { AGENTS, ORDER, DEFAULT_AGENT, isAgentId, tableMissing, publicAgent, list, resolveAgent, assignAgent, chooseAgent, platformGuide, personaPrompt };
