@@ -206,11 +206,41 @@ const SUPPORT = {
   snapchat: { goals: createCompat.typeInfo('snapchat').goals.slice() },
 };
 
+// How many ad sets / ad groups / ad squads and ads one campaign may have when
+// the structure is set per ad (manual Create). `src` says where the number
+// comes from: 'platform' = the platform's documented limit, 'orivenai' = a
+// limit OrivenAI sets because every group and ad is a separate API call during
+// publishing (kept well under the platforms' own much higher limits).
+const STRUCTURE_LIMITS = {
+  meta: { groups: 20, ads: 50, src: { groups: 'orivenai', ads: 'platform' }, adsNote: 'Meta allows up to 50 ads in one ad set.' },
+  google: { groups: 20, ads: 3, src: { groups: 'orivenai', ads: 'platform' }, adsNote: 'Google Ads serves at most 3 enabled responsive search ads per ad group.' },
+  googleDisplay: { groups: 20, ads: 5, src: { groups: 'orivenai', ads: 'orivenai' } },
+  googleVideo: { groups: 10, ads: 5, src: { groups: 'orivenai', ads: 'orivenai' } },
+  tiktok: { groups: 20, ads: 20, src: { groups: 'orivenai', ads: 'platform' }, adsNote: 'TikTok allows up to 20 ads in one ad group.' },
+  pinterest: { groups: 20, ads: 10, src: { groups: 'orivenai', ads: 'orivenai' } },
+  snapchat: { groups: 10, ads: 10, src: { groups: 'orivenai', ads: 'orivenai' } },
+};
+function limitsFor(platform, type) { return platform === 'google' ? (type === 'DISPLAY' ? STRUCTURE_LIMITS.googleDisplay : type === 'DEMAND_GEN' ? STRUCTURE_LIMITS.googleVideo : STRUCTURE_LIMITS.google) : STRUCTURE_LIMITS[platform]; }
+// Google: Display (responsive display ads) and Demand Gen video (YouTube video
+// responsive ads) are manual-only formats. Google Video campaigns themselves
+// can't be created through the Google Ads API (developers.google.com
+// /google-ads/api/docs/video/overview); YouTube video ads go through Demand Gen.
+const G_DISPLAY = { HEADLINE: 30, MAX_H: 5, LONG: 90, DESCRIPTION: 90, MAX_D: 5, SQUARE_MIN: 300, LANDSCAPE_MIN_W: 600 };
+const G_DGV = { HEADLINE: 40, LONG: 90, DESCRIPTION: 90, MAX: 5 };
+const YOUTUBE_ID = /^[A-Za-z0-9_-]{11}$/;
+function youtubeId(v) {
+  const t = _strRaw(v);
+  if (YOUTUBE_ID.test(t)) return t;
+  const m = t.match(/(?:youtu\.be\/|v=|\/shorts\/|\/embed\/)([A-Za-z0-9_-]{11})/);
+  return m ? m[1] : null;
+}
+function _strRaw(v) { return (v == null ? '' : String(v)).trim(); }
+
 // Facts that need a real (test) ad account to confirm — reported, not hidden.
 const LIVE_UNVERIFIED = {
-  meta: ['Marketing API v25.0 payloads (campaign/ad set/creative/ad) have not been sent to a live ad account yet.'],
-  google: ['Search, Performance Max (brand guidelines at campaign level) and Demand Gen payloads have not been sent to a live Google Ads account yet.'],
-  tiktok: ['location_ids use GeoNames country ids; video ads (SINGLE_VIDEO) and ad-group-only budgets have not been sent to a live TikTok account yet.'],
+  meta: ['Marketing API v25.0 payloads (campaign/ad set/creative/ad, including video upload, processing and video_data creatives) have not been sent to a live ad account yet.'],
+  google: ['Search, Performance Max (brand guidelines at campaign level), Demand Gen (image and YouTube video) and Display (responsive display ad) payloads have not been sent to a live Google Ads account yet.'],
+  tiktok: ['location_ids use GeoNames country ids; video ads (SINGLE_VIDEO), ad-group-only budgets and the Video Views objective (VIDEO_VIEWS / VIDEO_VIEW / CPV) have not been sent to a live TikTok account yet.'],
   pinterest: ['targeting_spec LOCATION array and SALES/LEADS conversion metadata (optimization_goal_metadata) have not been sent to a live Pinterest account yet.'],
   snapchat: ['Snap Marketing API payloads (campaign, ad squad, media upload, WEB_VIEW creative, ad) have not been sent to a live Snapchat ad account yet.'],
 };
@@ -326,6 +356,18 @@ function variantsOf(pkg, platform, campaignName) {
   return out;
 }
 
+// The content one ad carries in manual Create (only what is set; the rest falls back).
+function ownAd(a, platform) {
+  if (!a || typeof a !== 'object') return {};
+  const out = {};
+  for (const k of ['headline', 'primaryText', 'description', 'cta', 'adText', 'title', 'pinDescription', 'altText', 'longHeadline', 'youtubeVideo']) if (a[k] != null && _str(a[k]) !== '') out[k] = _str(a[k]);
+  for (const k of ['imageUrl', 'videoUrl', 'landscapeImageUrl']) if (a[k]) out[k] = _str(a[k]);
+  for (const k of ['headlines', 'descriptions', 'longHeadlines']) if (Array.isArray(a[k])) out[k] = a[k].map(_str).filter(Boolean);
+  if (platform === 'pinterest' && out.title && !out.headline) out.headline = out.title;
+  if (platform === 'tiktok' && out.adText && !out.primaryText) out.primaryText = out.adText;
+  return out;
+}
+
 function goalOf(pkg) {
   const g = campaignGoals.normalizeGoal(pkg.strategy && pkg.strategy.goal);
   return GOALS.includes(g) ? g : 'Traffic';
@@ -401,19 +443,30 @@ function buildSpec(pkg, platform, ctx) {
 
   // Ad sets / ad groups: the structure chosen in Create (or changed via the
   // review / Chat), each with its own optional name and age range override.
+  // Manual Create sets the structure per ad: overrides.adGroups[i].ads[j]
+  // carries that ad's own copy and media (any number of groups and ads,
+  // checked against STRUCTURE_LIMITS). Packages without per-ad content keep
+  // the original behaviour (copy cycled from the concepts).
   const groupOv = Array.isArray(ov.adGroups) ? ov.adGroups : [];
+  const explicit = groupOv.length > 0 && groupOv.every((g) => g && Array.isArray(g.ads) && g.ads.length > 0);
+  spec.structure = { explicit, groups: explicit ? groupOv.length : struct.groups, limits: limitsFor(platform, spec.campaignType) };
   const groups = [];
   let k = 0;
-  const totalGroups = struct.groups;
+  const totalGroups = explicit ? groupOv.length : struct.groups;
   for (let i = 0; i < totalGroups; i++) {
     const gOv = groupOv[i] || {};
     const ads = [];
-    for (let j = 0; j < struct.adsPerGroup; j++) { const v = variants[k % variants.length]; k++; ads.push(Object.assign({ name: '' }, v)); }
+    const nAds = explicit ? gOv.ads.length : struct.adsPerGroup;
+    for (let j = 0; j < nAds; j++) {
+      const v = variants[k % variants.length]; k++;
+      ads.push(Object.assign({ name: '' }, explicit ? Object.assign({}, v, { imageUrl: null }) : v, explicit ? ownAd(gOv.ads[j], platform) : {}));
+    }
     groups.push({
       name: _str(gOv.name) || (name + (totalGroups > 1 ? ' — ' + (platform === 'meta' ? 'Ad set ' : platform === 'snapchat' ? 'Ad squad ' : 'Ad group ') + (i + 1) : (platform === 'meta' ? ' — Ad set' : platform === 'snapchat' ? ' — Ad squad' : ' — Ad group'))),
       ageMin: Number.isInteger(gOv.ageMin) ? gOv.ageMin : null,
       ageMax: Number.isInteger(gOv.ageMax) ? gOv.ageMax : null,
-      ads: ads.map((a, j) => Object.assign(a, { name: (_str(gOv.name) || name) + ' — Ad ' + (j + 1) })),
+      ads: ads.map((a, j) => Object.assign(a, { name: (explicit && gOv.ads[j] && _str(gOv.ads[j].name)) || ((_str(gOv.name) || name) + ' — Ad ' + (j + 1)) })),
+      keywordsOverride: explicit && Array.isArray(gOv.keywords) ? gOv.keywords : null,
     });
   }
   spec.adGroups = groups;
@@ -460,7 +513,14 @@ function buildSpec(pkg, platform, ctx) {
     spec.tracking.conversionEvent = needsConversion ? event : null;
     spec.identity = { pageId: opt.pageId || null, instagramUserId: opt.instagramUserId || null, instagramUsername: opt.instagramUsername || null };
     spec.compliance = { euTargeted: countries.some(isEu), dsaBeneficiary: beneficiary || null, dsaPayor: payor || null };
-    spec.creative = { format: 'IMAGE', imageUrl: images.primary, images: images.all };
+    // Image or video ads (video: uploaded to the ad account's video library,
+    // processed by Meta, then a video_data creative with a thumbnail).
+    const fmtWanted = String((pkg.inputs && pkg.inputs.format) || o.creativeType || '').toLowerCase();
+    const metaVideo = fmtWanted === 'video' || fmtWanted === 'videos';
+    const anyAdVideo = spec.adGroups.some((g) => g.ads.some((a) => a.videoUrl));
+    spec.creative = metaVideo
+      ? { format: 'VIDEO', videoUrl: video, imageUrl: images.primary, images: images.all, videoPending: !video && !anyAdVideo && videoPendingOf(pkg) }
+      : { format: 'IMAGE', imageUrl: images.primary, images: images.all };
   }
 
   if (platform === 'google') {
@@ -468,6 +528,7 @@ function buildSpec(pkg, platform, ctx) {
     const type = spec.campaignType;
     const bidCfg = type === 'PERFORMANCE_MAX' ? campaignGoals.GOOGLE_PMAX_GOAL_CONFIG[goal]
       : type === 'DEMAND_GEN' ? campaignGoals.GOOGLE_DEMANDGEN_GOAL_CONFIG[goal]
+      : type === 'DISPLAY' ? campaignGoals.GOOGLE_DISPLAY_GOAL_CONFIG[goal]
       : campaignGoals.GOOGLE_GOAL_CONFIG[goal];
     spec.campaign.biddingField = bidCfg ? bidCfg.biddingField : null;
     spec.campaign.biddingValue = bidCfg ? bidCfg.biddingValue : null;
@@ -510,17 +571,58 @@ function buildSpec(pkg, platform, ctx) {
       const kws = (g.keywords || []).map((x) => (typeof x === 'object' && x ? x : { text: x })).map((x) => ({ text: _str(x.text), matchType: GOOGLE_MATCH_TYPES.includes(String(x.matchType || '').toUpperCase()) ? String(x.matchType).toUpperCase() : matchType })).filter((x) => x.text);
       const n = spec.adGroups.length;
       spec.adGroups.forEach((grp, i) => {
-        grp.keywords = n === 1 ? kws.slice(0, 20) : kws.filter((_, j) => j % n === i).slice(0, 20);
-        grp.ads = grp.ads.map((_, j) => ({ name: grp.name + ' — RSA ' + (j + 1), headlines: rotate(headlines, G.RSA_MAX_H, i + j), descriptions: rotate(descriptions, G.RSA_MAX_D, i + j) }));
+        const own = grp.keywordsOverride ? grp.keywordsOverride.map((x) => (typeof x === 'object' && x ? x : { text: x })).map((x) => ({ text: _str(x.text), matchType: GOOGLE_MATCH_TYPES.includes(String(x.matchType || '').toUpperCase()) ? String(x.matchType).toUpperCase() : matchType })).filter((x) => x.text) : null;
+        grp.keywords = own ? own.slice(0, 20) : (n === 1 ? kws.slice(0, 20) : kws.filter((_, j) => j % n === i).slice(0, 20));
+        grp.ads = grp.ads.map((ad, j) => ({ name: spec.structure.explicit && ad.name ? ad.name : grp.name + ' — RSA ' + (j + 1),
+          headlines: Array.isArray(ad.headlines) && ad.headlines.length ? ad.headlines.map(_str).filter(Boolean) : rotate(headlines, G.RSA_MAX_H, i + j),
+          descriptions: Array.isArray(ad.descriptions) && ad.descriptions.length ? ad.descriptions.map(_str).filter(Boolean) : rotate(descriptions, G.RSA_MAX_D, i + j) }));
+        delete grp.keywordsOverride;
       });
+    } else if (type === 'DISPLAY') {
+      // Responsive display ads, one per ad, each with its own texts and images (or the campaign's).
+      const longH = _str(g.longHeadline);
+      spec.adGroups.forEach((grp) => {
+        grp.ads = grp.ads.map((ad, j) => ({
+          name: spec.structure.explicit && ad.name ? ad.name : grp.name + ' — Display ad ' + (j + 1),
+          headlines: (Array.isArray(ad.headlines) && ad.headlines.length ? ad.headlines : headlines).map(_str).filter(Boolean),
+          longHeadline: _str(ad.longHeadline) || longH,
+          descriptions: (Array.isArray(ad.descriptions) && ad.descriptions.length ? ad.descriptions : descriptions).map(_str).filter(Boolean),
+          squareImageUrl: ad.imageUrl || images.primary || null,
+          landscapeImageUrl: ad.landscapeImageUrl || _str(g.pmaxLandscapeImageUrl) || null,
+        }));
+        delete grp.keywordsOverride;
+      });
+      spec.creative = { format: 'IMAGE' };
+    } else if (type === 'DEMAND_GEN' && (g.format === 'video' || (pkg.inputs && pkg.inputs.format === 'video'))) {
+      // YouTube video ads through Demand Gen (DemandGenVideoResponsiveAdInfo).
+      const longs = (Array.isArray(g.longHeadlines) ? g.longHeadlines : [g.longHeadline]).map(_str).filter(Boolean);
+      const vid = youtubeId(g.youtubeVideo);
+      spec.adGroups.forEach((grp) => {
+        grp.ads = grp.ads.map((ad, j) => ({
+          name: spec.structure.explicit && ad.name ? ad.name : grp.name + ' — Video ad ' + (j + 1),
+          headlines: (Array.isArray(ad.headlines) && ad.headlines.length ? ad.headlines : headlines).map(_str).filter(Boolean),
+          longHeadlines: (Array.isArray(ad.longHeadlines) && ad.longHeadlines.length ? ad.longHeadlines : longs).map(_str).filter(Boolean),
+          descriptions: (Array.isArray(ad.descriptions) && ad.descriptions.length ? ad.descriptions : descriptions).map(_str).filter(Boolean),
+          youtubeVideoId: youtubeId(ad.youtubeVideo) || vid,
+          youtubeInput: _str(ad.youtubeVideo || g.youtubeVideo) || null,
+        }));
+        delete grp.keywordsOverride;
+      });
+      spec.creative = { format: 'YOUTUBE_VIDEO' };
     } else {
       spec.adGroups = [{ name: name + (type === 'DEMAND_GEN' ? ' — Ad group' : ' — Asset group'), ads: [{ name: name + ' — Ad' }] }];
     }
   }
 
   if (platform === 'tiktok') {
-    const cfg = campaignGoals.TIKTOK_GOAL_CONFIG[goal] || campaignGoals.TIKTOK_GOAL_CONFIG.Traffic;
+    // Video Views (VIDEO_VIEWS / VIDEO_VIEW / CPV, campaignGoals.TIKTOK_EXTENDED_OBJECTIVES) is the
+    // one extra TikTok objective OrivenAI publishes; the others need setup OrivenAI can't do (see createCompat).
+    // Only packages from manual Create choose it explicitly; older packages that carried "Video Views" from
+    // earlier Create screens keep publishing with their goal's objective (with the warning below), unchanged.
+    const ttObj = pkg.creationMode === 'manual' && String(o.objective || '').replace(/[\s_]/g, '').toLowerCase() === 'videoviews' ? campaignGoals.TIKTOK_EXTENDED_OBJECTIVES.VideoViews : null;
+    const cfg = ttObj || campaignGoals.TIKTOK_GOAL_CONFIG[goal] || campaignGoals.TIKTOK_GOAL_CONFIG.Traffic;
     spec.campaign.objective = cfg.objective_type;
+    spec.campaign.objectiveLabel = ttObj ? ttObj.label : null;
     spec.campaign.budgetLevel = 'AD_GROUP';
     spec.optimization = { goal: cfg.optimization_goal, billingEvent: cfg.billing_event, bidType: 'BID_TYPE_NO_BID', promotionType: 'WEBSITE' };
     spec.targeting.placement = 'tiktok';
@@ -534,8 +636,8 @@ function buildSpec(pkg, platform, ctx) {
     spec.creative = { format: video ? 'VIDEO' : 'IMAGE', videoUrl: video, coverImageUrl: images.primary, coverFromVideo: !!(video && !images.primary), videoPending: !video && videoPendingOf(pkg) };
     // Video Views / App Promotion were offered by older Create screens but
     // never wired into this spec (it always used the goal's objective).
-    if (o.objective) spec.unsupportedObjective = String(o.objective);
-    spec.adGroups.forEach((grp) => grp.ads.forEach((ad) => { ad.adText = (ad.primaryText || ad.headline || name).replace(/\s+/g, ' ').trim().slice(0, 100); }));
+    if (o.objective && !ttObj) spec.unsupportedObjective = String(o.objective);
+    spec.adGroups.forEach((grp) => grp.ads.forEach((ad) => { ad.adText = (ad.adText || ad.primaryText || ad.headline || name).replace(/\s+/g, ' ').trim().slice(0, 100); }));
   }
 
   if (platform === 'pinterest') {
@@ -556,6 +658,10 @@ function buildSpec(pkg, platform, ctx) {
     spec.tracking.conversionEvent = needsConversion ? evt : null;
     spec.pinterestObjective = (o.objective && /video.?completion/i.test(String(o.objective))) ? 'Video Completion' : null;
     spec.pin = { title: _str(o.title || (variants[0] && variants[0].headline) || name).slice(0, 100), description: _str(o.description || '').slice(0, 800), altText: _str(o.altText || '').slice(0, 500) };
+    // Manual Create: every ad is its own Pin (own title, description, alt text and image or video).
+    if (spec.structure.explicit) spec.adGroups.forEach((grp) => grp.ads.forEach((ad) => {
+      ad.pin = { title: _str(ad.title || ad.headline || spec.pin.title).slice(0, 100), description: _str(ad.pinDescription != null ? ad.pinDescription : spec.pin.description).slice(0, 800), altText: _str(ad.altText != null ? ad.altText : spec.pin.altText).slice(0, 500), titleLong: _str(ad.title || '').length > 100 };
+    }));
     spec.creative = { format: (o.creativeType === 'video' && video) ? 'VIDEO' : 'IMAGE', imageUrl: images.primary, images: images.all, videoUrl: video, wantsVideo: o.creativeType === 'video', videoPending: !video && videoPendingOf(pkg) };
   }
 
@@ -668,6 +774,16 @@ function validate(spec, ctx) {
   if (u === 'missing') add('error', 'tracking.destinationUrl', 'url_missing', 'Add the page people land on after clicking the ad.');
   else if (u === 'invalid') add('error', 'tracking.destinationUrl', 'url_invalid', 'The destination “' + spec.tracking.destinationUrl + '” isn’t a valid web address (start with https://).', { params: { url: spec.tracking.destinationUrl } });
 
+  // Structure set per ad (manual Create): the platform's (or OrivenAI's) limits.
+  if (spec.structure && spec.structure.explicit) {
+    const L = spec.structure.limits || {};
+    const unit = p === 'meta' ? 'ad sets' : p === 'snapchat' ? 'ad squads' : 'ad groups';
+    if (L.groups && spec.adGroups.length > L.groups) add('error', 'adGroups', 'structure_groups', 'This campaign has ' + spec.adGroups.length + ' ' + unit + '; OrivenAI publishes at most ' + L.groups + ' per campaign (each is a separate request to ' + pname + '). Split it into two campaigns.', { params: { n: spec.adGroups.length, max: L.groups } });
+    spec.adGroups.forEach((grp, i) => {
+      if (L.ads && grp.ads.length > L.ads) add('error', `adGroups[${i}].ads`, 'structure_ads', grp.name + ' has ' + grp.ads.length + ' ads; the maximum is ' + L.ads + '. ' + (L.src && L.src.ads === 'platform' ? (L.adsNote || '') : 'OrivenAI publishes at most ' + L.ads + ' ads per group.'), { params: { group: grp.name, n: grp.ads.length, max: L.ads } });
+    });
+  }
+
   if (p === 'meta') {
     if (!spec.campaign.specialAdCategoriesConfirmed) add('error', 'campaign.specialAdCategories', 'special_categories_unconfirmed', 'Confirm whether this ad is about housing, employment, financial products or services, or social issues/elections/politics. Meta requires this declaration.');
     if (spec.compliance.euTargeted && !(spec.compliance.dsaBeneficiary && spec.compliance.dsaPayor)) add('error', 'compliance.dsa', 'dsa_missing', 'Ads shown in the EU must name who benefits from the ad and who pays for it. Add your business name in your business profile, or set them here.');
@@ -679,7 +795,17 @@ function validate(spec, ctx) {
     if (!spec.identity.pageId) add('error', 'identity.pageId', 'page_missing', 'Connect a Facebook Page in Connections. Meta ads run under a Page.');
     if (spec.unsupportedObjective) add('warning', 'campaign.objective', 'objective_unsupported', 'This campaign was made with the “' + spec.unsupportedObjective + '” objective, which OrivenAI can’t publish to Meta. It will be published with the standard ' + goal + ' objective.', { params: { objective: spec.unsupportedObjective, goal, platform: 'Meta' } });
     if (spec.targeting.placement === 'instagram_only' && opt.instagramChecked && !spec.identity.instagramUserId) add('error', 'identity.instagram', 'instagram_missing', 'Instagram-only ads need an Instagram account linked to your Facebook Page. Link one in Meta Business Settings, or use Facebook and Instagram placements.');
-    if (!spec.creative.imageUrl) add('error', 'creative.image', 'image_missing', 'Add an image. Meta image ads need one.', { variant: 'meta' });
+    if (spec.creative.format === 'VIDEO') {
+      if (spec.creative.videoPending) add('error', 'creative.video', 'video_pending', 'The video for this campaign is still being generated. It can be published once the video is ready.', { variant: 'meta' });
+      spec.adGroups.forEach((grp, i) => grp.ads.forEach((ad, j) => {
+        const v = ad.videoUrl || spec.creative.videoUrl;
+        if (!v) { if (!spec.creative.videoPending) add('error', `adGroups[${i}].ads[${j}].video`, 'video_missing', 'Ad ' + (j + 1) + ' in ' + grp.name + ' has no video. Meta video ads need one.', { variant: 'meta', params: { n: j + 1, group: grp.name } }); }
+        else if (!/^https?:\/\//i.test(String(v))) add('error', `adGroups[${i}].ads[${j}].video`, 'video_not_online', 'The video isn’t stored online, so Meta can’t fetch it. Upload the video again.', { params: { platform: 'Meta' } });
+      }));
+      add('info', 'creative.video', 'meta_video_spec', 'Meta video ads: MP4 or MOV, 1:1, 4:5 or 9:16 work best (16:9 too in feeds). OrivenAI uploads the video to your ad account, waits until Meta has processed it and uses Meta’s own thumbnail.');
+    } else if (spec.structure && spec.structure.explicit) {
+      spec.adGroups.forEach((grp, i) => grp.ads.forEach((ad, j) => { if (!ad.imageUrl && !spec.creative.imageUrl) add('error', `adGroups[${i}].ads[${j}].image`, 'image_missing', 'Ad ' + (j + 1) + ' in ' + grp.name + ' has no image. Meta image ads need one.', { variant: 'meta', params: { n: j + 1, group: grp.name } }); }));
+    } else if (!spec.creative.imageUrl) add('error', 'creative.image', 'image_missing', 'Add an image. Meta image ads need one.', { variant: 'meta' });
     spec.adGroups.forEach((grp, i) => grp.ads.forEach((ad, j) => {
       if (!ad.primaryText) add('error', `adGroups[${i}].ads[${j}].primaryText`, 'copy_missing', 'Ad ' + (j + 1) + ' in ' + grp.name + ' has no primary text.', { variant: 'meta', params: { n: j + 1, group: grp.name } });
       if (ad.headline.length > 255) add('error', `adGroups[${i}].ads[${j}].headline`, 'headline_long', 'A Meta headline is too long.', { variant: 'meta' });
@@ -708,6 +834,32 @@ function validate(spec, ctx) {
       const noUrl = a.sitelinks.filter((x) => !x.url);
       if (noUrl.length) add('info', 'assets.sitelinks', 'sitelink_urls', noUrl.length + ' sitelink idea' + (noUrl.length === 1 ? '' : 's') + ' (' + noUrl.map((x) => x.text).join(', ') + ') need a page address before they can be added.', { variant: noUrl.length === 1 ? 'one' : undefined, params: { n: noUrl.length, list: noUrl.map((x) => x.text).join(', ') } });
       a.sitelinks.filter((x) => x.url && validUrl(x.url)).forEach((x) => add('error', 'assets.sitelinks', 'sitelink_url_invalid', 'The sitelink “' + x.text + '” has an invalid address.', { params: { text: x.text } }));
+    } else if (spec.campaignType === 'DISPLAY') {
+      if (!a.businessName) add('error', 'assets.businessName', 'business_name_missing', 'Add your company name in your business profile. Google requires a business name for responsive display ads.');
+      else if (a.businessName.length > G.BUSINESS_NAME) add('warning', 'assets.businessName', 'business_name_long', 'Google shows at most 25 characters of the business name; it will be shortened.');
+      spec.adGroups.forEach((grp, i) => grp.ads.forEach((ad, j) => {
+        const at = `adGroups[${i}].ads[${j}]`, who = 'Display ad ' + (j + 1) + ' in ' + grp.name;
+        const h = ad.headlines.filter((x) => x.length <= G_DISPLAY.HEADLINE), d = ad.descriptions.filter((x) => x.length <= G_DISPLAY.DESCRIPTION);
+        if (!h.length || ad.headlines.length > G_DISPLAY.MAX_H) add('error', at + '.headlines', 'display_headlines', who + ' needs 1 to 5 headlines of up to 30 characters.', { params: { n: j + 1, group: grp.name } });
+        if (ad.headlines.some((x) => x.length > G_DISPLAY.HEADLINE)) add('error', at + '.headlines', 'display_headline_long', who + ': keep each headline to 30 characters.', { params: { n: j + 1, group: grp.name } });
+        if (!ad.longHeadline || ad.longHeadline.length > G_DISPLAY.LONG) add('error', at + '.longHeadline', 'display_long_headline', who + ' needs a long headline of up to 90 characters.', { params: { n: j + 1, group: grp.name } });
+        if (!d.length || ad.descriptions.length > G_DISPLAY.MAX_D) add('error', at + '.descriptions', 'display_descriptions', who + ' needs 1 to 5 descriptions of up to 90 characters.', { params: { n: j + 1, group: grp.name } });
+        if (!ad.squareImageUrl) add('error', at + '.image', 'display_square', who + ' needs a square image (1:1, at least 300 × 300).', { params: { n: j + 1, group: grp.name } });
+        if (!ad.landscapeImageUrl) add('error', at + '.landscape', 'display_landscape', who + ' needs a landscape image (1.91:1, at least 600 × 314). OrivenAI crops it to the exact ratio.', { params: { n: j + 1, group: grp.name } });
+      }));
+      if (!a.logoUrl) add('info', 'assets.logo', 'display_logo', 'No logo in your business profile: the display ads run without one (a logo is optional for responsive display ads).');
+    } else if (spec.creative && spec.creative.format === 'YOUTUBE_VIDEO') {
+      if (!a.businessName) add('error', 'assets.businessName', 'business_name_missing', 'Add your company name in your business profile. Google requires a business name for video ads.');
+      if (!a.logoUrl) add('error', 'assets.logo', 'logo_missing', 'Add your logo in your business profile. Google requires a logo for Demand Gen video ads.');
+      spec.adGroups.forEach((grp, i) => grp.ads.forEach((ad, j) => {
+        const at = `adGroups[${i}].ads[${j}]`, who = 'Video ad ' + (j + 1) + ' in ' + grp.name;
+        if (!ad.youtubeVideoId && ad.youtubeInput) add('error', at + '.video', 'youtube_invalid', who + ': “' + ad.youtubeInput + '” isn’t a YouTube video link or id.', { params: { n: j + 1, group: grp.name, input: ad.youtubeInput } });
+        else if (!ad.youtubeVideoId) add('error', at + '.video', 'youtube_missing', who + ' needs a YouTube video (a link or the 11-character id). Google video ads play videos from YouTube.', { params: { n: j + 1, group: grp.name } });
+        if (!ad.headlines.some((x) => x.length <= G_DGV.HEADLINE) || ad.headlines.length > G_DGV.MAX) add('error', at + '.headlines', 'dgv_headlines', who + ' needs 1 to 5 headlines of up to 40 characters.', { params: { n: j + 1, group: grp.name } });
+        if (!ad.longHeadlines.some((x) => x.length <= G_DGV.LONG) || ad.longHeadlines.length > G_DGV.MAX) add('error', at + '.longHeadlines', 'dgv_long_headlines', who + ' needs 1 to 5 long headlines of up to 90 characters.', { params: { n: j + 1, group: grp.name } });
+        if (!ad.descriptions.some((x) => x.length <= G_DGV.DESCRIPTION) || ad.descriptions.length > G_DGV.MAX) add('error', at + '.descriptions', 'dgv_descriptions', who + ' needs 1 to 5 descriptions of up to 90 characters.', { params: { n: j + 1, group: grp.name } });
+      }));
+      add('info', 'creative.video', 'google_video_route', 'Google Video campaigns can’t be created through the Google Ads API, so OrivenAI publishes YouTube video ads as a Demand Gen campaign (video responsive ads on YouTube, Discover and Gmail).');
     } else {
       if (!a.businessName) add('error', 'assets.businessName', 'business_name_missing', 'Add your company name in your business profile. Google requires a business name for this campaign type.');
       else if (a.businessName.length > G.BUSINESS_NAME) add('warning', 'assets.businessName', 'business_name_long', 'Google shows at most 25 characters of the business name; it will be shortened.');
@@ -741,6 +893,8 @@ function validate(spec, ctx) {
     if (!spec.identity.identityId) add('error', 'identity.tiktok', 'tiktok_identity', 'Choose the TikTok account your ads run under, in Connections → TikTok Ads.');
     if (spec.identity.identityType === 'BC_AUTH_TT') add('error', 'identity.tiktok', 'tiktok_identity_bc', 'This TikTok identity needs Business Center authorisation, which OrivenAI doesn’t support yet. Choose another linked TikTok account.');
     spec.adGroups.forEach((grp, i) => grp.ads.forEach((ad, j) => { if (!ad.adText) add('error', `adGroups[${i}].ads[${j}].adText`, 'copy_missing', 'Ad ' + (j + 1) + ' has no ad text.', { variant: 'tiktok', params: { n: j + 1 } }); }));
+    if (spec.structure && spec.structure.explicit && spec.creative.format === 'VIDEO') spec.adGroups.forEach((grp, i) => grp.ads.forEach((ad, j) => { const v = ad.videoUrl || spec.creative.videoUrl; if (!v || !/^https?:\/\//i.test(String(v))) add('error', `adGroups[${i}].ads[${j}].video`, 'video_missing', 'Ad ' + (j + 1) + ' in ' + grp.name + ' has no video (stored online).', { variant: 'tiktok', params: { n: j + 1, group: grp.name } }); }));
+    if (spec.campaign.objective === 'VIDEO_VIEWS') add('info', 'campaign.objective', 'tiktok_video_views', 'Video Views: TikTok optimises for video views and charges per view (CPV).');
   }
 
   if (p === 'pinterest') {
@@ -755,6 +909,11 @@ function validate(spec, ctx) {
     if (spec.creative.format === 'VIDEO' && !/^https?:\/\//i.test(String(spec.creative.videoUrl || ''))) add('error', 'creative.video', 'video_not_online', 'The video isn’t stored online, so Pinterest can’t fetch it. Generate or upload the video again.', { params: { platform: 'Pinterest' } });
     if (spec.creative.format === 'IMAGE' && !spec.creative.imageUrl) add('error', 'creative.image', 'image_missing', 'Add an image. Pinterest ads are Pins.', { variant: 'pinterest' });
     if (!spec.pin.title) add('error', 'pin.title', 'pin_title', 'The Pin needs a title.');
+    if (spec.structure && spec.structure.explicit) spec.adGroups.forEach((grp, i) => grp.ads.forEach((ad, j) => {
+      if (!ad.pin || !ad.pin.title) add('error', `adGroups[${i}].ads[${j}].title`, 'pin_title', 'Pin ' + (j + 1) + ' in ' + grp.name + ' needs a title.');
+      else if (ad.pin.titleLong) add('warning', `adGroups[${i}].ads[${j}].title`, 'pin_title_long', 'Pin ' + (j + 1) + ': Pinterest titles are at most 100 characters; it will be shortened.', { params: { n: j + 1 } });
+      if (spec.creative.format === 'VIDEO' ? !(ad.videoUrl || spec.creative.videoUrl) : !(ad.imageUrl || spec.creative.imageUrl)) add('error', `adGroups[${i}].ads[${j}].media`, 'pin_media', 'Pin ' + (j + 1) + ' in ' + grp.name + ' needs ' + (spec.creative.format === 'VIDEO' ? 'a video.' : 'an image.'), { variant: spec.creative.format === 'VIDEO' ? 'video' : 'image', params: { n: j + 1, group: grp.name } });
+    }));
     if (!spec.targeting.languages.length) add('info', 'targeting.languages', 'pinterest_language', 'Pinterest shows the ad to everyone in the chosen countries; OrivenAI doesn’t send a language restriction to Pinterest.', { variant: 'none' });
     else add('info', 'targeting.languages', 'pinterest_language', 'Pinterest language targeting isn’t sent by OrivenAI; your ad reaches everyone in the chosen countries.');
   }
@@ -778,6 +937,9 @@ function validate(spec, ctx) {
       if (!spec.creative.imageUrl) add('error', 'creative.image', 'image_missing', 'Add an image. Snapchat ads are full-screen images or videos.', { variant: 'snapchat' });
       else add('info', 'creative.image', 'snapchat_image_frame', 'Snapchat ads fill the phone screen (1080 × 1920). OrivenAI places each image whole on a blurred full-screen background; nothing is cut off.');
     }
+    if (spec.structure && spec.structure.explicit) spec.adGroups.forEach((grp, i) => grp.ads.forEach((ad, j) => {
+      if (spec.creative.format === 'VIDEO' ? !(ad.videoUrl || spec.creative.videoUrl) : !(ad.imageUrl || spec.creative.imageUrl)) add('error', `adGroups[${i}].ads[${j}].media`, 'snap_media', 'Ad ' + (j + 1) + ' in ' + grp.name + ' needs ' + (spec.creative.format === 'VIDEO' ? 'a video.' : 'an image.'), { variant: spec.creative.format === 'VIDEO' ? 'video' : 'image', params: { n: j + 1, group: grp.name } });
+    }));
     if (!spec.identity.brandName && !spec.identity.profileId) add('error', 'identity.brandName', 'snapchat_brand', 'Add your company name in your business profile. Snapchat shows it as the brand name on the ad.');
     else if (spec.identity.brandNameLong) add('warning', 'identity.brandName', 'snapchat_brand_long', 'Snapchat shows at most ' + L.BRAND + ' characters of the brand name; it will be shortened to “' + spec.identity.brandName + '”.', { params: { name: spec.identity.brandName } });
     if (!spec.identity.profileId) add('warning', 'identity.profileId', 'snapchat_profile', 'No Snapchat Public Profile is set. Snapchat may require one on ads; add your Public Profile ID in Ad Platforms → Snapchat Ads if Snapchat rejects the ad.');
@@ -792,11 +954,13 @@ function validate(spec, ctx) {
   // the same check /api/ai/create-ad runs before charging. Issues the
   // platform blocks above already explain in more detail are not repeated.
   {
+    // Google YouTube video ads (Demand Gen) are validated above; for the shared check they count as Demand Gen visual ads.
     const fmt = p === 'google' ? (spec.campaignType === 'SEARCH' ? 'text' : 'image') : String((spec.creative && spec.creative.format) || 'IMAGE').toLowerCase();
     const cc = createCompat.check({ platform: p, campaignType: spec.campaignType, goal, format: fmt, objective: p === 'pinterest' ? (spec.pinterestObjective || null) : null });
     for (const iss of cc.issues || []) {
       if ((p === 'tiktok' || p === 'snapchat') && (iss.field === 'goal' || iss.field === 'format')) continue;
       if (p === 'google' && iss.field === 'campaignType') continue;
+      if (p === 'meta' && iss.field === 'format' && spec.creative.format === 'VIDEO') continue; // manual-only format, validated above
       add('error', 'compat.' + iss.field, 'compat_' + iss.code, (iss.message + ' ' + (iss.suggestion || '')).trim(), { params: { reason: iss.reason || iss.code } });
     }
   }
@@ -1116,6 +1280,22 @@ payloads.meta = {
   },
   creative(spec, ad, ids) {
     const link = spec.tracking.destinationUrl;
+    if (spec.creative.format === 'VIDEO') {
+      // Video ad: the video from the ad account's library (advideos) with a
+      // thumbnail (required) — Meta's own thumbnail, uploaded as an image hash.
+      const v = ad.videoUrl || spec.creative.videoUrl;
+      const videoData = {
+        video_id: ids.videoIds[v],
+        image_hash: ids.thumbHashes[v],
+        message: ad.primaryText,
+        title: ad.headline,
+        call_to_action: { type: metaCta(ad.cta), value: { link } },
+      };
+      if (ad.description) videoData.link_description = ad.description;
+      const vstory = { page_id: spec.identity.pageId, video_data: videoData };
+      if (spec.identity.instagramUserId) vstory.instagram_user_id = spec.identity.instagramUserId;
+      return { name: ad.name + ' — Creative', object_story_spec: vstory, url_tags: spec.tracking.urlParams };
+    }
     const linkData = {
       link,
       message: ad.primaryText,
@@ -1196,6 +1376,33 @@ payloads.google = {
     const longHeadline = (a.longHeadline && a.longHeadline.length <= G.PMAX_LONG_HEADLINE ? a.longHeadline : (a.descriptions.find((d) => d.length <= G.PMAX_LONG_HEADLINE) || headlines[0] || spec.campaign.name)).slice(0, G.PMAX_LONG_HEADLINE);
     return { headlines, descriptions, longHeadline, businessName: (a.businessName || '').slice(0, G.BUSINESS_NAME) };
   },
+  // Display: one DISPLAY_STANDARD ad group per group, a responsive display ad per ad.
+  displayAdGroup(spec, i, campaignResourceName) { return { name: spec.adGroups[i].name, campaign: campaignResourceName, status: 'ENABLED', type: 'DISPLAY_STANDARD' }; },
+  responsiveDisplayAd(spec, ad, ids, adGroupResourceName) {
+    const rda = {
+      headlines: ad.headlines.filter((h) => h.length <= G_DISPLAY.HEADLINE).slice(0, G_DISPLAY.MAX_H).map((text) => ({ text })),
+      longHeadline: { text: ad.longHeadline.slice(0, G_DISPLAY.LONG) },
+      descriptions: ad.descriptions.filter((d) => d.length <= G_DISPLAY.DESCRIPTION).slice(0, G_DISPLAY.MAX_D).map((text) => ({ text })),
+      businessName: (spec.assets.businessName || '').slice(0, G.BUSINESS_NAME),
+      marketingImages: [{ asset: ids.landscape }],
+      squareMarketingImages: [{ asset: ids.square }],
+    };
+    if (ids.logo) rda.squareLogoImages = [{ asset: ids.logo }];
+    return { adGroup: adGroupResourceName, status: 'ENABLED', ad: { responsiveDisplayAd: rda, finalUrls: [spec.tracking.destinationUrl] } };
+  },
+  // YouTube video ads through Demand Gen (DemandGenVideoResponsiveAdInfo: videos and logo required since v24).
+  youtubeAsset(spec, videoId) { return { name: spec.campaign.name + ' — YouTube ' + videoId, type: 'YOUTUBE_VIDEO', youtubeVideoAsset: { youtubeVideoId: videoId } }; },
+  demandGenVideoAd(spec, ad, ids, adGroupResourceName) {
+    const t = (arr, max, n) => arr.filter((x) => x.length <= max).slice(0, n).map((text) => ({ text }));
+    return { adGroup: adGroupResourceName, status: 'ENABLED', ad: { demandGenVideoResponsiveAd: {
+      headlines: t(ad.headlines, G_DGV.HEADLINE, G_DGV.MAX),
+      longHeadlines: t(ad.longHeadlines, G_DGV.LONG, G_DGV.MAX),
+      descriptions: t(ad.descriptions, G_DGV.DESCRIPTION, G_DGV.MAX),
+      videos: [{ asset: ids.videos[ad.youtubeVideoId] }],
+      logoImages: [{ asset: ids.logoAsset }],
+      businessName: { text: (spec.assets.businessName || '').slice(0, G.BUSINESS_NAME) },
+    }, finalUrls: [spec.tracking.destinationUrl] } };
+  },
   demandGenAd(spec, ids, adGroupResourceName) {
     const a = spec.assets;
     const ad = {
@@ -1249,8 +1456,9 @@ payloads.tiktok = {
     return { advertiser_id: advertiserId, adgroup_id: String(adGroupId), creatives: [{
       ad_name: ad.name,
       ad_format: 'SINGLE_VIDEO',
-      video_id: ids.videoId,
-      image_ids: [ids.coverImageId],
+      // Each ad its own video (and cover) when it has one; otherwise the campaign's.
+      video_id: (ids.videoIds && ids.videoIds[ad.videoUrl || spec.creative.videoUrl]) || ids.videoId,
+      image_ids: [(ids.coverIds && ids.coverIds[ad.videoUrl || spec.creative.videoUrl]) || ids.coverImageId],
       ad_text: ad.adText,
       call_to_action: campaignGoals.tiktokCtaType(ad.cta),
       landing_page_url: withParams(spec.tracking.destinationUrl, spec.tracking.urlParams),
@@ -1368,5 +1576,5 @@ module.exports = {
   META_PLACEMENTS, PINTEREST_CONVERSION_EVENTS, GOOGLE_SNIPPET_HEADERS, TIKTOK_MIN_ADGROUP_DAILY, SUPPORT, LIVE_UNVERIFIED, G,
   SNAPCHAT_MIN_DAILY: SNAP.LIMITS.MIN_DAILY,
   parseCountries, parseLanguages, isEu, countryName, validUrl,
-  buildSpec, validate, hasErrors, applyChanges, payloads, summary, metaCta, withParams, budgetOf, destinationOf,
+  buildSpec, validate, hasErrors, applyChanges, payloads, summary, metaCta, withParams, budgetOf, destinationOf, STRUCTURE_LIMITS, limitsFor, youtubeId, G_DISPLAY, G_DGV,
 };

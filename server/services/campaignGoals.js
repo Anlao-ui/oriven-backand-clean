@@ -190,6 +190,16 @@ function tiktokCtaType(ctaText) {
 // split (GOOGLE_GOAL_CONFIG above), all four goals converge on Maximize
 // Conversions here; goals are differentiated by copy/targeting rather
 // than bidding strategy for this channel type.
+// ── Google Ads — Display campaign bidding per goal (responsive display ads) ──
+// Display supports Maximize conversions and Maximize clicks (target spend).
+// Awareness isn't offered for Display in OrivenAI (its CPM strategies need a
+// bid amount OrivenAI doesn't ask for) — Demand Gen or Performance Max cover it.
+const GOOGLE_DISPLAY_GOAL_CONFIG = {
+  Sales:   { biddingField: 'maximizeConversions', biddingValue: {}, label: 'Display — Sales' },
+  Leads:   { biddingField: 'maximizeConversions', biddingValue: {}, label: 'Display — Leads' },
+  Traffic: { biddingField: 'targetSpend',         biddingValue: {}, label: 'Display — Traffic' },
+};
+
 const GOOGLE_DEMANDGEN_GOAL_CONFIG = {
   Sales:     { biddingField: 'maximizeConversions', biddingValue: {}, label: 'Demand Gen — Sales' },
   Leads:     { biddingField: 'maximizeConversions', biddingValue: {}, label: 'Demand Gen — Leads' },
@@ -334,6 +344,7 @@ module.exports = {
   GOAL_CREATIVE_DIRECTION,
   GOOGLE_GOAL_CONFIG,
   GOOGLE_DEMANDGEN_GOAL_CONFIG,
+  GOOGLE_DISPLAY_GOAL_CONFIG,
   GOOGLE_PMAX_GOAL_CONFIG,
   GOOGLE_GOAL_CAMPAIGN_TYPES,
   getGoogleCampaignOptions,

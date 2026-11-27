@@ -9,7 +9,7 @@
 // so /about, /faq, /blog, /pricing, /case-studies and every other prerendered
 // page answered "Not found" unless the .html file was opened directly.
 //
-// This middleware mirrors those two rules and nothing else:
+// This middleware mirrors those two rules (and Netlify's frame header):
 //   • 200 rewrites from _redirects (re-read when the file changes, since
 //     tools/seo/prerender.js regenerates it), except /app, /signup and /login,
 //     which this backend already serves itself, and anything with a query;
@@ -52,6 +52,12 @@ module.exports = function localFrontendRoutes(frontendDir) {
     if (req.method !== 'GET' && req.method !== 'HEAD') return next();
     const p = req.path;
     if (p.startsWith('/api/') || p.startsWith('/auth/')) return next();
+    // Frontend pages may be framed by the same site, as Netlify allows in
+    // production (oriven-frontend/_headers: X-Frame-Options SAMEORIGIN):
+    // /demo shows /demo-app in an iframe. server.js sends DENY on every
+    // response, which made the local demo frame say “localhost refused to
+    // connect”. The API keeps DENY.
+    res.setHeader('X-Frame-Options', 'SAMEORIGIN');
     const qs = req.url.slice(req.url.indexOf('?') >= 0 ? req.url.indexOf('?') : req.url.length);
     const resolve = function (q) {
       if (OWN_ROUTES.has(q)) return null; // the backend serves these itself

@@ -26,6 +26,8 @@ function check(name, cond, detail) { if (cond) { pass++; console.log('PASS — '
 if (!fs.existsSync(path.join(FRONTEND, '_redirects'))) { console.log('SKIP — oriven-frontend not found next to the backend (set FRONTEND_DIR)'); process.exit(0); }
 
 const app = express();
+// Same global headers as server.js (no framing), so the demo-frame override is tested against them.
+app.use((req, res, next) => { res.setHeader('X-Frame-Options', 'DENY'); next(); });
 app.use(require('../localFrontendRoutes')(FRONTEND));
 app.use(express.static(FRONTEND));
 // The backend's own routes (stand-ins with a marker, so we can see they were reached untouched).
@@ -45,6 +47,13 @@ const title = (t) => (t.match(/<title>([^<]*)/) || [])[1] || t.slice(0, 40);
   const srv = app.listen(PORT);
   await new Promise((r) => srv.once('listening', r));
   const get = async (u, opts) => { const r = await fetch(BASE + u, Object.assign({ redirect: 'manual' }, opts)); return { status: r.status, location: r.headers.get('location'), body: await r.text() }; };
+
+  // 0. The /demo page frames /demo-app (same site): allowed, as on Netlify; the API stays unframeable.
+  for (const u of ['/demo', '/demo-app', '/demo-app?view=create', '/app.html']) {
+    const r = await fetch(BASE + u, { redirect: 'manual' });
+    check(`${u} → X-Frame-Options SAMEORIGIN (the demo frame loads; no “localhost refused to connect”)`, r.headers.get('x-frame-options') === 'SAMEORIGIN', { status: r.status, xfo: r.headers.get('x-frame-options') });
+  }
+  { const r = await fetch(BASE + '/api/ping'); check('/api/* keeps X-Frame-Options DENY', r.headers.get('x-frame-options') === 'DENY', r.headers.get('x-frame-options')); }
 
   // A. Blog (the reported failure)
   for (const u of ['/blog', '/blog/', '/blog.html', '/blog?ref=nav']) {
